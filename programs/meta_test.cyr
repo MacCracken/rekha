@@ -1,0 +1,86 @@
+# programs/meta_test.cyr — RUN test for head/maxp metadata + loca->glyf spans.
+#
+# Builds a synthetic font (head, maxp, loca, glyf) and checks unitsPerEm, loca
+# format, glyph count, and glyph->span resolution incl. empty + out-of-range
+# glyphs. Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 256;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+
+    # offset table: 4 tables (dir @12, 64 bytes -> tables @76)
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    # dir: head@76/54, maxp@130/32, loca@162/8, glyf@170/60
+    put_u32(buf, 12, 0x68656164);  put_u32(buf, 12 + 8, 76);  put_u32(buf, 12 + 12, 54);
+    put_u32(buf, 28, 0x6D617870);  put_u32(buf, 28 + 8, 130); put_u32(buf, 28 + 12, 32);
+    put_u32(buf, 44, 0x6C6F6361);  put_u32(buf, 44 + 8, 162); put_u32(buf, 44 + 12, 8);
+    put_u32(buf, 60, 0x676C7966);  put_u32(buf, 60 + 8, 170); put_u32(buf, 60 + 12, 60);
+
+    # head: unitsPerEm @ +18 = 2048, indexToLocFormat @ +50 = 0 (short)
+    put_u16(buf, 76 + 18, 2048);
+    put_u16(buf, 76 + 50, 0);
+    # maxp: numGlyphs @ +4 = 3
+    put_u16(buf, 130 + 4, 3);
+    # loca (short, 4 entries): 0, 10, 10, 30 -> byte offsets 0, 20, 20, 60
+    put_u16(buf, 162 + 0, 0);
+    put_u16(buf, 162 + 2, 10);
+    put_u16(buf, 162 + 4, 10);
+    put_u16(buf, 162 + 6, 30);
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+    check(rekha_units_per_em(f), 2048);
+    check(rekha_loca_format(f), 0);
+    check(rekha_glyph_count(f), 3);
+
+    var out = alloc(16);
+    # glyph 0: span [0,20) -> start 170, len 20
+    check(rekha_glyf_span(f, 0, out), 1);
+    check(load64(out), 170);
+    check(load64(out + 8), 20);
+    # glyph 1: empty (20 == 20)
+    check(rekha_glyf_span(f, 1, out), 0);
+    # glyph 2: span [20,60) -> start 190, len 40
+    check(rekha_glyf_span(f, 2, out), 1);
+    check(load64(out), 190);
+    check(load64(out + 8), 40);
+    # glyph 3: out of range
+    check(rekha_glyf_span(f, 3, out), 0);
+
+    if (g_fails == 0) {
+        var ok = "meta_test: PASS (head/maxp/loca spans)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "meta_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

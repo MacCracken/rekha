@@ -70,12 +70,11 @@ enum RekhaPathVerb {
 # glyf access — count + load + path emit.
 # ================================================================
 
-# Number of glyphs in the font (from 'maxp' numGlyphs).
-#
-# TODO(v0.2): read maxp via rekha_find_table(font, 'maxp') and return
-# the numGlyphs u16 at maxp+4. Stub reports 0.
+# Number of glyphs in the font (maxp.numGlyphs — u16 at maxp+4).
 fn rekha_glyph_count(font): i64 {
-    return 0;
+    var maxp = rekha_find_table(font, REKHA_TAG_MAXP);
+    if (maxp == 0) { return 0; }
+    return rekha_rd_u16(rekha_font_data(font), maxp + 4);
 }
 
 # Load glyph `gid`'s outline out of the 'glyf' table.

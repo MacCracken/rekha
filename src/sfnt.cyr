@@ -28,7 +28,17 @@ var REKHA_SFNT_OFFTAB_LEN = 12;   # offset table (header) byte length
 var REKHA_SFNT_DIRENT_LEN = 16;   # one table-directory entry byte length
 
 var REKHA_SFNT_VER_TT   = 65536;      # 0x00010000 — TrueType outlines
+var REKHA_SFNT_VER_TRUE = 0x74727565; # 'true' — Apple TrueType
 # 'OTTO' = 0x4F54544F — OpenType/CFF outlines (rekha loads glyf, so v0.2 only)
+
+# Table tags — 4 ASCII bytes packed big-endian into an i64.
+var REKHA_TAG_HEAD = 0x68656164;   # 'head'
+var REKHA_TAG_MAXP = 0x6D617870;   # 'maxp'
+var REKHA_TAG_LOCA = 0x6C6F6361;   # 'loca'
+var REKHA_TAG_GLYF = 0x676C7966;   # 'glyf'
+var REKHA_TAG_CMAP = 0x636D6170;   # 'cmap'
+var REKHA_TAG_HHEA = 0x68686561;   # 'hhea'
+var REKHA_TAG_HMTX = 0x686D7478;   # 'hmtx'
 
 # ================================================================
 # Big-endian byte readers — SFNT is big-endian on every field.
@@ -79,25 +89,24 @@ fn rekha_font_dir_off(f): i64    { return load64(f + 32); }
 # (sfntVersion + numTables) and records the table-directory offset.
 # Returns a RekhaFont pointer, or 0 on OOM.
 #
-# TODO(v0.2): full validation — reject len < 12, reject sfntVersion not
-# in {0x00010000,'true','OTTO'}, bound numTables so
-# dir_off + numTables*16 <= len, and surface RekhaErr codes
-# (BAD_SFNT / TRUNCATED) instead of a bare 0. Right now this fills the
-# struct shape from the header without rejecting malformed input.
+# Validates: len >= 12, sfntVersion in {0x00010000, 'true'} (OTTO/CFF is
+# v0.x-deferred), and the whole table directory fits within `len`. Returns 0
+# on any of those (or OOM) — the caller treats 0 as "not a usable TrueType
+# font". (Surfacing distinct RekhaErr codes is a later refinement.)
 fn rekha_font_open(buf, len): i64 {
-    var f = alloc(REKHA_FONT_SIZE);
-    if (f == 0) {
-        return 0;
+    if (len < REKHA_SFNT_OFFTAB_LEN) { return 0; }
+    var ver = rekha_rd_u32(buf, 0);
+    if (ver != REKHA_SFNT_VER_TT) {
+        if (ver != REKHA_SFNT_VER_TRUE) { return 0; }
     }
+    var n = rekha_rd_u16(buf, 4);
+    # the directory (numTables entries) must lie within the file
+    if (REKHA_SFNT_OFFTAB_LEN + n * REKHA_SFNT_DIRENT_LEN > len) { return 0; }
+
+    var f = alloc(REKHA_FONT_SIZE);
+    if (f == 0) { return 0; }
     store64(f, buf);
     store64(f + 8, len);
-
-    var ver = 0;
-    var n = 0;
-    if (len >= REKHA_SFNT_OFFTAB_LEN) {
-        ver = rekha_rd_u32(buf, 0);
-        n = rekha_rd_u16(buf, 4);
-    }
     store64(f + 16, ver);
     store64(f + 24, n);
     store64(f + 32, REKHA_SFNT_OFFTAB_LEN);
@@ -108,12 +117,113 @@ fn rekha_font_open(buf, len): i64 {
 # 'glyf' = 0x676C7966). Returns the table's byte offset within the font
 # data, or 0 if the tag is not present in the directory.
 #
-# TODO(v0.2): walk the numTables directory entries, compare each entry's
-# u32 tag against `tag`, and on match return its offset field (dirent +8)
-# after bounds-checking offset+length <= len. This stub always reports
-# "not found".
+# Walks the directory, matches the u32 tag, and returns the table's byte
+# offset — but ONLY after bounds-checking that offset..offset+length lies
+# within the font (a lying directory entry must not hand out an OOB span).
+# Returns 0 if the tag is absent or its span is out of bounds.
 fn rekha_find_table(f, tag): i64 {
-    # TODO(v0.2): iterate rekha_font_num_tables(f) dir entries at
-    #   rekha_font_dir_off(f) + i*REKHA_SFNT_DIRENT_LEN and match `tag`.
+    var buf = rekha_font_data(f);
+    var len = rekha_font_len(f);
+    var n = rekha_font_num_tables(f);
+    var dir = rekha_font_dir_off(f);
+    var i = 0;
+    while (i < n) {
+        var ent = dir + i * REKHA_SFNT_DIRENT_LEN;
+        if (rekha_rd_u32(buf, ent) == tag) {
+            var off = rekha_rd_u32(buf, ent + 8);
+            var tlen = rekha_rd_u32(buf, ent + 12);
+            if (off > len) { return 0; }
+            if (off + tlen > len) { return 0; }
+            return off;
+        }
+        i = i + 1;
+    }
     return 0;
+}
+
+# Like rekha_find_table but also returns the table LENGTH via out-slot
+# `len_out` (an 8-byte cell). Returns the offset (or 0 if absent/OOB, with
+# *len_out = 0). Needed where a table's extent bounds a later parse (loca).
+fn rekha_find_table_len(f, tag, len_out): i64 {
+    store64(len_out, 0);
+    var buf = rekha_font_data(f);
+    var len = rekha_font_len(f);
+    var n = rekha_font_num_tables(f);
+    var dir = rekha_font_dir_off(f);
+    var i = 0;
+    while (i < n) {
+        var ent = dir + i * REKHA_SFNT_DIRENT_LEN;
+        if (rekha_rd_u32(buf, ent) == tag) {
+            var off = rekha_rd_u32(buf, ent + 8);
+            var tlen = rekha_rd_u32(buf, ent + 12);
+            if (off > len) { return 0; }
+            if (off + tlen > len) { return 0; }
+            store64(len_out, tlen);
+            return off;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# Font metadata — head + maxp.
+# ================================================================
+
+# head.unitsPerEm (u16 at head+18) — the em-square size; glyph coords are in
+# these design units and the consumer scales by pixel_size / unitsPerEm.
+# Returns 0 if head is absent.
+fn rekha_units_per_em(font): i64 {
+    var head = rekha_find_table(font, REKHA_TAG_HEAD);
+    if (head == 0) { return 0; }
+    return rekha_rd_u16(rekha_font_data(font), head + 18);
+}
+
+# head.indexToLocFormat (at head+50): 0 = short loca (u16 offsets, doubled),
+# 1 = long loca (u32 offsets). Returns 0 (short) if head is absent.
+fn rekha_loca_format(font): i64 {
+    var head = rekha_find_table(font, REKHA_TAG_HEAD);
+    if (head == 0) { return 0; }
+    return rekha_rd_u16(rekha_font_data(font), head + 50);
+}
+
+# ================================================================
+# loca -> glyf span: resolve glyph `gid` to its byte range in the glyf table.
+# `out` is a 16-byte cell: out+0 = absolute file offset of the glyph's glyf
+# entry, out+8 = its length. Returns 1 if the glyph has an outline, 0 if the
+# gid is out of range, the glyph is empty (e.g. space: loca[gid]==loca[gid+1]),
+# a needed table is absent, or a span/loca read would fall out of bounds.
+# ================================================================
+fn rekha_glyf_span(font, gid, out): i64 {
+    store64(out, 0);
+    store64(out + 8, 0);
+    if (gid < 0) { return 0; }
+    if (gid >= rekha_glyph_count(font)) { return 0; }
+    var loca = rekha_find_table(font, REKHA_TAG_LOCA);
+    if (loca == 0) { return 0; }
+    var glyf = rekha_find_table(font, REKHA_TAG_GLYF);
+    if (glyf == 0) { return 0; }
+    var buf = rekha_font_data(font);
+    var flen = rekha_font_len(font);
+    var fmt = rekha_loca_format(font);
+
+    var o0 = 0;
+    var o1 = 0;
+    if (fmt == 0) {
+        # short: two u16 offsets (bytes = value*2); need loca[gid+1] readable
+        if (loca + (gid + 1) * 2 + 2 > flen) { return 0; }
+        o0 = rekha_rd_u16(buf, loca + gid * 2) * 2;
+        o1 = rekha_rd_u16(buf, loca + (gid + 1) * 2) * 2;
+    } else {
+        if (loca + (gid + 1) * 4 + 4 > flen) { return 0; }
+        o0 = rekha_rd_u32(buf, loca + gid * 4);
+        o1 = rekha_rd_u32(buf, loca + (gid + 1) * 4);
+    }
+    if (o1 <= o0) { return 0; }        # empty glyph
+    var start = glyf + o0;
+    var glen = o1 - o0;
+    if (start + glen > flen) { return 0; }
+    store64(out, start);
+    store64(out + 8, glen);
+    return 1;
 }

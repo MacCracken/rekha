@@ -1,0 +1,86 @@
+# programs/sfnt_test.cyr — RUN test for the SFNT table directory parse.
+#
+# Builds a synthetic SFNT header + directory in memory and checks table lookup
+# plus rejection of malformed / out-of-bounds input (font bytes are untrusted).
+# Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 300;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+
+    # offset table: TrueType, 2 tables
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 2);
+    # dir entry 0 @ 12: 'head' offset 100 len 54
+    put_u32(buf, 12 + 0, 0x68656164);
+    put_u32(buf, 12 + 8, 100);
+    put_u32(buf, 12 + 12, 54);
+    # dir entry 1 @ 28: 'glyf' offset 200 len 50
+    put_u32(buf, 28 + 0, 0x676C7966);
+    put_u32(buf, 28 + 8, 200);
+    put_u32(buf, 28 + 12, 50);
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+    check(rekha_font_num_tables(f), 2);
+    check(rekha_font_sfnt_ver(f), 65536);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 100);
+    check(rekha_find_table(f, REKHA_TAG_GLYF), 200);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 0);   # absent
+
+    # find_table_len returns both offset and length
+    var lo = alloc(8);
+    check(rekha_find_table_len(f, REKHA_TAG_GLYF, lo), 200);
+    check(load64(lo), 50);
+    check(rekha_find_table_len(f, REKHA_TAG_MAXP, lo), 0);
+    check(load64(lo), 0);
+
+    # --- rejection cases ---
+    check(rekha_font_open(buf, 5), 0);          # too short
+    put_u32(buf, 0, 0xDEADBEEF);
+    check(rekha_font_open(buf, len), 0);        # bad sfntVersion
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 100);                        # directory overruns len
+    check(rekha_font_open(buf, len), 0);
+    put_u16(buf, 4, 2);
+    put_u32(buf, 28 + 8, 5000);                  # lying glyf offset (OOB)
+    var f2 = rekha_font_open(buf, len);
+    check(rekha_find_table(f2, REKHA_TAG_GLYF), 0);
+    put_u32(buf, 28 + 8, 200);
+
+    if (g_fails == 0) {
+        var ok = "sfnt_test: PASS (table directory)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "sfnt_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
