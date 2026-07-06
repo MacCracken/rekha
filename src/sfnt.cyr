@@ -69,6 +69,15 @@ fn rekha_rd_i16(buf, off): i64 {
     return v;
 }
 
+# Read a signed 8-bit value (composite-glyph byte args).
+fn rekha_rd_i8(buf, off): i64 {
+    var v = load8(buf + off);
+    if (v >= 128) {
+        return v - 256;
+    }
+    return v;
+}
+
 # ================================================================
 # RekhaFont — parsed SFNT handle (40 bytes).
 #   +0   data        (ptr — the raw font byte buffer, borrowed not owned)

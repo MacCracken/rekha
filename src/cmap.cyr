@@ -1,0 +1,97 @@
+# @internal — cmap: Unicode codepoint -> glyph id.
+#
+# cmap.cyr — finds a Unicode BMP subtable (platform 3 / encoding 1, or the
+# generic platform 0) and parses format 4 (segment mapping to delta values),
+# the near-universal BMP encoding. Returns .notdef (0) for anything unmapped.
+# Every read is bounds-checked against the (untrusted) font length.
+#
+# cmap table:  +0 version u16, +2 numTables u16, then numTables encoding
+#   records (8 bytes: platformID u16, encodingID u16, offset u32 from cmap).
+# format 4 subtable: format(2) length(2) language(2) segCountX2(2)
+#   searchRange(2) entrySelector(2) rangeShift(2) endCode[segCount] u16
+#   reservedPad(2) startCode[segCount] idDelta[segCount] idRangeOffset[segCount]
+#   glyphIdArray[].
+
+# Find a usable Unicode format-4 subtable; returns its absolute offset, or 0.
+fn rekha_cmap_subtable(font): i64 {
+    var cmap = rekha_find_table(font, REKHA_TAG_CMAP);
+    if (cmap == 0) { return 0; }
+    var buf = rekha_font_data(font);
+    var flen = rekha_font_len(font);
+    if (cmap + 4 > flen) { return 0; }
+    var ntab = rekha_rd_u16(buf, cmap + 2);
+    var best = 0;
+    var i = 0;
+    while (i < ntab) {
+        var rec = cmap + 4 + i * 8;
+        if (rec + 8 > flen) { return best; }
+        var plat = rekha_rd_u16(buf, rec + 0);
+        var enc = rekha_rd_u16(buf, rec + 2);
+        var sub = cmap + rekha_rd_u32(buf, rec + 4);
+        var want = 0;
+        if (plat == 3) {
+            if (enc == 1) { want = 1; }   # Windows Unicode BMP
+        }
+        if (plat == 0) { want = 1; }      # Unicode (any)
+        if (want != 0) {
+            if (sub + 2 <= flen) {
+                if (rekha_rd_u16(buf, sub) == 4) { best = sub; }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# @public — map a Unicode codepoint `cp` to a glyph id via the cmap format-4
+# subtable. Returns 0 (.notdef) if unmapped, beyond the BMP, or no subtable.
+fn rekha_char_to_glyph(font, cp): i64 {
+    if (cp < 0) { return 0; }
+    if (cp > 65535) { return 0; }          # format 4 is BMP-only
+    var sub = rekha_cmap_subtable(font);
+    if (sub == 0) { return 0; }
+    var buf = rekha_font_data(font);
+    var flen = rekha_font_len(font);
+    if (sub + 14 > flen) { return 0; }
+
+    var segc2 = rekha_rd_u16(buf, sub + 6);
+    var segc = segc2 / 2;
+    if (segc == 0) { return 0; }
+    var end_arr = sub + 14;
+    var start_arr = end_arr + segc2 + 2;    # +reservedPad
+    var delta_arr = start_arr + segc2;
+    var range_arr = delta_arr + segc2;
+    if (range_arr + segc2 > flen) { return 0; }
+
+    # first segment whose endCode >= cp
+    var seg = 0 - 1;
+    var i = 0;
+    while (i < segc) {
+        if (rekha_rd_u16(buf, end_arr + i * 2) >= cp) {
+            seg = i;
+            i = segc;
+        } else {
+            i = i + 1;
+        }
+    }
+    if (seg < 0) { return 0; }
+
+    var startc = rekha_rd_u16(buf, start_arr + seg * 2);
+    if (startc > cp) { return 0; }          # cp falls in a gap -> .notdef
+    var delta = rekha_rd_i16(buf, delta_arr + seg * 2);
+    var ro = rekha_rd_u16(buf, range_arr + seg * 2);
+    if (ro == 0) {
+        return (cp + delta) & 65535;
+    }
+    # idRangeOffset is self-relative from its own slot in idRangeOffset[]
+    var gidx = range_arr + seg * 2 + ro + (cp - startc) * 2;
+    if (gidx + 2 > flen) { return 0; }
+    var gid = rekha_rd_u16(buf, gidx);
+    if (gid == 0) { return 0; }
+    return (gid + delta) & 65535;
+}
+
+# @public — codepoint -> a positioned sadish SdPath (cmap + glyf + convert).
+fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
+    return rekha_glyph_to_sdpath(font, rekha_char_to_glyph(font, cp), scale, ox, oy);
+}

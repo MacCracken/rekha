@@ -5,6 +5,26 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - unreleased
+
+Text, not just glyphs: cmap maps characters to glyph ids, and composite glyphs
+(accented letters etc.) decode. 6 RUN tests.
+
+### Added
+- **cmap format 4** (`rekha_char_to_glyph`, `rekha_char_to_sdpath`) — Unicode
+  BMP codepoint → glyph id via the segment-mapping subtable (platform 3/enc 1
+  or platform 0): delta + idRangeOffset segments, gaps → .notdef, beyond-BMP →
+  .notdef. `rekha_char_to_sdpath` is the one-call character → positioned sadish
+  path. Bounds-checked. (`cmap_test`.)
+- **Composite glyphs** — `rekha_load_glyph` now handles numberOfContours < 0:
+  component records recursively load the referenced glyphs (depth-guarded),
+  apply the F2Dot14 2×2 transform + x/y offset, and merge into one outline. The
+  simple-glyph body split out to `rekha_load_simple`. (`composite_test`.)
+
+### Deferred
+- cmap formats 12 (full Unicode) / 6 / 0; point-matching composite args;
+  OpenType/CFF (`OTTO`); WOFF/WOFF2; hinting.
+
 ## [0.2.0] - 2026-07-05
 
 Real TrueType parsing, end to end: a font's bytes now become a filled glyph via

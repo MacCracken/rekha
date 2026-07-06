@@ -24,6 +24,7 @@ modules = [
     "src/error.cyr",
     "src/sfnt.cyr",
     "src/glyf.cyr",
+    "src/cmap.cyr",
 ]
 
 [deps]

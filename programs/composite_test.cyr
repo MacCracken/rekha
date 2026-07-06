@@ -1,0 +1,117 @@
+# programs/composite_test.cyr — RUN test for composite glyph decode.
+#
+# Font with glyph 0 = a simple triangle, glyph 1 = a composite that references
+# glyph 0 with an (dx,dy) offset (identity transform). Loading glyph 1 must
+# yield the triangle's points translated by (dx,dy). Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 256;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+
+    # tables: head@76/54 maxp@130/32 loca@162/6 glyf@168/44
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 130, 32);
+    dir_entry(buf, 44, 0x6C6F6361, 162, 6);
+    dir_entry(buf, 60, 0x676C7966, 168, 44);
+
+    put_u16(buf, 76 + 18, 1000);       # unitsPerEm
+    put_u16(buf, 76 + 50, 0);          # short loca
+    put_u16(buf, 130 + 4, 2);          # numGlyphs = 2
+    # loca (short): glyph0 [0,26), glyph1 [26,44)
+    put_u16(buf, 162 + 0, 0);
+    put_u16(buf, 162 + 2, 13);         # 26 bytes
+    put_u16(buf, 162 + 4, 22);         # 44 bytes
+
+    # glyph 0 @168: triangle (10,10)(90,10)(50,90), all on-curve
+    var g = 168;
+    put_u16(buf, g + 0, 1);
+    put_u16(buf, g + 2, 10);
+    put_u16(buf, g + 4, 10);
+    put_u16(buf, g + 6, 90);
+    put_u16(buf, g + 8, 90);
+    put_u16(buf, g + 10, 2);
+    put_u16(buf, g + 12, 0);
+    store8(buf + g + 14, 0x01);
+    store8(buf + g + 15, 0x21);
+    store8(buf + g + 16, 0x03);
+    put_u16(buf, g + 17, 10);
+    put_u16(buf, g + 19, 80);
+    store8(buf + g + 21, 40);
+    put_u16(buf, g + 22, 10);
+    put_u16(buf, g + 24, 80);
+
+    # glyph 1 @194: composite -> glyph 0 offset by (100, 200)
+    var c = 194;
+    put_u16(buf, c + 0, 0xFFFF);       # numberOfContours = -1 (composite)
+    put_u16(buf, c + 2, 0);            # bbox
+    put_u16(buf, c + 4, 0);
+    put_u16(buf, c + 6, 0);
+    put_u16(buf, c + 8, 0);
+    # component: flags = ARGS_ARE_XY_VALUES|ARG_1_AND_2_ARE_WORDS (0x03), no MORE
+    put_u16(buf, c + 10, 0x03);
+    put_u16(buf, c + 12, 0);           # glyphIndex = 0
+    put_u16(buf, c + 14, 100);         # arg1 = dx
+    put_u16(buf, c + 16, 200);         # arg2 = dy
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+    check(rekha_glyph_count(f), 2);
+
+    var o = rekha_load_glyph(f, 1);
+    check(rekha_outline_n_contours(o), 1);
+    check(rekha_outline_n_points(o), 3);
+    var xs = rekha_outline_xs(o);
+    var ys = rekha_outline_ys(o);
+    # triangle translated by (100, 200)
+    check(load64(xs + 0), 110);
+    check(load64(ys + 0), 210);
+    check(load64(xs + 8), 190);
+    check(load64(ys + 8), 210);
+    check(load64(xs + 16), 150);
+    check(load64(ys + 16), 290);
+
+    if (g_fails == 0) {
+        var ok = "composite_test: PASS (composite glyph merge)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "composite_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

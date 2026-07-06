@@ -1,0 +1,89 @@
+# programs/cmap_test.cyr — RUN test for cmap format-4 codepoint -> glyph id.
+#
+# Builds a font with a Windows-Unicode-BMP (plat 3/enc 1) format-4 subtable:
+# one delta segment mapping 'A'(0x41)->1, 'B'(0x42)->2, plus the mandatory
+# 0xFFFF terminator segment. Checks mapped chars, gaps, and beyond-BMP.
+# Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 128;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+
+    # offset table: 1 table (cmap @28, len 44)
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 1);
+    put_u32(buf, 12, 0x636D6170);
+    put_u32(buf, 12 + 8, 28);
+    put_u32(buf, 12 + 12, 44);
+
+    # cmap @28: version 0, numTables 1
+    put_u16(buf, 28 + 0, 0);
+    put_u16(buf, 28 + 2, 1);
+    # encoding record @ 28+4: platform 3, encoding 1, subtable offset 12
+    put_u16(buf, 28 + 4, 3);
+    put_u16(buf, 28 + 6, 1);
+    put_u32(buf, 28 + 8, 12);
+
+    # format-4 subtable @ 40 (= 28 + 12), 32 bytes
+    var s = 40;
+    put_u16(buf, s + 0, 4);        # format
+    put_u16(buf, s + 2, 32);       # length
+    put_u16(buf, s + 4, 0);        # language
+    put_u16(buf, s + 6, 4);        # segCountX2 (segCount = 2)
+    put_u16(buf, s + 8, 4);        # searchRange
+    put_u16(buf, s + 10, 1);       # entrySelector
+    put_u16(buf, s + 12, 0);       # rangeShift
+    put_u16(buf, s + 14, 0x42);    # endCode[0]
+    put_u16(buf, s + 16, 0xFFFF);  # endCode[1] (terminator)
+    put_u16(buf, s + 18, 0);       # reservedPad
+    put_u16(buf, s + 20, 0x41);    # startCode[0]
+    put_u16(buf, s + 22, 0xFFFF);  # startCode[1]
+    put_u16(buf, s + 24, 0xFFC0);  # idDelta[0] = -64
+    put_u16(buf, s + 26, 1);       # idDelta[1]
+    put_u16(buf, s + 28, 0);       # idRangeOffset[0]
+    put_u16(buf, s + 30, 0);       # idRangeOffset[1]
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+    check(rekha_char_to_glyph(f, 0x41), 1);      # 'A' -> 1
+    check(rekha_char_to_glyph(f, 0x42), 2);      # 'B' -> 2
+    check(rekha_char_to_glyph(f, 0x43), 0);      # 'C' -> gap -> .notdef
+    check(rekha_char_to_glyph(f, 0x40), 0);      # '@' -> below startCode -> .notdef
+    check(rekha_char_to_glyph(f, 0x10000), 0);   # beyond BMP
+
+    if (g_fails == 0) {
+        var ok = "cmap_test: PASS (codepoint -> glyph id)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "cmap_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

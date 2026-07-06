@@ -154,6 +154,15 @@ fn rekha_rd_i16(buf, off): i64 {
     return v;
 }
 
+# Read a signed 8-bit value (composite-glyph byte args).
+fn rekha_rd_i8(buf, off): i64 {
+    var v = load8(buf + off);
+    if (v >= 128) {
+        return v - 256;
+    }
+    return v;
+}
+
 # ================================================================
 # RekhaFont — parsed SFNT handle (40 bytes).
 #   +0   data        (ptr — the raw font byte buffer, borrowed not owned)
@@ -394,25 +403,12 @@ fn rekha_glyph_count(font): i64 {
     return rekha_rd_u16(rekha_font_data(font), maxp + 4);
 }
 
-# Load glyph `gid`'s outline out of the 'glyf' table into a RekhaOutline.
-# In-memory arrays are i64 (xs/ys/end_pts) + u8 (on_curve), NOT the on-disk
-# packing. Coords are absolute (delta-decoded) in font design units. Returns
-# an EMPTY outline for a space/empty glyph, a composite (numberOfContours < 0,
-# deferred), an out-of-range gid, OR any malformed / out-of-bounds read — the
-# parser never reads past the glyph's span. Returns 0 only on OOM.
-fn rekha_load_glyph(font, gid): i64 {
-    var span = alloc(16);
-    if (rekha_glyf_span(font, gid, span) == 0) {
-        return rekha_outline_empty();
-    }
-    var start = load64(span);
-    var end = start + load64(span + 8);   # exclusive byte limit
+# Parse a SIMPLE glyph (numberOfContours nc > 0) spanning [start, end). Arrays
+# are i64 (xs/ys/end_pts) + u8 (on_curve); coords are absolute (delta-decoded)
+# design units. Every read is bounds-checked; returns an empty outline on any
+# malformed / out-of-bounds read.
+fn rekha_load_simple(font, start, end, nc): i64 {
     var buf = rekha_font_data(font);
-
-    if (start + 10 > end) { return rekha_outline_empty(); }
-    var nc = rekha_rd_i16(buf, start);
-    if (nc <= 0) { return rekha_outline_empty(); }   # composite / empty -> deferred
-
     var p = start + 10;                    # skip numberOfContours(2) + bbox(8)
     if (p + nc * 2 > end) { return rekha_outline_empty(); }
     var end_pts = alloc(nc * 8);
@@ -421,18 +417,17 @@ fn rekha_load_glyph(font, gid): i64 {
     while (i < nc) {
         var ep = rekha_rd_u16(buf, p + i * 2);
         store64(end_pts + i * 8, ep);
-        np = ep + 1;                       # last endPt + 1 = total point count
+        np = ep + 1;
         i = i + 1;
     }
     p = p + nc * 2;
 
     if (p + 2 > end) { return rekha_outline_empty(); }
     var instr_len = rekha_rd_u16(buf, p);
-    p = p + 2 + instr_len;                 # skip instructions
+    p = p + 2 + instr_len;
     if (p > end) { return rekha_outline_empty(); }
     if (np <= 0) { return rekha_outline_empty(); }
 
-    # ---- flags (run-length; bit3 REPEAT_FLAG) ----
     var flags = alloc(np);
     var on_curve = alloc(np);
     var fi = 0;
@@ -459,20 +454,19 @@ fn rekha_load_glyph(font, gid): i64 {
         }
     }
 
-    # ---- x coords (bit1 X_SHORT, bit4 X_SAME_OR_POSITIVE) ----
     var xs = alloc(np * 8);
     var x = 0;
     var xi = 0;
     while (xi < np) {
-        var fl = load8(flags + xi);
+        var fx = load8(flags + xi);
         var dx = 0;
-        if ((fl & 2) != 0) {
+        if ((fx & 2) != 0) {
             if (p >= end) { return rekha_outline_empty(); }
             dx = load8(buf + p);
             p = p + 1;
-            if ((fl & 16) == 0) { dx = 0 - dx; }
+            if ((fx & 16) == 0) { dx = 0 - dx; }
         } else {
-            if ((fl & 16) == 0) {
+            if ((fx & 16) == 0) {
                 if (p + 2 > end) { return rekha_outline_empty(); }
                 dx = rekha_rd_i16(buf, p);
                 p = p + 2;
@@ -483,20 +477,19 @@ fn rekha_load_glyph(font, gid): i64 {
         xi = xi + 1;
     }
 
-    # ---- y coords (bit2 Y_SHORT, bit5 Y_SAME_OR_POSITIVE) ----
     var ys = alloc(np * 8);
     var y = 0;
     var yi = 0;
     while (yi < np) {
-        var fl = load8(flags + yi);
+        var fy = load8(flags + yi);
         var dy = 0;
-        if ((fl & 4) != 0) {
+        if ((fy & 4) != 0) {
             if (p >= end) { return rekha_outline_empty(); }
             dy = load8(buf + p);
             p = p + 1;
-            if ((fl & 32) == 0) { dy = 0 - dy; }
+            if ((fy & 32) == 0) { dy = 0 - dy; }
         } else {
-            if ((fl & 32) == 0) {
+            if ((fy & 32) == 0) {
                 if (p + 2 > end) { return rekha_outline_empty(); }
                 dy = rekha_rd_i16(buf, p);
                 p = p + 2;
@@ -515,6 +508,142 @@ fn rekha_load_glyph(font, gid): i64 {
     store64(o + 32, ys);
     store64(o + 40, on_curve);
     return o;
+}
+
+# Composite-glyph caps (also bound pathological / adversarial fonts).
+var REKHA_COMPOSITE_MAXP     = 4096;
+var REKHA_COMPOSITE_MAXC     = 128;
+var REKHA_COMPOSITE_MAXDEPTH = 5;
+
+# Parse a COMPOSITE glyph (numberOfContours < 0): a sequence of component
+# records, each a glyph reference + a 2x2 F2Dot14 transform + x/y offset.
+# Recursively loads each component (depth-guarded), applies the transform, and
+# merges the transformed points/contours into one outline. Bounds-checked.
+fn rekha_load_composite(font, start, end, depth): i64 {
+    var buf = rekha_font_data(font);
+    var p = start + 10;
+    var xs = alloc(REKHA_COMPOSITE_MAXP * 8);
+    var ys = alloc(REKHA_COMPOSITE_MAXP * 8);
+    var oc = alloc(REKHA_COMPOSITE_MAXP);
+    var eps = alloc(REKHA_COMPOSITE_MAXC * 8);
+    var tot_pts = 0;
+    var tot_ctr = 0;
+    var more = 1;
+    while (more != 0) {
+        if (p + 4 > end) {
+            more = 0;
+        } else {
+            var flags = rekha_rd_u16(buf, p);
+            var cgid = rekha_rd_u16(buf, p + 2);
+            p = p + 4;
+            var arg1 = 0;
+            var arg2 = 0;
+            if ((flags & 1) != 0) {                # ARG_1_AND_2_ARE_WORDS
+                if (p + 4 > end) { return rekha_outline_empty(); }
+                arg1 = rekha_rd_i16(buf, p);
+                arg2 = rekha_rd_i16(buf, p + 2);
+                p = p + 4;
+            } else {
+                if (p + 2 > end) { return rekha_outline_empty(); }
+                arg1 = rekha_rd_i8(buf, p);
+                arg2 = rekha_rd_i8(buf, p + 1);
+                p = p + 2;
+            }
+            var xx = 16384;                        # 1.0 in F2Dot14 (identity)
+            var xy = 0;
+            var yx = 0;
+            var yy = 16384;
+            if ((flags & 8) != 0) {                # WE_HAVE_A_SCALE
+                if (p + 2 > end) { return rekha_outline_empty(); }
+                xx = rekha_rd_i16(buf, p);
+                yy = xx;
+                p = p + 2;
+            } else {
+                if ((flags & 64) != 0) {           # WE_HAVE_AN_X_AND_Y_SCALE
+                    if (p + 4 > end) { return rekha_outline_empty(); }
+                    xx = rekha_rd_i16(buf, p);
+                    yy = rekha_rd_i16(buf, p + 2);
+                    p = p + 4;
+                } else {
+                    if ((flags & 128) != 0) {      # WE_HAVE_A_TWO_BY_TWO
+                        if (p + 8 > end) { return rekha_outline_empty(); }
+                        xx = rekha_rd_i16(buf, p);
+                        xy = rekha_rd_i16(buf, p + 2);
+                        yx = rekha_rd_i16(buf, p + 4);
+                        yy = rekha_rd_i16(buf, p + 6);
+                        p = p + 8;
+                    }
+                }
+            }
+            var dx = 0;
+            var dy = 0;
+            if ((flags & 2) != 0) {                # ARGS_ARE_XY_VALUES
+                dx = arg1;
+                dy = arg2;
+            }
+            var co = rekha_load_glyph_d(font, cgid, depth + 1);
+            var cnp = rekha_outline_n_points(co);
+            var cnc = rekha_outline_n_contours(co);
+            var cxs = rekha_outline_xs(co);
+            var cys = rekha_outline_ys(co);
+            var coc = rekha_outline_on_curve(co);
+            var ceps = rekha_outline_end_pts(co);
+            var base = tot_pts;
+            var j = 0;
+            while (j < cnp) {
+                if (tot_pts < REKHA_COMPOSITE_MAXP) {
+                    var cpx = load64(cxs + j * 8);
+                    var cpy = load64(cys + j * 8);
+                    store64(xs + tot_pts * 8, (xx * cpx + yx * cpy) / 16384 + dx);
+                    store64(ys + tot_pts * 8, (xy * cpx + yy * cpy) / 16384 + dy);
+                    store8(oc + tot_pts, load8(coc + j));
+                    tot_pts = tot_pts + 1;
+                }
+                j = j + 1;
+            }
+            var k = 0;
+            while (k < cnc) {
+                if (tot_ctr < REKHA_COMPOSITE_MAXC) {
+                    store64(eps + tot_ctr * 8, load64(ceps + k * 8) + base);
+                    tot_ctr = tot_ctr + 1;
+                }
+                k = k + 1;
+            }
+            if ((flags & 32) == 0) { more = 0; }   # no MORE_COMPONENTS
+        }
+    }
+    if (tot_ctr == 0) { return rekha_outline_empty(); }
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    store64(o + 0, tot_ctr);
+    store64(o + 8, tot_pts);
+    store64(o + 16, eps);
+    store64(o + 24, xs);
+    store64(o + 32, ys);
+    store64(o + 40, oc);
+    return o;
+}
+
+# Depth-guarded glyph load: dispatch simple (nc>0) vs composite (nc<0).
+fn rekha_load_glyph_d(font, gid, depth): i64 {
+    if (depth > REKHA_COMPOSITE_MAXDEPTH) { return rekha_outline_empty(); }
+    var span = alloc(16);
+    if (rekha_glyf_span(font, gid, span) == 0) {
+        return rekha_outline_empty();
+    }
+    var start = load64(span);
+    var end = start + load64(span + 8);
+    var buf = rekha_font_data(font);
+    if (start + 10 > end) { return rekha_outline_empty(); }
+    var nc = rekha_rd_i16(buf, start);
+    if (nc == 0) { return rekha_outline_empty(); }
+    if (nc > 0) { return rekha_load_simple(font, start, end, nc); }
+    return rekha_load_composite(font, start, end, depth);
+}
+
+# @public — load glyph `gid`'s outline (simple OR composite) into a
+# RekhaOutline. Empty for space / malformed / out-of-range; 0 only on OOM.
+fn rekha_load_glyph(font, gid): i64 {
+    return rekha_load_glyph_d(font, gid, 0);
 }
 
 # ================================================================
@@ -629,4 +758,104 @@ fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
     var o = rekha_load_glyph(font, gid);
     if (o == 0) { return sd_path_new(); }
     return rekha_outline_to_sdpath(o, scale, ox, oy);
+}
+
+# --- cmap.cyr ---
+
+# @internal — cmap: Unicode codepoint -> glyph id.
+#
+# cmap.cyr — finds a Unicode BMP subtable (platform 3 / encoding 1, or the
+# generic platform 0) and parses format 4 (segment mapping to delta values),
+# the near-universal BMP encoding. Returns .notdef (0) for anything unmapped.
+# Every read is bounds-checked against the (untrusted) font length.
+#
+# cmap table:  +0 version u16, +2 numTables u16, then numTables encoding
+#   records (8 bytes: platformID u16, encodingID u16, offset u32 from cmap).
+# format 4 subtable: format(2) length(2) language(2) segCountX2(2)
+#   searchRange(2) entrySelector(2) rangeShift(2) endCode[segCount] u16
+#   reservedPad(2) startCode[segCount] idDelta[segCount] idRangeOffset[segCount]
+#   glyphIdArray[].
+
+# Find a usable Unicode format-4 subtable; returns its absolute offset, or 0.
+fn rekha_cmap_subtable(font): i64 {
+    var cmap = rekha_find_table(font, REKHA_TAG_CMAP);
+    if (cmap == 0) { return 0; }
+    var buf = rekha_font_data(font);
+    var flen = rekha_font_len(font);
+    if (cmap + 4 > flen) { return 0; }
+    var ntab = rekha_rd_u16(buf, cmap + 2);
+    var best = 0;
+    var i = 0;
+    while (i < ntab) {
+        var rec = cmap + 4 + i * 8;
+        if (rec + 8 > flen) { return best; }
+        var plat = rekha_rd_u16(buf, rec + 0);
+        var enc = rekha_rd_u16(buf, rec + 2);
+        var sub = cmap + rekha_rd_u32(buf, rec + 4);
+        var want = 0;
+        if (plat == 3) {
+            if (enc == 1) { want = 1; }   # Windows Unicode BMP
+        }
+        if (plat == 0) { want = 1; }      # Unicode (any)
+        if (want != 0) {
+            if (sub + 2 <= flen) {
+                if (rekha_rd_u16(buf, sub) == 4) { best = sub; }
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+# @public — map a Unicode codepoint `cp` to a glyph id via the cmap format-4
+# subtable. Returns 0 (.notdef) if unmapped, beyond the BMP, or no subtable.
+fn rekha_char_to_glyph(font, cp): i64 {
+    if (cp < 0) { return 0; }
+    if (cp > 65535) { return 0; }          # format 4 is BMP-only
+    var sub = rekha_cmap_subtable(font);
+    if (sub == 0) { return 0; }
+    var buf = rekha_font_data(font);
+    var flen = rekha_font_len(font);
+    if (sub + 14 > flen) { return 0; }
+
+    var segc2 = rekha_rd_u16(buf, sub + 6);
+    var segc = segc2 / 2;
+    if (segc == 0) { return 0; }
+    var end_arr = sub + 14;
+    var start_arr = end_arr + segc2 + 2;    # +reservedPad
+    var delta_arr = start_arr + segc2;
+    var range_arr = delta_arr + segc2;
+    if (range_arr + segc2 > flen) { return 0; }
+
+    # first segment whose endCode >= cp
+    var seg = 0 - 1;
+    var i = 0;
+    while (i < segc) {
+        if (rekha_rd_u16(buf, end_arr + i * 2) >= cp) {
+            seg = i;
+            i = segc;
+        } else {
+            i = i + 1;
+        }
+    }
+    if (seg < 0) { return 0; }
+
+    var startc = rekha_rd_u16(buf, start_arr + seg * 2);
+    if (startc > cp) { return 0; }          # cp falls in a gap -> .notdef
+    var delta = rekha_rd_i16(buf, delta_arr + seg * 2);
+    var ro = rekha_rd_u16(buf, range_arr + seg * 2);
+    if (ro == 0) {
+        return (cp + delta) & 65535;
+    }
+    # idRangeOffset is self-relative from its own slot in idRangeOffset[]
+    var gidx = range_arr + seg * 2 + ro + (cp - startc) * 2;
+    if (gidx + 2 > flen) { return 0; }
+    var gid = rekha_rd_u16(buf, gidx);
+    if (gid == 0) { return 0; }
+    return (gid + delta) & 65535;
+}
+
+# @public — codepoint -> a positioned sadish SdPath (cmap + glyf + convert).
+fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
+    return rekha_glyph_to_sdpath(font, rekha_char_to_glyph(font, cp), scale, ox, oy);
 }
