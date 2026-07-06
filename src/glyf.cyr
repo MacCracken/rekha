@@ -77,16 +77,127 @@ fn rekha_glyph_count(font): i64 {
     return rekha_rd_u16(rekha_font_data(font), maxp + 4);
 }
 
-# Load glyph `gid`'s outline out of the 'glyf' table.
-# Returns a RekhaOutline pointer (an empty outline at v0.1), or 0 on OOM.
-#
-# TODO(v0.2): locate loca (rekha_find_table 'loca') to get glyph gid's
-# byte span in glyf, parse numberOfContours + endPtsOfContours + the
-# run-length flag array + delta-decoded x/y coords into a RekhaOutline.
-# Handle composite glyphs (numberOfContours < 0) by recursion over the
-# component records. On a malformed entry surface REKHA_ERR_BAD_GLYF.
+# Load glyph `gid`'s outline out of the 'glyf' table into a RekhaOutline.
+# In-memory arrays are i64 (xs/ys/end_pts) + u8 (on_curve), NOT the on-disk
+# packing. Coords are absolute (delta-decoded) in font design units. Returns
+# an EMPTY outline for a space/empty glyph, a composite (numberOfContours < 0,
+# deferred), an out-of-range gid, OR any malformed / out-of-bounds read — the
+# parser never reads past the glyph's span. Returns 0 only on OOM.
 fn rekha_load_glyph(font, gid): i64 {
-    return rekha_outline_empty();
+    var span = alloc(16);
+    if (rekha_glyf_span(font, gid, span) == 0) {
+        return rekha_outline_empty();
+    }
+    var start = load64(span);
+    var end = start + load64(span + 8);   # exclusive byte limit
+    var buf = rekha_font_data(font);
+
+    if (start + 10 > end) { return rekha_outline_empty(); }
+    var nc = rekha_rd_i16(buf, start);
+    if (nc <= 0) { return rekha_outline_empty(); }   # composite / empty -> deferred
+
+    var p = start + 10;                    # skip numberOfContours(2) + bbox(8)
+    if (p + nc * 2 > end) { return rekha_outline_empty(); }
+    var end_pts = alloc(nc * 8);
+    var np = 0;
+    var i = 0;
+    while (i < nc) {
+        var ep = rekha_rd_u16(buf, p + i * 2);
+        store64(end_pts + i * 8, ep);
+        np = ep + 1;                       # last endPt + 1 = total point count
+        i = i + 1;
+    }
+    p = p + nc * 2;
+
+    if (p + 2 > end) { return rekha_outline_empty(); }
+    var instr_len = rekha_rd_u16(buf, p);
+    p = p + 2 + instr_len;                 # skip instructions
+    if (p > end) { return rekha_outline_empty(); }
+    if (np <= 0) { return rekha_outline_empty(); }
+
+    # ---- flags (run-length; bit3 REPEAT_FLAG) ----
+    var flags = alloc(np);
+    var on_curve = alloc(np);
+    var fi = 0;
+    while (fi < np) {
+        if (p >= end) { return rekha_outline_empty(); }
+        var fl = load8(buf + p);
+        p = p + 1;
+        store8(flags + fi, fl);
+        store8(on_curve + fi, fl & 1);
+        fi = fi + 1;
+        if ((fl & 8) != 0) {
+            if (p >= end) { return rekha_outline_empty(); }
+            var rep = load8(buf + p);
+            p = p + 1;
+            var r = 0;
+            while (r < rep) {
+                if (fi < np) {
+                    store8(flags + fi, fl);
+                    store8(on_curve + fi, fl & 1);
+                    fi = fi + 1;
+                }
+                r = r + 1;
+            }
+        }
+    }
+
+    # ---- x coords (bit1 X_SHORT, bit4 X_SAME_OR_POSITIVE) ----
+    var xs = alloc(np * 8);
+    var x = 0;
+    var xi = 0;
+    while (xi < np) {
+        var fl = load8(flags + xi);
+        var dx = 0;
+        if ((fl & 2) != 0) {
+            if (p >= end) { return rekha_outline_empty(); }
+            dx = load8(buf + p);
+            p = p + 1;
+            if ((fl & 16) == 0) { dx = 0 - dx; }
+        } else {
+            if ((fl & 16) == 0) {
+                if (p + 2 > end) { return rekha_outline_empty(); }
+                dx = rekha_rd_i16(buf, p);
+                p = p + 2;
+            }
+        }
+        x = x + dx;
+        store64(xs + xi * 8, x);
+        xi = xi + 1;
+    }
+
+    # ---- y coords (bit2 Y_SHORT, bit5 Y_SAME_OR_POSITIVE) ----
+    var ys = alloc(np * 8);
+    var y = 0;
+    var yi = 0;
+    while (yi < np) {
+        var fl = load8(flags + yi);
+        var dy = 0;
+        if ((fl & 4) != 0) {
+            if (p >= end) { return rekha_outline_empty(); }
+            dy = load8(buf + p);
+            p = p + 1;
+            if ((fl & 32) == 0) { dy = 0 - dy; }
+        } else {
+            if ((fl & 32) == 0) {
+                if (p + 2 > end) { return rekha_outline_empty(); }
+                dy = rekha_rd_i16(buf, p);
+                p = p + 2;
+            }
+        }
+        y = y + dy;
+        store64(ys + yi * 8, y);
+        yi = yi + 1;
+    }
+
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    store64(o, nc);
+    store64(o + 8, np);
+    store64(o + 16, end_pts);
+    store64(o + 24, xs);
+    store64(o + 32, ys);
+    store64(o + 40, on_curve);
+    return o;
 }
 
 # Emit `outline` as a stream of path verbs into `sink`. `sink` is a

@@ -1,0 +1,108 @@
+# programs/glyf_test.cyr — RUN test for the glyf simple-glyph decoder.
+#
+# Embeds a synthetic 1-contour triangle glyph exercising three coord encodings:
+# 2-byte delta, Y_SAME (no bytes), and a negative X_SHORT. Verifies the decoded
+# absolute points, on-curve flags, and contour end. Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+# one 16-byte directory entry: tag, offset, length
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 256;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+
+    # offset table: 4 tables; head@76/54 maxp@130/32 loca@162/4 glyf@166/26
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 130, 32);
+    dir_entry(buf, 44, 0x6C6F6361, 162, 4);
+    dir_entry(buf, 60, 0x676C7966, 166, 26);
+
+    put_u16(buf, 76 + 18, 1000);   # unitsPerEm
+    put_u16(buf, 76 + 50, 0);      # short loca
+    put_u16(buf, 130 + 4, 1);      # numGlyphs = 1
+    put_u16(buf, 162 + 0, 0);      # loca[0] = 0
+    put_u16(buf, 162 + 2, 13);     # loca[1] = 13 (26 bytes)
+
+    # glyph @ 166: triangle 10,10 / 90,10 / 50,90 — all on-curve
+    var g = 166;
+    put_u16(buf, g + 0, 1);        # numberOfContours
+    put_u16(buf, g + 2, 10);       # bbox xMin
+    put_u16(buf, g + 4, 10);       # yMin
+    put_u16(buf, g + 6, 90);       # xMax
+    put_u16(buf, g + 8, 90);       # yMax
+    put_u16(buf, g + 10, 2);       # endPts[0] = 2 (3 points)
+    put_u16(buf, g + 12, 0);       # instructionLength = 0
+    store8(buf + g + 14, 0x01);    # p0: on-curve, 2-byte x + 2-byte y
+    store8(buf + g + 15, 0x21);    # p1: on-curve, 2-byte x, Y_SAME
+    store8(buf + g + 16, 0x03);    # p2: on-curve, X_SHORT negative, 2-byte y
+    put_u16(buf, g + 17, 10);      # x: p0 +10 (2B)
+    put_u16(buf, g + 19, 80);      # x: p1 +80 (2B)
+    store8(buf + g + 21, 40);      # x: p2 -40 (1B short)
+    put_u16(buf, g + 22, 10);      # y: p0 +10 (2B)
+    put_u16(buf, g + 24, 80);      # y: p2 +80 (2B); p1 same = no bytes
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+    check(rekha_glyph_count(f), 1);
+
+    var o = rekha_load_glyph(f, 0);
+    check(rekha_outline_n_contours(o), 1);
+    check(rekha_outline_n_points(o), 3);
+    check(load64(rekha_outline_end_pts(o) + 0), 2);
+
+    var xs = rekha_outline_xs(o);
+    var ys = rekha_outline_ys(o);
+    var oc = rekha_outline_on_curve(o);
+    check(load64(xs + 0), 10);
+    check(load64(ys + 0), 10);
+    check(load64(xs + 8), 90);     # 10 + 80
+    check(load64(ys + 8), 10);     # Y_SAME
+    check(load64(xs + 16), 50);    # 90 - 40 (short neg)
+    check(load64(ys + 16), 90);    # 10 + 80
+    check(load8(oc + 0), 1);
+    check(load8(oc + 1), 1);
+    check(load8(oc + 2), 1);
+
+    if (g_fails == 0) {
+        var ok = "glyf_test: PASS (simple-glyph decode)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "glyf_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
