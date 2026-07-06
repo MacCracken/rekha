@@ -1,0 +1,116 @@
+# @internal — glyf-table outline loader + the sadish path seam.
+# glyf.cyr — read a TrueType glyph's outline (contours of on-curve /
+# off-curve points) out of the 'glyf' table and emit it as a sequence of
+# path verbs (moveto / lineto / quadto / close) into a sink.
+#
+# rekha does NOT rasterize. It emits RESOLUTION-INDEPENDENT PATHS; the
+# `sadish` 2D vector core consumes those verbs and fills them to pixels.
+# This module is the seam between the two: rekha_outline_to_path walks a
+# RekhaOutline and calls the sink for each verb. sadish is the intended
+# consumer of that verb stream (deferred cross-dep — not wired at scaffold).
+#
+# TrueType glyf entry (per glyph, big-endian):
+#   +0  numberOfContours  i16  (>= 0 simple; < 0 composite)
+#   +2  xMin/yMin/xMax/yMax i16 x4 (bounding box)
+#   ... endPtsOfContours[numberOfContours] u16
+#   ... instructionLength u16 + instructions[]
+#   ... flags[] (run-length) then x-coords then y-coords (delta-encoded)
+# Glyph N's byte span within 'glyf' is loca[N]..loca[N+1] (the loca table).
+
+# ================================================================
+# RekhaOutline — a decoded glyph outline (48 bytes).
+# Point coords are in font design units (unitsPerEm space); the consumer
+# scales. Contour structure is captured as parallel arrays so
+# rekha_outline_to_path can reconstruct on-curve/off-curve runs into
+# quadratic segments.
+#
+#   +0   n_contours   (i64 — number of closed contours; 0 = empty glyph)
+#   +8   n_points     (i64 — total point count across all contours)
+#   +16  end_pts      (ptr — u16[n_contours] last-point index per contour, or 0)
+#   +24  xs           (ptr — i16[n_points] x coords in design units, or 0)
+#   +32  ys           (ptr — i16[n_points] y coords in design units, or 0)
+#   +40  on_curve     (ptr — u8[n_points] 1 = on-curve, 0 = off-curve, or 0)
+# ================================================================
+var REKHA_OUTLINE_SIZE = 48;
+
+fn rekha_outline_n_contours(o): i64 { return load64(o); }
+fn rekha_outline_n_points(o): i64   { return load64(o + 8); }
+fn rekha_outline_end_pts(o): i64    { return load64(o + 16); }
+fn rekha_outline_xs(o): i64         { return load64(o + 24); }
+fn rekha_outline_ys(o): i64         { return load64(o + 32); }
+fn rekha_outline_on_curve(o): i64   { return load64(o + 40); }
+
+# Allocate an empty outline (all fields zeroed). Returns 0 on OOM.
+fn rekha_outline_empty(): i64 {
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    if (o == 0) {
+        return 0;
+    }
+    store64(o, 0);
+    store64(o + 8, 0);
+    store64(o + 16, 0);
+    store64(o + 24, 0);
+    store64(o + 32, 0);
+    store64(o + 40, 0);
+    return o;
+}
+
+# ================================================================
+# Path verb opcodes — the sadish path-verb vocabulary rekha emits.
+# rekha_outline_to_path calls sink(verb, x, y) with these.
+# ================================================================
+enum RekhaPathVerb {
+    REKHA_VERB_MOVETO = 0;   # start a new contour at (x, y)
+    REKHA_VERB_LINETO = 1;   # straight edge to (x, y)
+    REKHA_VERB_QUADTO = 2;   # quadratic curve; control point delivered separately
+    REKHA_VERB_CLOSE  = 3;   # close the current contour (x, y ignored)
+}
+
+# ================================================================
+# glyf access — count + load + path emit.
+# ================================================================
+
+# Number of glyphs in the font (from 'maxp' numGlyphs).
+#
+# TODO(v0.2): read maxp via rekha_find_table(font, 'maxp') and return
+# the numGlyphs u16 at maxp+4. Stub reports 0.
+fn rekha_glyph_count(font): i64 {
+    return 0;
+}
+
+# Load glyph `gid`'s outline out of the 'glyf' table.
+# Returns a RekhaOutline pointer (an empty outline at v0.1), or 0 on OOM.
+#
+# TODO(v0.2): locate loca (rekha_find_table 'loca') to get glyph gid's
+# byte span in glyf, parse numberOfContours + endPtsOfContours + the
+# run-length flag array + delta-decoded x/y coords into a RekhaOutline.
+# Handle composite glyphs (numberOfContours < 0) by recursion over the
+# component records. On a malformed entry surface REKHA_ERR_BAD_GLYF.
+fn rekha_load_glyph(font, gid): i64 {
+    return rekha_outline_empty();
+}
+
+# Emit `outline` as a stream of path verbs into `sink`. `sink` is a
+# function pointer called as sink(ctx, verb, x, y) for each verb; `ctx`
+# is opaque caller state (the sadish path builder). Returns REKHA_OK,
+# or a RekhaErrCode on failure.
+#
+# This is THE rekha->sadish seam: rekha produces the verb stream, sadish
+# (the deferred cross-dep) consumes it to rasterize. Once wired, add
+# [deps.sadish] path="../sadish" and translate QUADTO into
+# sadish's quadratic-Bézier fill.
+#
+# TODO(v0.2): walk each contour's on-curve/off-curve point run:
+#   - emit MOVETO at the contour's first on-curve point (synthesizing a
+#     midpoint start if the contour opens off-curve — TrueType allows it),
+#   - fold consecutive off-curve points into implied on-curve midpoints,
+#   - emit QUADTO(control, endpoint) / LINETO per the on/off pattern,
+#   - emit CLOSE at contour end.
+fn rekha_outline_to_path(outline, sink, ctx): i64 {
+    # Empty outline (v0.1 skeleton) has nothing to emit.
+    if (rekha_outline_n_contours(outline) == 0) {
+        return REKHA_OK;
+    }
+    # TODO(v0.2): contour walk -> sink(ctx, verb, x, y) calls.
+    return REKHA_OK;
+}

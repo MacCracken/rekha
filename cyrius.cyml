@@ -1,0 +1,51 @@
+[package]
+name = "rekha"
+version = "${file:VERSION}"
+description = "rekha (रेखा — line/outline) — pure-Cyrius vector/outline font subsystem for AGNOS: TrueType/OpenType (SFNT) table parser + glyph-outline loader that emits paths for the sadish 2D vector core to rasterize. The scalable-typography sibling to kashi's bitmap glyphs."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/rekha"
+language = "cyrius"
+cyrius = "6.4.7"
+
+# rekha is a library — no CLI binary. `cyrius build` targets a smoke
+# program that links the full include chain to prove lib.cyr parses clean.
+# Consumers pull `dist/rekha.cyr` via a `[deps.rekha]` entry at a git tag.
+[build]
+entry = "programs/smoke.cyr"
+output = "build/rekha-smoke"
+
+# `[lib]` feeds `cyrius distlib` — module order matters: stdlib first
+# (declared in src/lib.cyr), then domain modules in dependency order.
+# error.cyr is dep-free; sfnt.cyr uses it; glyf.cyr sits atop sfnt.cyr.
+# Don't reorder without re-running `cyrius distlib` and verifying the
+# concatenated bundle still compiles clean.
+[lib]
+modules = [
+    "src/error.cyr",
+    "src/sfnt.cyr",
+    "src/glyf.cyr",
+]
+
+[deps]
+# Stdlib base set — byte readers + struct alloc + smoke banner + the
+# assert/bench harness. No inflate/thread here: SFNT tables are read
+# raw (uncompressed) at v0.1.0. WOFF/WOFF2 (which DO need sankoch
+# inflate + Brotli) are a later scope.
+stdlib = [
+    "string",
+    "fmt",
+    "alloc",
+    "io",
+    "vec",
+    "str",
+    "syscalls",
+    "assert",
+    "bench",
+]
+
+# Deferred cross-dep (NOT wired at scaffold): sadish is the rasterize
+# target — rekha emits glyph-outline PATHS (quad/line verbs); sadish
+# fills them. rekha does NOT bundle its own Bézier rasterizer. When
+# `rekha_outline_to_path` lands its real body (v0.2), add:
+#   [deps.sadish]
+#   path = "../sadish"

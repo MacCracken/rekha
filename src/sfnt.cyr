@@ -1,0 +1,119 @@
+# @internal — SFNT container parse (TrueType / OpenType table directory).
+# sfnt.cyr — turn untrusted font bytes into a RekhaFont: validate the
+# SFNT header (sfnt version + numTables) and expose the table directory
+# so glyf.cyr can locate head / cmap / glyf / loca / hhea.
+#
+# SFNT layout (Apple TT / OpenType spec, big-endian throughout):
+#   Offset table (12 bytes):
+#     +0  sfntVersion   u32  — 0x00010000 (TT) or 'OTTO' (CFF) or 'true'
+#     +4  numTables     u16
+#     +6  searchRange   u16
+#     +8  entrySelector u16
+#     +10 rangeShift    u16
+#   Table directory (numTables × 16 bytes), each:
+#     +0  tag           u32  — 4 ASCII bytes ('glyf','loca','head',…)
+#     +4  checkSum      u32
+#     +8  offset        u32  — byte offset of the table within the file
+#     +12 length        u32
+#
+# Every read is bounds-checked against `len` BEFORE the access — font
+# files are untrusted input and a byte-buffer parser must never read
+# out of bounds. (Full bounds enforcement lands in v0.2; the v0.1
+# skeleton reads the header shape only.)
+
+# ================================================================
+# SFNT constants
+# ================================================================
+var REKHA_SFNT_OFFTAB_LEN = 12;   # offset table (header) byte length
+var REKHA_SFNT_DIRENT_LEN = 16;   # one table-directory entry byte length
+
+var REKHA_SFNT_VER_TT   = 65536;      # 0x00010000 — TrueType outlines
+# 'OTTO' = 0x4F54544F — OpenType/CFF outlines (rekha loads glyf, so v0.2 only)
+
+# ================================================================
+# Big-endian byte readers — SFNT is big-endian on every field.
+# `buf` is a raw byte pointer; `off` is a byte offset into it.
+# Callers are responsible for bounds (validated at the parse boundary).
+# ================================================================
+
+# Read a big-endian unsigned 16-bit value.
+fn rekha_rd_u16(buf, off): i64 {
+    var b0 = load8(buf + off);
+    var b1 = load8(buf + off + 1);
+    return (b0 * 256) + b1;
+}
+
+# Read a big-endian unsigned 32-bit value.
+fn rekha_rd_u32(buf, off): i64 {
+    var hi = rekha_rd_u16(buf, off);
+    var lo = rekha_rd_u16(buf, off + 2);
+    return (hi * 65536) + lo;
+}
+
+# Read a big-endian signed 16-bit value (glyf coords are i16).
+fn rekha_rd_i16(buf, off): i64 {
+    var v = rekha_rd_u16(buf, off);
+    if (v >= 32768) {
+        return v - 65536;
+    }
+    return v;
+}
+
+# ================================================================
+# RekhaFont — parsed SFNT handle (40 bytes).
+#   +0   data        (ptr — the raw font byte buffer, borrowed not owned)
+#   +8   len         (i64 — byte length of `data`)
+#   +16  sfnt_ver    (i64 — sfntVersion u32; 0x00010000 = TrueType)
+#   +24  num_tables  (i64 — numTables from the offset table)
+#   +32  dir_off     (i64 — byte offset of the table directory = 12)
+# ================================================================
+var REKHA_FONT_SIZE = 40;
+
+fn rekha_font_data(f): i64       { return load64(f); }
+fn rekha_font_len(f): i64        { return load64(f + 8); }
+fn rekha_font_sfnt_ver(f): i64   { return load64(f + 16); }
+fn rekha_font_num_tables(f): i64 { return load64(f + 24); }
+fn rekha_font_dir_off(f): i64    { return load64(f + 32); }
+
+# Open a font from an in-memory (buf, len). Parses the SFNT offset table
+# (sfntVersion + numTables) and records the table-directory offset.
+# Returns a RekhaFont pointer, or 0 on OOM.
+#
+# TODO(v0.2): full validation — reject len < 12, reject sfntVersion not
+# in {0x00010000,'true','OTTO'}, bound numTables so
+# dir_off + numTables*16 <= len, and surface RekhaErr codes
+# (BAD_SFNT / TRUNCATED) instead of a bare 0. Right now this fills the
+# struct shape from the header without rejecting malformed input.
+fn rekha_font_open(buf, len): i64 {
+    var f = alloc(REKHA_FONT_SIZE);
+    if (f == 0) {
+        return 0;
+    }
+    store64(f, buf);
+    store64(f + 8, len);
+
+    var ver = 0;
+    var n = 0;
+    if (len >= REKHA_SFNT_OFFTAB_LEN) {
+        ver = rekha_rd_u32(buf, 0);
+        n = rekha_rd_u16(buf, 4);
+    }
+    store64(f + 16, ver);
+    store64(f + 24, n);
+    store64(f + 32, REKHA_SFNT_OFFTAB_LEN);
+    return f;
+}
+
+# Locate a table by its 4-byte tag (packed big-endian into an i64, e.g.
+# 'glyf' = 0x676C7966). Returns the table's byte offset within the font
+# data, or 0 if the tag is not present in the directory.
+#
+# TODO(v0.2): walk the numTables directory entries, compare each entry's
+# u32 tag against `tag`, and on match return its offset field (dirent +8)
+# after bounds-checking offset+length <= len. This stub always reports
+# "not found".
+fn rekha_find_table(f, tag): i64 {
+    # TODO(v0.2): iterate rekha_font_num_tables(f) dir entries at
+    #   rekha_font_dir_off(f) + i*REKHA_SFNT_DIRENT_LEN and match `tag`.
+    return 0;
+}

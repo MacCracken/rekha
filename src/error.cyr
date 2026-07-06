@@ -1,0 +1,75 @@
+# @public — stable API surface for rekha error handling.
+# error.cyr — rekha vector/outline font error codes + Result helpers.
+#
+# RekhaErr is a 16-byte record (code + optional detail pointer). Error
+# codes are integer constants; for errors that carry context (a message
+# pointer), use rekha_err_new(code, msg).
+#
+# RekhaErr struct layout (16 bytes):
+#   +0: code    — error code constant (one of the REKHA_* below)
+#   +8: detail  — pointer to detail string (or 0)
+
+# ================================================================
+# Error code constants
+# ================================================================
+
+enum RekhaErrCode {
+    REKHA_OK              = 0;   # no error
+    REKHA_ERR_OOM         = 1;   # allocation failed / cap hit
+    REKHA_ERR_BAD_SFNT    = 2;   # missing/corrupt SFNT header or table directory
+    REKHA_ERR_TRUNCATED   = 3;   # input ends before a table/field completes
+    REKHA_ERR_NO_TABLE    = 4;   # a required SFNT table (head/cmap/glyf/loca) is absent
+    REKHA_ERR_BAD_GLYF    = 5;   # malformed glyf entry (bad contour/point counts)
+    REKHA_ERR_UNSUPPORTED = 6;   # valid font but a feature rekha can't yet load
+    REKHA_ERR_OTHER       = 99;  # catch-all
+}
+
+# ================================================================
+# RekhaErr struct
+# ================================================================
+
+# Create a RekhaErr with code and an optional detail string (0 = none).
+fn rekha_err_new(code, detail): i64 {
+    var e = alloc(16);
+    store64(e, code);
+    store64(e + 8, detail);
+    return e;
+}
+
+# Create a RekhaErr with code only (no detail).
+fn rekha_err(code): i64 {
+    return rekha_err_new(code, 0);
+}
+
+# Get the error code.
+fn rekha_err_code(e): i64 {
+    return load64(e);
+}
+
+# Get the detail string pointer (or 0).
+fn rekha_err_detail(e): i64 {
+    return load64(e + 8);
+}
+
+# ================================================================
+# Error name lookup — returns a cstring (never null).
+# ================================================================
+
+fn rekha_err_name(code): i64 {
+    if (code == REKHA_OK)              { return "ok"; }
+    if (code == REKHA_ERR_OOM)         { return "out of memory"; }
+    if (code == REKHA_ERR_BAD_SFNT)    { return "bad SFNT header"; }
+    if (code == REKHA_ERR_TRUNCATED)   { return "truncated input"; }
+    if (code == REKHA_ERR_NO_TABLE)    { return "required table absent"; }
+    if (code == REKHA_ERR_BAD_GLYF)    { return "malformed glyf entry"; }
+    if (code == REKHA_ERR_UNSUPPORTED) { return "unsupported feature"; }
+    if (code == REKHA_ERR_OTHER)       { return "other error"; }
+    return "unknown error";
+}
+
+# Print an error name to stderr (fd 2).
+fn rekha_err_print_name(code): i64 {
+    var name = rekha_err_name(code);
+    syscall(1, 2, name, strlen(name));
+    return 0;
+}
