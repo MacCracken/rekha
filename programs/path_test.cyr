@@ -1,0 +1,162 @@
+# programs/path_test.cyr — RUN test for the rekha -> sadish seam.
+#
+# (1) End-to-end: parse a synthetic triangle glyph, convert to a sadish SdPath,
+#     fill it, and check coverage lands inside the triangle and not at corners.
+# (2) On/off-curve conversion: hand-built outlines produce the right sadish verb
+#     sequence (implied-midpoint between two consecutive off-curve points).
+# Exit code = failed checks. Validates that rekha consumes the sadish API.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+fn arr3(a, b, c): i64 {
+    var p = alloc(3 * 8);
+    store64(p + 0, a);
+    store64(p + 8, b);
+    store64(p + 16, c);
+    return p;
+}
+
+fn arr3b(a, b, c): i64 {
+    var p = alloc(3);
+    store8(p + 0, a);
+    store8(p + 1, b);
+    store8(p + 2, c);
+    return p;
+}
+
+fn arr4(a, b, c, d): i64 {
+    var p = alloc(4 * 8);
+    store64(p + 0, a);
+    store64(p + 8, b);
+    store64(p + 16, c);
+    store64(p + 24, d);
+    return p;
+}
+
+fn arr4b(a, b, c, d): i64 {
+    var p = alloc(4);
+    store8(p + 0, a);
+    store8(p + 1, b);
+    store8(p + 2, c);
+    store8(p + 3, d);
+    return p;
+}
+
+# build a 1-contour RekhaOutline from prebuilt parallel arrays
+fn mk_outline(npts, xs, ys, oc): i64 {
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    var eps = alloc(8);
+    store64(eps, npts - 1);
+    store64(o + 0, 1);
+    store64(o + 8, npts);
+    store64(o + 16, eps);
+    store64(o + 24, xs);
+    store64(o + 32, ys);
+    store64(o + 40, oc);
+    return o;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    # ---- (1) triangle glyph -> sadish path -> fill ----
+    var len = 256;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 130, 32);
+    dir_entry(buf, 44, 0x6C6F6361, 162, 4);
+    dir_entry(buf, 60, 0x676C7966, 166, 26);
+    put_u16(buf, 76 + 18, 1000);
+    put_u16(buf, 76 + 50, 0);
+    put_u16(buf, 130 + 4, 1);
+    put_u16(buf, 162 + 0, 0);
+    put_u16(buf, 162 + 2, 13);
+    var g = 166;
+    put_u16(buf, g + 0, 1);
+    put_u16(buf, g + 2, 10);
+    put_u16(buf, g + 4, 10);
+    put_u16(buf, g + 6, 90);
+    put_u16(buf, g + 8, 90);
+    put_u16(buf, g + 10, 2);
+    put_u16(buf, g + 12, 0);
+    store8(buf + g + 14, 0x01);
+    store8(buf + g + 15, 0x21);
+    store8(buf + g + 16, 0x03);
+    put_u16(buf, g + 17, 10);
+    put_u16(buf, g + 19, 80);
+    store8(buf + g + 21, 40);
+    put_u16(buf, g + 22, 10);
+    put_u16(buf, g + 24, 80);
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+    # scale 1/16 px per unit, y-flip origin at 6px -> triangle fits an 8x8 canvas
+    var path = rekha_glyph_to_sdpath(f, 0, SD_ONE / 16, 0, 6 * SD_ONE);
+    var cv = sd_canvas_new(8, 8);
+    sd_canvas_fill_path(cv, path, SD_FILL_NONZERO);
+    if (sd_canvas_coverage_at(cv, 3, 3) <= 0) { g_fails = g_fails + 1; }   # interior
+    check(sd_canvas_coverage_at(cv, 0, 0), 0);
+    check(sd_canvas_coverage_at(cv, 7, 7), 0);
+    check(sd_canvas_coverage_at(cv, 7, 0), 0);
+
+    # ---- (2a) on/off/on -> MOVETO, QUADTO, CLOSE ----
+    var o1 = mk_outline(3, arr3(0, 2, 4), arr3(0, 4, 0), arr3b(1, 0, 1));
+    var p1 = rekha_outline_to_sdpath(o1, SD_ONE, 0, 0);
+    check(sd_path_verb_count(p1), 3);
+    var v1 = load64(p1 + SD_PATH_VERBS_OFFSET);
+    check(load64(v1 + 0), SD_VERB_MOVETO);
+    check(load64(v1 + 8), SD_VERB_QUADTO);
+    check(load64(v1 + 16), SD_VERB_CLOSE);
+
+    # ---- (2b) on/off/off/on -> MOVETO, QUADTO, QUADTO, CLOSE (implied mid) ----
+    var o2 = mk_outline(4, arr4(0, 2, 6, 8), arr4(0, 4, 4, 0), arr4b(1, 0, 0, 1));
+    var p2 = rekha_outline_to_sdpath(o2, SD_ONE, 0, 0);
+    check(sd_path_verb_count(p2), 4);
+    var v2 = load64(p2 + SD_PATH_VERBS_OFFSET);
+    check(load64(v2 + 0), SD_VERB_MOVETO);
+    check(load64(v2 + 8), SD_VERB_QUADTO);
+    check(load64(v2 + 16), SD_VERB_QUADTO);
+    check(load64(v2 + 24), SD_VERB_CLOSE);
+
+    if (g_fails == 0) {
+        var ok = "path_test: PASS (glyph -> sadish path + fill)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "path_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

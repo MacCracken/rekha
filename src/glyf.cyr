@@ -200,27 +200,116 @@ fn rekha_load_glyph(font, gid): i64 {
     return o;
 }
 
-# Emit `outline` as a stream of path verbs into `sink`. `sink` is a
-# function pointer called as sink(ctx, verb, x, y) for each verb; `ctx`
-# is opaque caller state (the sadish path builder). Returns REKHA_OK,
-# or a RekhaErrCode on failure.
-#
-# This is THE rekha->sadish seam: rekha produces the verb stream, sadish
-# (the deferred cross-dep) consumes it to rasterize. Once wired, add
-# [deps.sadish] path="../sadish" and translate QUADTO into
-# sadish's quadratic-Bézier fill.
-#
-# TODO(v0.2): walk each contour's on-curve/off-curve point run:
-#   - emit MOVETO at the contour's first on-curve point (synthesizing a
-#     midpoint start if the contour opens off-curve — TrueType allows it),
-#   - fold consecutive off-curve points into implied on-curve midpoints,
-#   - emit QUADTO(control, endpoint) / LINETO per the on/off pattern,
-#   - emit CLOSE at contour end.
-fn rekha_outline_to_path(outline, sink, ctx): i64 {
-    # Empty outline (v0.1 skeleton) has nothing to emit.
-    if (rekha_outline_n_contours(outline) == 0) {
-        return REKHA_OK;
+# ================================================================
+# The rekha -> sadish seam. rekha does NOT rasterize; it maps a glyph's
+# design-unit outline into a sadish SdPath (16.16 pixel coords), which sadish
+# fills. The affine map is:
+#   sd_x = ox + design_x * scale        (scale = 16.16 pixels per design unit)
+#   sd_y = oy - design_y * scale        (y-flip: fonts are y-up, sadish y-down)
+# ================================================================
+
+# design coord -> sadish 16.16 pixel coord.
+fn rekha_px(xs, i, scale, ox): i64 { return ox + load64(xs + i * 8) * scale; }
+fn rekha_py(ys, i, scale, oy): i64 { return oy - load64(ys + i * 8) * scale; }
+
+# Emit one closed contour (absolute point range [cstart, cend]) into `path`,
+# converting TrueType quadratic runs to sadish verbs. On-curve points end a
+# segment (line, or quad if a control is pending); off-curve points are
+# quadratic controls, with an implied on-curve MIDPOINT synthesized between
+# two consecutive off-curve points. The start point is the first on-curve
+# point, or — if the contour opens off-curve — the last on-curve point, or a
+# synthesized midpoint if BOTH ends are off-curve (all TrueType-legal).
+fn rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy): i64 {
+    var n = cend - cstart + 1;
+    var sx = 0;
+    var sy = 0;
+    var startidx = 0;
+    var count = 0;
+    if (load8(oc + cstart) != 0) {
+        sx = rekha_px(xs, cstart, scale, ox);
+        sy = rekha_py(ys, cstart, scale, oy);
+        startidx = cstart + 1;
+        count = n - 1;
+    } else {
+        if (load8(oc + cend) != 0) {
+            sx = rekha_px(xs, cend, scale, ox);
+            sy = rekha_py(ys, cend, scale, oy);
+            startidx = cstart;
+            count = n - 1;
+        } else {
+            sx = sd_asr(rekha_px(xs, cstart, scale, ox) + rekha_px(xs, cend, scale, ox), 1);
+            sy = sd_asr(rekha_py(ys, cstart, scale, oy) + rekha_py(ys, cend, scale, oy), 1);
+            startidx = cstart;
+            count = n;
+        }
     }
-    # TODO(v0.2): contour walk -> sink(ctx, verb, x, y) calls.
-    return REKHA_OK;
+    sd_path_moveto(path, sx, sy);
+
+    var have_ctrl = 0;
+    var cx = 0;
+    var cy = 0;
+    var k = 0;
+    while (k < count) {
+        var idx = startidx + k;
+        var px = rekha_px(xs, idx, scale, ox);
+        var py = rekha_py(ys, idx, scale, oy);
+        if (load8(oc + idx) != 0) {
+            if (have_ctrl != 0) {
+                sd_path_quadto(path, cx, cy, px, py);
+                have_ctrl = 0;
+            } else {
+                sd_path_lineto(path, px, py);
+            }
+        } else {
+            if (have_ctrl != 0) {
+                var mx = sd_asr(cx + px, 1);
+                var my = sd_asr(cy + py, 1);
+                sd_path_quadto(path, cx, cy, mx, my);
+                cx = px;
+                cy = py;
+            } else {
+                cx = px;
+                cy = py;
+                have_ctrl = 1;
+            }
+        }
+        k = k + 1;
+    }
+    if (have_ctrl != 0) {
+        sd_path_quadto(path, cx, cy, sx, sy);   # close the last curve to start
+    }
+    sd_path_close(path);
+    return 0;
+}
+
+# @public — convert a decoded glyph `outline` into a sadish SdPath, positioned
+# by `scale` (16.16 px/design-unit) at pixel offset (ox, oy) (both 16.16).
+# Returns a fresh SdPath (possibly empty for a 0-contour outline).
+fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
+    var path = sd_path_new();
+    var nc = rekha_outline_n_contours(outline);
+    if (nc == 0) { return path; }
+    var eps = rekha_outline_end_pts(outline);
+    var xs = rekha_outline_xs(outline);
+    var ys = rekha_outline_ys(outline);
+    var oc = rekha_outline_on_curve(outline);
+
+    var cstart = 0;
+    var ci = 0;
+    while (ci < nc) {
+        var cend = load64(eps + ci * 8);
+        if (cend >= cstart) {
+            rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy);
+        }
+        cstart = cend + 1;
+        ci = ci + 1;
+    }
+    return path;
+}
+
+# @public — load glyph `gid` and convert it to a positioned sadish SdPath.
+fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
+    var o = rekha_load_glyph(font, gid);
+    if (o == 0) { return sd_path_new(); }
+    return rekha_outline_to_sdpath(o, scale, ox, oy);
 }

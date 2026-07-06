@@ -26,6 +26,10 @@ include "lib/syscalls.cyr"
 include "lib/assert.cyr"
 include "lib/bench.cyr"
 
+# sadish — the 2D vector rasterizer rekha emits glyph paths into (dep).
+# rekha is sadish's first consumer; glyf.cyr calls sd_path_* / sd_canvas_*.
+include "lib/sadish.cyr"
+
 # ================================================================
 # rekha domain modules — flat, dependency order.
 # error.cyr is dep-free. sfnt.cyr (big-endian byte readers + the

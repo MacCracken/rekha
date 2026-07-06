@@ -1,78 +1,87 @@
 # rekha
 
-Version: 0.1.0
+Version: 0.2.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
-TrueType/OpenType (SFNT) font containers and loads glyph outlines,
-emitting resolution-independent **paths** (line / quadratic-Bézier verbs)
-for the `sadish` 2D vector core to rasterize.
+TrueType/OpenType (SFNT) font containers and decodes glyph outlines,
+emitting them as **paths** (line / quadratic-Bézier verbs) into the
+`sadish` 2D vector core, which rasterizes them.
 
 rekha does **not** bundle its own Bézier rasterizer — it produces the
-glyph-outline path stream; `sadish` fills it. The two form a clean seam:
-rekha owns *what the glyph is* (SFNT tables → outlines), sadish owns
-*how it becomes pixels* (fill → coverage).
+glyph-outline path; `sadish` fills it. The two form a clean seam: rekha
+owns *what the glyph is* (SFNT tables → outlines), sadish owns *how it
+becomes pixels* (fill → coverage). rekha is pure CPU Cyrius: no GPU, no C
+shim, no external binaries.
 
 ## Scope
 
-- **v0.1.0 — scaffold.** A buildable compiling skeleton: real error
-  codes + real struct layouts + real fn signatures with stub bodies and
-  `# TODO(v0.2)` markers where the parse/decode algorithms land. It
-  compiles and links clean (`programs/smoke.cyr`); it does not yet
-  decode a real font. The shape is in place: big-endian SFNT byte
-  readers (`rekha_rd_u16` / `rekha_rd_u32` / `rekha_rd_i16`), the
-  `RekhaFont` SFNT handle + `rekha_font_open` / `rekha_find_table`, the
-  `RekhaOutline` record + `rekha_load_glyph`, and the
-  `rekha_outline_to_path` seam that will emit sadish path verbs.
-- **v0.2.0 — real SFNT + glyf.** Locate head / cmap / glyf / loca / hhea
-  / maxp; decode a simple TrueType glyph (contours, run-length flags,
-  delta-encoded coords) into a `RekhaOutline`; walk on-curve/off-curve
-  point runs into quadto/lineto/close verbs; wire `sadish` as the
-  rasterize target. Composite glyphs + cmap character mapping follow.
-- **Staged (tracked, not silently dropped):** OpenType/CFF (`OTTO`)
-  outlines; WOFF/WOFF2 (needs `sankoch` inflate + Brotli); hinting.
+- **v0.1.0 — scaffold.** Buildable compiling skeleton (error codes, struct
+  layouts, SFNT byte readers, stub bodies). Superseded below.
+- **v0.2.0 — real TrueType, end to end (shipped).** Font bytes → filled
+  glyph, RUN-tested:
+  - **SFNT container** — `rekha_font_open` (validated) + `rekha_find_table`
+    (bounds-checked table directory).
+  - **Metadata** — `rekha_units_per_em`, `rekha_loca_format`,
+    `rekha_glyph_count`.
+  - **loca → glyf** — `rekha_glyf_span` (glyph id → its glyf byte range).
+  - **glyf decode** — `rekha_load_glyph` (contours, run-length flags,
+    delta-encoded coords → `RekhaOutline`); every read bounds-checked.
+  - **sadish seam** — `rekha_outline_to_sdpath` / `rekha_glyph_to_sdpath`
+    convert TrueType quadratic contours (implied midpoints, off-curve
+    starts) into a sadish `SdPath`, y-flipped + scaled to pixel space.
+    **`sadish` is wired as a dependency; rekha is its first consumer.**
+- **v0.3.0 / staged — next:** composite glyphs, **cmap** (codepoint →
+  glyph id) for text rendering, OpenType/CFF (`OTTO`) outlines, WOFF/WOFF2
+  (needs `sankoch` inflate + Brotli), and hinting.
 
 ## Place in the stack
 
-rekha is a **system library** in the Sanskrit/Hindi naming lane. It sits
-alongside `kashi` (काशि) as the *outline* half of a sibling font pair:
+rekha is a **system library** in the Sanskrit/Hindi naming lane. It is the
+*outline* half of a sibling font pair with `kashi` (काशि):
 
-- **kashi** — **bitmap** glyph sources: PSF1/PSF2, VGA-ROM 8x16 / CGA
-  8x8, hand-drawn. Fixed-resolution; a freestanding kernel can embed it.
+- **kashi** — **bitmap** glyph sources: PSF1/PSF2, VGA-ROM 8x16 / CGA 8x8,
+  hand-drawn. Fixed-resolution; a freestanding kernel can embed it.
 - **rekha** — **outline / Bézier** glyph sources: TrueType/OpenType.
-  Scalable, resolution-independent; for high-DPI and arbitrary point
-  sizes where a bitmap font can't follow.
+  Scalable, resolution-independent; for high-DPI and arbitrary point sizes.
 
-rekha reads font bytes → emits outline paths; **sadish** rasterizes those
-paths → coverage/pixels. rekha is pure CPU Cyrius: no GPU, no C shim, no
-external binaries.
+```
+  font bytes ─▶ rekha (SFNT tables → glyph outlines → sadish paths)
+                  │
+                  ▼
+                sadish (fill → coverage) ─▶ pixels
+```
 
 ## Consumers
 
-- **sadish** — the 2D vector-fill core; the rasterize target for the
-  path stream `rekha_outline_to_path` emits. Deferred cross-dep: not
-  wired at scaffold. When the path seam lands its real body (v0.2), add
-  `[deps.sadish] path = "../sadish"` to `cyrius.cyml`.
-- Downstream: the AGNOS text/typography path (compositor + terminal +
-  UI) that needs scalable glyphs, via sadish.
-
-Consumers pull `dist/rekha.cyr` via a `[deps.rekha]` entry at a git tag.
+rekha has no live consumer yet; downstream repos pull `dist/rekha.cyr` via
+a `[deps.rekha]` git-tag entry. Its intended consumers are the AGNOS
+text/typography path — the `dhancha` UI toolkit, a terminal, document /
+UI text — anywhere scalable glyphs are needed.
 
 ## Dependencies
 
+- **sadish** — the 2D vector-fill core rekha emits glyph paths into (the
+  rasterize target). Wired via `[deps.sadish]` (local path override
+  `../sadish` for cross-repo dev; git tag as the published pin).
 - **Cyrius stdlib** — `string`, `fmt`, `alloc`, `io`, `vec`, `str`,
   `syscalls`, `assert`, `bench`. Resolved by `cyrius deps` into `lib/`.
-- No inflate/thread deps at v0.1.0 — SFNT tables are read raw
-  (uncompressed). WOFF/WOFF2 (which need `sankoch`) are a later scope.
+- No inflate/thread deps yet — SFNT tables are read raw (uncompressed).
+  WOFF/WOFF2 (which need `sankoch`) are a later scope.
 
 The toolchain pin is `cyrius = "6.4.7"`.
 
 ## Quick Start
 
 ```bash
-cyrius deps                                          # resolve stdlib into lib/
+cyrius deps                                          # resolve stdlib + sadish into lib/
 cyrius build programs/smoke.cyr build/rekha-smoke    # link-check
 ./build/rekha-smoke                                  # prints the banner
+
+# RUN tests (each self-checks and exits non-zero on failure)
+for t in sfnt meta glyf path; do
+  cyrius build "programs/${t}_test.cyr" "build/${t}_test" && "./build/${t}_test"
+done
 ```
 
 ## License

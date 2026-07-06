@@ -43,9 +43,12 @@ stdlib = [
     "bench",
 ]
 
-# Deferred cross-dep (NOT wired at scaffold): sadish is the rasterize
-# target — rekha emits glyph-outline PATHS (quad/line verbs); sadish
-# fills them. rekha does NOT bundle its own Bézier rasterizer. When
-# `rekha_outline_to_path` lands its real body (v0.2), add:
-#   [deps.sadish]
-#   path = "../sadish"
+# sadish — the rasterize target. rekha emits glyph-outline PATHS
+# (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT
+# bundle its own Bézier rasterizer. Local path override (../sadish) for
+# cross-repo dev; the git tag is the published pin.
+[deps.sadish]
+git = "https://github.com/MacCracken/sadish.git"
+path = "../sadish"
+tag = "0.4.0"
+modules = ["dist/sadish.cyr"]
