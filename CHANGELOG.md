@@ -5,7 +5,7 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-07-05
 
 Text, not just glyphs: cmap maps characters to glyph ids, and composite glyphs
 (accented letters etc.) decode. 6 RUN tests.

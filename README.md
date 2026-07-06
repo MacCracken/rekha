@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.2.0
+Version: 0.3.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -31,9 +31,14 @@ shim, no external binaries.
     convert TrueType quadratic contours (implied midpoints, off-curve
     starts) into a sadish `SdPath`, y-flipped + scaled to pixel space.
     **`sadish` is wired as a dependency; rekha is its first consumer.**
-- **v0.3.0 / staged — next:** composite glyphs, **cmap** (codepoint →
-  glyph id) for text rendering, OpenType/CFF (`OTTO`) outlines, WOFF/WOFF2
-  (needs `sankoch` inflate + Brotli), and hinting.
+- **v0.3.0 — text (shipped).** Characters → glyphs, and composite glyphs:
+  - **cmap format 4** — `rekha_char_to_glyph` (Unicode BMP codepoint → glyph
+    id) + `rekha_char_to_sdpath` (one call: character → positioned sadish path).
+  - **Composite glyphs** — `rekha_load_glyph` decodes numberOfContours < 0
+    (recursive component load, F2Dot14 transform + offset, merged outline).
+- **v0.4.0 / staged — next:** cmap formats 12 (full Unicode) / 6 / 0,
+  OpenType/CFF (`OTTO`) outlines, WOFF/WOFF2 (needs `sankoch` inflate +
+  Brotli), and hinting.
 
 ## Place in the stack
 
@@ -79,7 +84,7 @@ cyrius build programs/smoke.cyr build/rekha-smoke    # link-check
 ./build/rekha-smoke                                  # prints the banner
 
 # RUN tests (each self-checks and exits non-zero on failure)
-for t in sfnt meta glyf path; do
+for t in sfnt meta glyf path cmap composite; do
   cyrius build "programs/${t}_test.cyr" "build/${t}_test" && "./build/${t}_test"
 done
 ```
