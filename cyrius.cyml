@@ -5,7 +5,7 @@ description = "rekha (रेखा — line/outline) — pure-Cyrius vector/outl
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/rekha"
 language = "cyrius"
-cyrius = "6.4.7"
+cyrius = "6.4.25"
 
 # rekha is a library — no CLI binary. `cyrius build` targets a smoke
 # program that links the full include chain to prove lib.cyr parses clean.
@@ -46,10 +46,10 @@ stdlib = [
 
 # sadish — the rasterize target. rekha emits glyph-outline PATHS
 # (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT
-# bundle its own Bézier rasterizer. Local path override (../sadish) for
-# cross-repo dev; the git tag is the published pin.
+# bundle its own Bézier rasterizer. Pinned to the git tag (the dev `path`
+# override was dropped for a reproducible build — re-add `path = "../sadish"`
+# locally for cross-repo work on an uncommitted sadish).
 [deps.sadish]
 git = "https://github.com/MacCracken/sadish.git"
-path = "../sadish"
-tag = "0.4.0"
+tag = "0.4.1"
 modules = ["dist/sadish.cyr"]

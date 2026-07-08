@@ -5,6 +5,19 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-07-08 — toolchain alignment
+
+Pin/hygiene release — no code change; the TrueType/SFNT outline subsystem is
+byte-identical to 0.3.0 (all RUN tests green).
+
+### Changed
+
+- **Cyrius pin `6.4.7` → `6.4.25`** — aligns rekha with the desktop stack
+  (setu + dhancha pin `6.4.25`) instead of drifting behind. Builds + all 7 RUN
+  tests (sfnt / glyf / cmap / path / composite / meta / smoke) pass.
+- **`[deps.sadish]` → tag `0.4.1`; dev `path` override dropped** (tag-only for a
+  reproducible pin). Pairs with sadish 0.4.1 — push sadish before rekha.
+
 ## [0.3.0] - 2026-07-05
 
 Text, not just glyphs: cmap maps characters to glyph ids, and composite glyphs
