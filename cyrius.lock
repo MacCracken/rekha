@@ -1,4 +1,4 @@
-commit	dff140fdf77108535ec68f0f6ffe7f09453c3022	sadish	https://github.com/MacCracken/sadish.git	0.4.1
+commit	77fb68ad632e804b88e84edb2ebded3ffd75519f	sadish	https://github.com/MacCracken/sadish.git	0.5.0
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 b96a50f8df3b533649d09cd239578811a22097434e09d89b113ce8b7f56801db  lib/net.cyr
 e84c090fd0f8532700d967ca3190837780a52a42630f4c6a0a4567ad9a49ab6b  lib/cffi.cyr
@@ -18,7 +18,7 @@ deaa166b2421f6380c609b1bc90f10e42778c0c831060ed3046892fe8313ea30  lib/async.cyr
 1f96ccd5e7d46a49441aac6b00010b44b4470ef0319d5919f971bfe76effe0d1  lib/regression.cyr
 f421d9a99161a3f9afb945c384d4a0261f0e89d11390a354c5e15f94891dd925  lib/ws_server.cyr
 81e04cb9d9dcf62655ecb8eaa318c0ad15215cf53d734431c0c12b97cfaf1c34  lib/pam.cyr
-6fe67e8bc7db6dfbe9b93b32c828cff6d2d260086ea3511b0bccff7b2cc17f62  lib/sadish.cyr
+10f86cebe523c72dfe272ad79355dd3e3dfc3213e9375768d32efcd4fe1b586e  lib/sadish.cyr
 3685581ab3dca17cb01b8e65a654ce4ca683ac67b1871b17b8bd9fb3c2cf8a02  lib/pwd.cyr
 6481131d6647da9432f3dffe2ea2891ad2dfca2224e09d638bf1bb530113a168  lib/thread_agnos.cyr
 03922b263b4a771d7104c6dcc30b4b029c6fe40ec93fec6a0ee38ec61f7e7dd8  lib/alloc_macos.cyr
