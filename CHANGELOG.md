@@ -5,6 +5,13 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] - 2026-07-23
+
+### Changed — sadish 0.5.0 (real alpha channel) + dep refresh
+
+Picks up sadish's additive alpha API (`sd_rgba` / `sd_alpha_of` / `sd_premul`). No behaviour change here:
+sadish's legacy `0x00RRGGBB` colours still read back opaque, so glyph rasterisation is unaffected.
+
 ## [0.3.2] - 2026-07-23
 
 ### Changed — cyrius pin 6.4.25 → 6.4.71

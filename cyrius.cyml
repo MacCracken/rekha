@@ -51,5 +51,5 @@ stdlib = [
 # locally for cross-repo work on an uncommitted sadish).
 [deps.sadish]
 git = "https://github.com/MacCracken/sadish.git"
-tag = "0.4.1"
+tag = "0.5.0"
 modules = ["dist/sadish.cyr"]
