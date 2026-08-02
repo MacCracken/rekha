@@ -5,6 +5,20 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-08-02
+
+### Changed — cyrius pin 6.4.71 -> 6.5.5, sadish dep 0.5.0 -> 0.5.1
+
+Part of the whole-desktop-stack toolchain catch-up cut on this date. ⚠ The pin was documentation,
+not enforcement: `cyrius build` compiles with the INSTALLED `cycc` and only warns on drift, so this
+project was already being built by 6.5.5. The gap's load-bearing change is **6.5.1** making
+overload-suffix arity a hard **error** where it used to warn.
+
+### Verification
+
+Host + `--agnos` builds green; **6 RUN tests** pass (`cmap`, `composite`, `glyf`, `meta`, `path`,
+`sfnt`); `distlib` regenerated.
+
 ## [0.3.3] - 2026-07-23
 
 ### Changed — sadish 0.5.0 (real alpha channel) + dep refresh
