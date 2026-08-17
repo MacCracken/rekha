@@ -5,7 +5,7 @@ description = "rekha (रेखा — line/outline) — pure-Cyrius vector/outl
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/rekha"
 language = "cyrius"
-cyrius = "6.5.5"
+cyrius = "6.5.27"
 
 # rekha is a library — no CLI binary. `cyrius build` targets a smoke
 # program that links the full include chain to prove lib.cyr parses clean.
@@ -51,5 +51,5 @@ stdlib = [
 # locally for cross-repo work on an uncommitted sadish).
 [deps.sadish]
 git = "https://github.com/MacCracken/sadish.git"
-tag = "0.5.1"
+tag = "0.5.2"
 modules = ["dist/sadish.cyr"]
