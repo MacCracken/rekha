@@ -156,4 +156,13 @@ jobs:
           VERSION=$(tr -d '[:space:]' < VERSION)
           echo "VERSION file: $VERSION"
           grep -q "^## \[$VERSION\]" CHANGELOG.md || { echo "FAIL: version not in CHANGELOG.md"; exit 1; }
+          # ⛔ THE README CARRIES A `Version:` LINE AND NOTHING CHECKED IT. It read 0.3.4 while
+          # VERSION said 0.3.6 — two releases stale, and the CHANGELOG check above was green for
+          # both of them, because it only ever looked at CHANGELOG.md. A version printed where a
+          # newcomer reads it FIRST is the one worth checking. (Same gate dhancha added after its
+          # own README sat twenty-one releases stale.)
+          if grep -q '^Version:' README.md; then
+            RV=$(grep '^Version:' README.md | head -1 | awk '{print $2}')
+            [ "$RV" = "$VERSION" ] || { echo "FAIL: README.md Version ($RV) != VERSION ($VERSION)"; exit 1; }
+          fi
           echo "Version consistent (manifest pulls VERSION via \${file:VERSION})"
