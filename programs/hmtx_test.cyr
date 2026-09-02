@@ -1,0 +1,161 @@
+# programs/hmtx_test.cyr — RUN test for hhea/hmtx horizontal metrics.
+#
+# Builds a synthetic font (head, maxp, hhea, hmtx, cmap) with numGlyphs=5 but only
+# numberOfHMetrics=3, so glyphs 3 and 4 fall in the leftSideBearing TAIL and must share glyph 2's
+# advance. That tail is the case a naive `hmtx + gid * 4` reader gets wrong — it walks into the lsb
+# array and returns a bearing as if it were a width — so it is the case this file exists for.
+# Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 512;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+
+    # offset table: 5 tables (dir @12, 80 bytes -> tables @92)
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 5);
+    # head@92/54 · maxp@148/32 · hhea@180/36 · hmtx@216/16 · cmap@232/40
+    put_u32(buf, 12,  0x68656164); put_u32(buf, 12 + 8, 92);  put_u32(buf, 12 + 12, 54);
+    put_u32(buf, 28,  0x6D617870); put_u32(buf, 28 + 8, 148); put_u32(buf, 28 + 12, 32);
+    put_u32(buf, 44,  0x68686561); put_u32(buf, 44 + 8, 180); put_u32(buf, 44 + 12, 36);
+    put_u32(buf, 60,  0x686D7478); put_u32(buf, 60 + 8, 216); put_u32(buf, 60 + 12, 16);
+    put_u32(buf, 76,  0x636D6170); put_u32(buf, 76 + 8, 232); put_u32(buf, 76 + 12, 40);
+
+    # head: unitsPerEm = 1000 (a round em, so px maths is checkable by hand)
+    put_u16(buf, 92 + 18, 1000);
+    # maxp: numGlyphs = 5
+    put_u16(buf, 148 + 4, 5);
+    # hhea: ascender 800, descender -200, lineGap 100, numberOfHMetrics 3
+    put_u16(buf, 180 + 4, 800);
+    put_u16(buf, 180 + 6, 65536 - 200);        # -200 as u16 two's complement
+    put_u16(buf, 180 + 8, 100);
+    put_u16(buf, 180 + 34, 3);
+    # hmtx: 3 long metrics {adv,lsb}, then 2 bare lsbs for glyphs 3 and 4.
+    # ⛔ The lsb values in the tail are DELIBERATELY plausible-looking widths (700, 900). A reader
+    # that indexes past numberOfHMetrics returns one of them and looks correct until measured.
+    put_u16(buf, 216 + 0,  500); put_u16(buf, 216 + 2,  10);   # gid 0: adv 500
+    put_u16(buf, 216 + 4,  250); put_u16(buf, 216 + 6,  20);   # gid 1: adv 250
+    put_u16(buf, 216 + 8,  1000); put_u16(buf, 216 + 10, 30);  # gid 2: adv 1000
+    put_u16(buf, 216 + 12, 700);                               # gid 3: lsb only
+    put_u16(buf, 216 + 14, 900);                               # gid 4: lsb only
+
+    # cmap: format 4, one real segment mapping 'A'(65)..'C'(67) -> gid 1..3, plus the
+    # mandatory 0xFFFF terminator segment. segCount = 2.
+    var cm = 232;
+    put_u16(buf, cm + 0, 0);                 # version
+    put_u16(buf, cm + 2, 1);                 # numTables
+    put_u16(buf, cm + 4, 3);                 # platformID 3
+    put_u16(buf, cm + 6, 1);                 # encodingID 1
+    put_u32(buf, cm + 8, 12);                # offset from cmap -> sub @ cm+12
+    var sub = cm + 12;
+    put_u16(buf, sub + 0, 4);                # format
+    put_u16(buf, sub + 2, 28);               # length
+    put_u16(buf, sub + 4, 0);                # language
+    put_u16(buf, sub + 6, 4);                # segCountX2 = 4 -> segCount 2
+    put_u16(buf, sub + 8, 4);                # searchRange
+    put_u16(buf, sub + 10, 1);               # entrySelector
+    put_u16(buf, sub + 12, 0);               # rangeShift
+    put_u16(buf, sub + 14, 67);              # endCode[0]   = 'C'
+    put_u16(buf, sub + 16, 65535);           # endCode[1]   = terminator
+    put_u16(buf, sub + 18, 0);               # reservedPad
+    put_u16(buf, sub + 20, 65);              # startCode[0] = 'A'
+    put_u16(buf, sub + 22, 65535);           # startCode[1]
+    put_u16(buf, sub + 24, 65536 - 64);      # idDelta[0] = -64 -> 'A'(65) maps to gid 1
+    put_u16(buf, sub + 26, 1);               # idDelta[1]
+    put_u16(buf, sub + 28, 0);               # idRangeOffset[0]
+    put_u16(buf, sub + 30, 0);               # idRangeOffset[1]
+
+    var f = rekha_font_open(buf, len);
+    if (f == 0) { g_fails = g_fails + 1; }
+
+    # ---- hhea ---------------------------------------------------------------------------------
+    check(rekha_num_h_metrics(f), 3);
+    check(rekha_ascender(f), 800);
+    # ⛔ SIGNED. A descender read as u16 comes back 65336 and every line-height sum built on it is
+    # wrong by 65,536 design units.
+    check(rekha_descender(f), 0 - 200);
+    check(rekha_line_gap(f), 100);
+
+    # ---- hmtx: the long-metric array ----------------------------------------------------------
+    check(rekha_advance_width(f, 0), 500);
+    check(rekha_advance_width(f, 1), 250);
+    check(rekha_advance_width(f, 2), 1000);
+
+    # ---- hmtx: THE TAIL, which is the whole point ---------------------------------------------
+    # Glyphs 3 and 4 have no long metric; they share glyph 2's advance of 1000. A reader that
+    # indexed hmtx + gid*4 would return 700 and 900 — the lsb values planted above.
+    check(rekha_advance_width(f, 3), 1000);
+    check(rekha_advance_width(f, 4), 1000);
+    if (rekha_advance_width(f, 3) == 700) { g_fails = g_fails + 1; }   # the exact wrong answer
+    if (rekha_advance_width(f, 4) == 900) { g_fails = g_fails + 1; }
+
+    # ---- refusals -----------------------------------------------------------------------------
+    check(rekha_advance_width(f, 0 - 1), 0);        # negative gid
+    check(rekha_advance_width(f, 99), 1000);        # past numGlyphs still clamps, never reads OOB
+
+    # ---- codepoint level ----------------------------------------------------------------------
+    check(rekha_char_to_glyph(f, 65), 1);           # 'A' -> gid 1
+    check(rekha_char_advance(f, 65), 250);          # ...whose advance is 250
+    check(rekha_char_advance(f, 67), 1000);         # 'C' -> gid 3, in the tail -> 1000
+    # An unmapped codepoint falls to .notdef (gid 0), which has a REAL advance — text made of
+    # missing glyphs still advances instead of stacking on one x.
+    check(rekha_char_advance(f, 90), 500);
+
+    # ---- pixels, and the rounding ------------------------------------------------------------
+    # upem 1000. 'A' adv 250 at 16 px = 4.0 px exactly.
+    check(rekha_char_advance_px(f, 65, 16), 4);
+    # gid 0 adv 500 at 15 px = 7.5 -> rounds to 8, where truncation would give 7 and lose half a
+    # pixel per glyph across a run.
+    check(rekha_char_advance_px(f, 90, 15), 8);
+    check(rekha_char_advance_px(f, 67, 16), 16);    # 1000/1000 * 16
+
+    # ---- a font with no hhea/hmtx at all reports unknown, not zero-width ----------------------
+    var len2 = 256;
+    var b2 = alloc(len2);
+    memset(b2, 0, len2);
+    put_u32(b2, 0, 0x00010000);
+    put_u16(b2, 4, 1);
+    put_u32(b2, 12, 0x68656164); put_u32(b2, 12 + 8, 28); put_u32(b2, 12 + 12, 54);
+    put_u16(b2, 28 + 18, 2048);
+    var f2 = rekha_font_open(b2, len2);
+    if (f2 == 0) { g_fails = g_fails + 1; }
+    check(rekha_num_h_metrics(f2), 0);
+    check(rekha_advance_width(f2, 0), 0);
+    check(rekha_char_advance_px(f2, 65, 16), 0);    # unknown -> 0, so one test covers the fallback
+    check(rekha_ascender(f2), 0);
+
+    if (g_fails == 0) {
+        var ok = "hmtx_test: PASS (hhea metrics + hmtx advances incl. the lsb tail)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "hmtx_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

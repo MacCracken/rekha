@@ -5,6 +5,61 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] - 2026-09-02 — horizontal metrics: hhea + hmtx
+
+### Added — `rekha_advance_width`, and the reason the tags existed without it
+
+⛔⛔ **`REKHA_TAG_HHEA` AND `REKHA_TAG_HMTX` HAVE BEEN DECLARED SINCE THE SFNT SCAFFOLD AND WERE
+NEVER READ ONCE.** `grep` found both in the constant block and nowhere else — no reader, no test, no
+consumer. A declared tag with no reader is a promise, not a feature, and downstream it cost real
+behaviour: **dhancha hard-codes `advf = (h * 6) / 10`** — *"fixed advance ~0.6 em"* — because rekha
+gave it nothing better to use. That renders a proportional face at monospace pitch: correct glyph
+shapes at wrong positions, which reads as a rendering bug rather than a missing metric.
+
+New, all in font **design units** (`unitsPerEm` space — rekha stays resolution-independent):
+
+| | |
+|---|---|
+| `rekha_num_h_metrics(font)` | `hhea.numberOfHMetrics` |
+| `rekha_ascender` / `rekha_descender` / `rekha_line_gap` | the three `hhea` line-box fields |
+| `rekha_advance_width(font, gid)` | a glyph's advance |
+| `rekha_char_advance(font, cp)` | codepoint -> advance, via `cmap` |
+| `rekha_char_advance_px(font, cp, px_size)` | ...scaled to pixels, rounded half-up |
+
+⛔⛔ **THE `hmtx` TAIL IS THE WHOLE SUBTLETY, AND IT IS WHAT THE TEST IS BUILT AROUND.** `hmtx` is
+**two** arrays: `longHorMetric[numberOfHMetrics]` at 4 bytes each, then
+`leftSideBearing[numGlyphs - numberOfHMetrics]` at 2 bytes each with **no advance of their own**.
+Glyphs past `numberOfHMetrics` share the LAST long metric's advance — that is the format's
+compression for a run of equal-width glyphs, not a defect. ⇒ A reader indexing `hmtx + gid * 4`
+past that boundary walks into the bearing array and **returns a left side bearing as if it were a
+width**. `programs/hmtx_test.cyr` plants exactly that: five glyphs, three long metrics, and two
+tail bearings whose values (700, 900) are deliberately plausible widths. The naive reader returns
+them and looks right until measured.
+⚠ **Proven by mutation** — deleting the clamp fails the suite in **6** places.
+
+⚠ **`descender` is returned SIGNED**, which is the only useful shape: it measures downward from the
+baseline and is negative in every well-formed font, so `asc - desc + gap` is the line height with no
+caller needing to know which way it points. Read as `u16` it comes back **65336** and every line-box
+sum built on it is wrong by 65,536 design units.
+
+⚠ **0 means UNKNOWN, never zero-width.** A font with no `hhea`/`hmtx` reports 0 and the consumer
+must fall back to its own estimate; painting with 0 stacks every glyph on one x. `rekha_char_advance_px`
+also returns 0 when `unitsPerEm` is 0, so a caller's fallback is one `== 0` test rather than two.
+
+⭐ **The pixel helper rounds half-up rather than truncating**, because the scaling would otherwise be
+written by every consumer and one of them would write it wrong: `adv * px / upem` truncating loses up
+to a pixel per glyph and compounds — a 40-character run ends visibly left of where it should.
+
+⚠ An unmapped codepoint resolves to `.notdef` (gid 0), whose advance is a real metric in most fonts,
+so a run of missing glyphs still advances instead of collapsing onto one x.
+
+### Changed — `cyrius = "6.5.27"` -> **6.5.41**
+
+The stack moved and this repo had not. Every build was running with a drift warning against an
+installed 6.5.41. ⚠ The pin selects the stdlib snapshot that compiles in, so this is not cosmetic.
+`lib/` re-synced with `--full`, clearing the `./lib/ shadows version-pinned` warning; all seven test
+programs and the smoke build re-run green after both changes.
+
 ## [0.3.5] - 2026-08-17 — toolchain pin to 6.5.27
 
 ### Changed — `cyrius = "6.5.5"` -> **6.5.27**
