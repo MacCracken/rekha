@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.3.6
+Version: 0.3.7
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
