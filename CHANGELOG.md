@@ -178,3 +178,12 @@ sadish API. 4 RUN tests (synthetic fonts + hand-built outlines).
   `RekhaErr` codes, `RekhaFont`/`RekhaOutline` layouts, big-endian SFNT byte
   readers, and the `rekha_outline_to_path` sadish seam as stubs behind
   `# TODO(v0.2)` markers. Links clean via `programs/smoke.cyr`.
+
+## [Unreleased]
+
+## [0.3.7] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.41` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
