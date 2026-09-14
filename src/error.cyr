@@ -30,7 +30,7 @@ enum RekhaErrCode {
 
 # Create a RekhaErr with code and an optional detail string (0 = none).
 fn rekha_err_new(code, detail): i64 {
-    var e = alloc(16);
+    var e = sd_alloc(16);
     store64(e, code);
     store64(e + 8, detail);
     return e;

@@ -5,6 +5,104 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.10] - 2026-09-14 — rekha draws its memory from sadish's seam
+
+### Changed — every allocation routes through `sd_alloc`; the draw stack has ONE knob
+
+⭐⭐ **All 15 `alloc(` sites in `src/` — error.cyr 1, glyf.cyr 13, sfnt.cyr 1 — now call sadish's
+`sd_alloc(n)`** (sadish 0.5.5's allocation seam: `sd_alloc_set(fp)` installs a hook and returns the
+previous one, `sd_alloc_get()` reads it back, 0 = the global allocator). rekha adds no seam of its
+own: it already hard-depends on sadish (`rekha_outline_to_sdpath` builds `SdPath`s), so the knob is
+owned by the leaf, the way the fixed-point convention (16.16) already is. A consumer that scopes
+`sd_alloc_set` around a text draw gets the **outlines, the paths and the coverage from the same
+place**, and a per-frame arena reclaims all three at once.
+
+**WHY.** `lib/alloc.cyr` is a bump allocator with **no `free()`**. dhancha's scalable text
+(`dh_draw_text_ink`, `font != 0`) calls `rekha_char_to_sdpath` per glyph, per label, per frame, and
+rekha drew its outline scratch — the 16-byte loca span, `end_pts`, `flags`, `on_curve`, `xs`, `ys`,
+the 48-byte record, and for a composite (every accented letter in a real face) the 70,656 B of
+merge buffers — from the global heap that no hook could reach. dhancha filed it (`2026-09-13-scalable-text-allocates-per-call-outside-the-frame-arena.md`);
+crab's headline gate asserts a rendered frame costs the global heap **exactly 0 bytes** and cannot
+adopt a proportional face until the whole draw stack can be pointed at its frame arena. sadish
+0.5.5 is the rasterizer half of that fix; this is the outline half.
+
+**MEASURED** (`alloc_used()` / `arena_used()` deltas, a 3-point triangle glyph, `'A'` via cmap,
+sadish 0.5.5 vendored in both columns):
+
+| call | 0.3.9, global heap | 0.3.9 under a sadish hook | 0.3.10 under the hook |
+|---|---|---|---|
+| `rekha_char_to_sdpath` | 4,328 B | **136 B leaked** on the global heap, 4,192 B on the arena | **0 B** global, 4,328 B on the arena |
+| ...x 20 | 86,560 B | **2,720 B leaked** | **0 B** global, 86,560 B on the arena |
+| `rekha_load_glyph` (simple) | 136 B | 136 B leaked, 0 on the arena | 0 B global, 136 B on the arena |
+| `rekha_load_glyph` (composite of one) | 70,856 B | 70,856 B leaked | 0 B global, 70,856 B on the arena |
+| `rekha_char_to_sdpath`, that composite | 75,048 B | **70,856 B leaked**, 4,192 B on the arena | 0 B global, 75,048 B on the arena |
+| `rekha_font_open` | 40 B | 40 B leaked | 0 B global, 40 B on the arena |
+
+The 4,328 B per glyph is 136 B of rekha (span 16 + end_pts 8 + flags 8 + on_curve 8 + xs 24 +
+ys 24 + record 48) plus 4,192 B of sadish (`sd_path_new` 4,144 + 3 points x 16). Every byte
+moved, none were added: the arena's high-water mark for twenty calls is exactly 20 x the global cost
+0.3.9 paid, and after `arena_reset` twenty more calls land on the same mark.
+
+⚠ **`rekha_font_open` lands in the hook too.** The 40-byte `RekhaFont` follows the seam like
+everything else, which is why a consumer **opens fonts OUTSIDE a scoped hook** — a font opened under a
+per-frame arena dies at that arena's reset. Reading a font costs nothing under any hook:
+`rekha_char_to_glyph`, `rekha_advance_width`, `rekha_units_per_em`, `rekha_char_advance_px` allocate
+0 B (asserted). ⛔ An outline or a path made under an arena hook must not be kept across that
+arena's reset; that is the consumer's lifetime call, exactly as it is for sadish's own paths.
+⛔ **The hook must not return 0.** `rekha_outline_empty` and `rekha_font_open` check their
+allocation; the loaders store straight through theirs, as they always did with `alloc` — MEASURED
+under a hook that returns 0: `rekha_font_open` returns 0 correctly, `rekha_char_to_sdpath` faults
+(rc 139). A hook backed by an arena that can refuse falls back to the global allocator, as dhancha's
+`dh_falloc` does, rather than returning 0. Said at the head of `src/glyf.cyr`.
+
+⛔⛔ **FLOOR: sadish >= 0.5.5, HARD — AND BELOW IT THE BUILD MAY STILL GO GREEN.**
+`sd_alloc` does not exist below 0.5.5, and MEASURED against a real 0.5.4 tree (a `git archive` of the
+tag as the `path` dep): rekha's `path_test`, `glyf_test` and `smoke` **compile** — `warning: undefined
+function 'sd_alloc'`, then `OK` — and the binary **dies at the first `rekha_font_open`**: `path_test`
+and `glyf_test` exit 132 (SIGILL), the `CYRIUS_DCE=1` `path_test` exits 139 (SIGSEGV); only
+`alloc_test` is refused (`error: refusing to emit binary with 2 reachable undefined function(s)`).
+⚠ Which of the two a build gets is NOT "a direct call from the program vs one through the bundle"
+(an earlier draft of this entry said so; it is wrong in both directions). cyrius 6.6.4 decides each
+undefined NAME on its FIRST call site in code order: a first site inside a function DCE keeps live
+refuses; a first site inside a dead function prints the warning, emits the binary, and every later
+site of the same name — live or not — goes unexamined. MEASURED with a 4-line probe: a dead caller
+of `missing_fn` listed before `main`'s own call → `OK (4456 bytes)`, rc 132; the same two fns with
+`main` first → refused; a call three fns deep from `main` → refused. rekha's suites warn because the
+first `sd_alloc(` in the fold is `rekha_err_new` (src/error.cyr), which no suite reaches — a copy of
+`path_test` whose `main` calls `sd_alloc(16)` DIRECTLY still builds `OK (147320 bytes)` and exits 132.
+A consumer whose first site is live is refused instead: crab, with no `sd_alloc*` call of its own,
+against sadish 0.5.4 + dhancha 0.10.0 (`dh_draw_text_ink` is the first `sd_alloc_set(` site in its
+fold, reachable from `main`) gets `refusing to emit binary with 2 reachable undefined function(s)`.
+⇒ Either way the plain `warning: undefined function` line is printed; a consumer whose CI does not
+grep build output for it can ship a green build that faults on its first glyph.
+dhancha vendors the two bundles separately, so its `[deps.sadish]` tag must clear the same floor
+when it takes this rekha — and its build gate should treat that warning as the error it is.
+`[deps.sadish]` here moves `0.5.2` -> **`0.5.5`** and re-adds `path = "../sadish"` (the 0.5.5 tag
+does not exist at the time of writing; ⛔ `path` WINS over `tag`, so a green build is not evidence
+the tag resolves — re-verify with the `path` line disabled before moving the tag). `cyrius.lock`
+loses the sadish `commit` line (a path dep pins no commit) and moves the `lib/sadish.cyr` hash;
+nothing else in the lock changes.
+
+**Proven by mutation** — `programs/alloc_test.cyr` (new, 67 numbered checks in groups A–D: the
+no-hook baseline asserted > 0; twenty hooked calls cost the heap exactly 0 and the arena converges;
+the outline record and all four buffers, the composite buffers and the font record lie inside the
+arena's range; `sd_alloc_set(0)` restores and the next call is back on the heap at exactly the
+group-A cost). Reverting one site at a time to `alloc(`:
+
+| mutation | checks failed |
+|---|---|
+| glyf.cyr `rekha_load_simple` `xs` | **7** (#37, 38, 40, 41, 42, 46, 50) |
+| glyf.cyr `rekha_load_glyph_d` `span` | **6** (#37, 38, 40, 41, 42, 50) |
+| glyf.cyr `rekha_load_composite` `xs` | **3** (#50, 51, 53) |
+| sfnt.cyr `rekha_font_open` `f` | **3** (#58, 59, 60) |
+
+All **9** RUN suites pass (`sfnt meta glyf path cmap composite hmtx face alloc`); the eight
+pre-existing ones are byte-for-byte unchanged in what they assert. `dist/rekha.cyr` 38,661 -> 40,750 B
+(+2,089: the seam note in glyf.cyr and `sd_` on 15 call sites). The `CYRIUS_DCE=1` smoke binary
+goes 16,208 -> 16,296 B, and **all +88 of it is the sadish 0.5.2 -> 0.5.5 bump** (0.3.9's sources
+against the 0.5.5 bundle also build to 16,296; the non-DCE smoke is 143,272 B either way) — nothing
+in rekha's change is reachable from the banner.
+
 ## [0.3.9] - 2026-09-14 — the literal defect is fixed upstream; the chunks stay
 
 ### Changed
@@ -62,6 +160,13 @@ freestanding kernel concatenates by path via `[deps.rekha] modules = ["fonts/fac
 - **Toolchain `6.6.2` → `6.6.3`** (vendored `lib/` re-synced from the pin; `cyrius.lock` re-emitted in
   the sorted order 6.6.3 now writes — same entries, order only). All eight RUN suites pass, including
   the new `face_test`.
+
+## [0.3.7] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.41` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
 
 ## [0.3.6] - 2026-09-02 — horizontal metrics: hhea + hmtx
 
@@ -236,12 +341,3 @@ sadish API. 4 RUN tests (synthetic fonts + hand-built outlines).
   `RekhaErr` codes, `RekhaFont`/`RekhaOutline` layouts, big-endian SFNT byte
   readers, and the `rekha_outline_to_path` sadish seam as stubs behind
   `# TODO(v0.2)` markers. Links clean via `programs/smoke.cyr`.
-
-## [Unreleased]
-
-## [0.3.7] - 2026-09-11
-
-### Changed
-
-- **Toolchain `6.5.41` → `6.6.2`.** No source change; the value form needed none.
-  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.

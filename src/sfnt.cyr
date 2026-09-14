@@ -112,7 +112,7 @@ fn rekha_font_open(buf, len): i64 {
     # the directory (numTables entries) must lie within the file
     if (REKHA_SFNT_OFFTAB_LEN + n * REKHA_SFNT_DIRENT_LEN > len) { return 0; }
 
-    var f = alloc(REKHA_FONT_SIZE);
+    var f = sd_alloc(REKHA_FONT_SIZE);
     if (f == 0) { return 0; }
     store64(f, buf);
     store64(f + 8, len);

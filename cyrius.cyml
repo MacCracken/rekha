@@ -46,12 +46,27 @@ stdlib = [
 
 # sadish — the rasterize target. rekha emits glyph-outline PATHS
 # (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT
-# bundle its own Bézier rasterizer. Pinned to the git tag (the dev `path`
-# override was dropped for a reproducible build — re-add `path = "../sadish"`
-# locally for cross-repo work on an uncommitted sadish).
+# bundle its own Bézier rasterizer.
+# ⛔ FLOOR >= 0.5.5, HARD: every allocation rekha makes goes through `sd_alloc`
+# (0.3.10), which 0.5.4 and below do not define. ⛔ Against an older pin the
+# build MAY still go green: cyrius 6.6.4 judges an undefined name by its FIRST
+# call site in code order, and rekha's is rekha_err_new (src/error.cyr), dead
+# in every suite — so path_test/glyf_test COMPILE with `warning: undefined
+# function 'sd_alloc'` and die (SIGILL, rc 132) at the first rekha_font_open,
+# while a fold whose first site is live (crab via dhancha 0.10.0) is refused
+# outright. MEASURED both ways; see CHANGELOG 0.3.10. Grep build output for
+# `undefined function` — it is printed in both cases. dhancha vendors
+# dist/rekha.cyr AND dist/sadish.cyr separately, so its own sadish pin must
+# clear the same floor.
 [deps.sadish]
 git = "https://github.com/MacCracken/sadish.git"
-tag = "0.5.2"
+# ⚠ `path` re-added 0.3.10, for the same reason dhancha carries one: without it rekha can only
+# build against a PUBLISHED sadish tag, and 0.3.10 depends on `sd_alloc`, which landed in sadish
+# 0.5.5 minutes earlier and was not yet tagged.
+# ⛔ `path` WINS over `tag`, so a green build here is NOT evidence the declared tag resolves.
+# Re-verify with the `path` line disabled before any release that moves this tag.
+path = "../sadish"
+tag = "0.5.5"
 modules = ["dist/sadish.cyr"]
 
 # fonts/face_data.cyr — the embedded DEFAULT FACE, a freestanding data module (no stdlib) a

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.3.9
+Version: 0.3.10
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -36,6 +36,15 @@ shim, no external binaries.
     id) + `rekha_char_to_sdpath` (one call: character → positioned sadish path).
   - **Composite glyphs** — `rekha_load_glyph` decodes numberOfContours < 0
     (recursive component load, F2Dot14 transform + offset, merged outline).
+- **v0.3.6 — horizontal metrics (shipped).** `hhea`/`hmtx`: `rekha_advance_width`,
+  `rekha_char_advance` / `rekha_char_advance_px` (rounded half-up), the `hhea`
+  line-box fields; the `hmtx` left-side-bearing tail handled.
+- **v0.3.10 — one allocation knob (shipped).** Every byte rekha allocates goes
+  through sadish's seam (`sd_alloc`, sadish >= 0.5.5), so a consumer that scopes
+  `sd_alloc_set` around a text draw gets the outlines, the paths and the coverage
+  from the same arena: 20 `rekha_char_to_sdpath` calls under an arena hook cost
+  the global heap **exactly 0 bytes** (MEASURED; 4,328 B each on the arena).
+  ⚠ Open fonts OUTSIDE a scoped hook — `rekha_font_open` follows the seam too.
 - **v0.4.0 / staged — next:** cmap formats 12 (full Unicode) / 6 / 0,
   OpenType/CFF (`OTTO`) outlines, WOFF/WOFF2 (needs `sankoch` inflate +
   Brotli), and hinting.
@@ -89,8 +98,15 @@ document / UI text — anywhere scalable glyphs are needed.
 ## Dependencies
 
 - **sadish** — the 2D vector-fill core rekha emits glyph paths into (the
-  rasterize target). Wired via `[deps.sadish]` (local path override
-  `../sadish` for cross-repo dev; git tag as the published pin).
+  rasterize target), AND the allocation seam rekha draws from (`sd_alloc`).
+  ⛔ Floor **0.5.5**: `sd_alloc` does not exist below it — the build may
+  still compile (`warning: undefined function 'sd_alloc'`, printed either way)
+  and fault at the first `rekha_font_open`, or be refused outright, depending
+  on where the first call site sits (CHANGELOG 0.3.10). Wired via
+  `[deps.sadish]` (`tag = "0.5.5"`, with a local
+  `path = "../sadish"` override for cross-repo dev — `path` wins over `tag`).
+  A consumer vendoring `dist/rekha.cyr` next to its own `dist/sadish.cyr`
+  must clear the same floor.
 - **Cyrius stdlib** — `string`, `fmt`, `alloc`, `io`, `vec`, `str`,
   `syscalls`, `assert`, `bench`. Resolved by `cyrius deps` into `lib/`.
 - No inflate/thread deps yet — SFNT tables are read raw (uncompressed).
@@ -106,7 +122,7 @@ cyrius build programs/smoke.cyr build/rekha-smoke    # link-check
 ./build/rekha-smoke                                  # prints the banner
 
 # RUN tests (each self-checks and exits non-zero on failure)
-for t in sfnt meta glyf path cmap composite; do
+for t in sfnt meta glyf path cmap composite hmtx face alloc; do
   cyrius build "programs/${t}_test.cyr" "build/${t}_test" && "./build/${t}_test"
 done
 ```

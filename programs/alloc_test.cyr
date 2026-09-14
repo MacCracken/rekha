@@ -1,0 +1,284 @@
+# programs/alloc_test.cyr — RUN test for rekha on sadish's ALLOCATION SEAM (0.3.10): every byte
+# rekha allocates goes through `sd_alloc`, so one `sd_alloc_set` scoped by a consumer governs the
+# outlines, the paths AND the coverage of a text draw.
+#
+# ⭐ WHAT THIS EXISTS TO PROVE. lib/alloc.cyr is a bump allocator with NO free(). dhancha's scalable
+# text calls rekha_char_to_sdpath per glyph, per label, per frame, and rekha drew its outline
+# scratch (span, end_pts, flags, on_curve, xs, ys, the record) from the global heap: MEASURED
+# 136 B per call of a 3-point glyph that no hook could reach, even after sadish 0.5.5 had moved
+# the 4,192 B path onto the consumer's arena. dhancha filed it (2026-09-13, scalable text
+# allocates per call outside the frame arena); crab's headline gate asserts a rendered frame costs
+# the global heap EXACTLY 0. This suite is that gate from rekha's side.
+#
+# ⚠ THE HEADLINE ASSERTIONS ARE EXACT ZEROS, NOT "LESS THAN BEFORE". Group B: twenty
+# rekha_char_to_sdpath calls under an arena hook cost the global heap EXACTLY 0 bytes, and the
+# arena converges on its high-water mark after a reset. Group C: the outline record and all four
+# of its buffers lie INSIDE the arena — glyf.cyr's own allocations moved, not just sadish's paths
+# — and so do the composite merge buffers and the RekhaFont record. A site left on `alloc` leaks
+# 8 bytes or more per call and satisfies a "smaller" check.
+#
+# Font: glyph 0 = a simple triangle, glyph 1 = a composite of glyph 0 offset (100, 200); cmap
+# 'A' -> 0, 'B' -> 1; hhea/hmtx so the read-only calls have real tables to walk.
+# Exit code = failed checks; each failure prints its check number.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "alloc_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ---- the consumer's hook: everything rekha AND sadish ask for goes onto g_arena ----------
+var g_arena = 0;
+
+fn hook_alloc(n): i64 {
+    return arena_alloc(g_arena, n);
+}
+
+# 1 if p lies inside the arena's current chunk [base, end). The arena is sized so it never
+# chains, so this is the whole arena.
+fn in_arena(p): i64 {
+    if (p < load64(g_arena)) { return 0; }
+    if (p >= load64(g_arena + 16)) { return 0; }
+    return 1;
+}
+
+# Build the font. 7 tables: head@124/54 maxp@178/32 hhea@210/36 hmtx@246/8 loca@254/6
+# glyf@260/44 cmap@304/40.
+fn build_font(buf): i64 {
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 7);
+    dir_entry(buf, 12,  0x68656164, 124, 54);
+    dir_entry(buf, 28,  0x6D617870, 178, 32);
+    dir_entry(buf, 44,  0x68686561, 210, 36);
+    dir_entry(buf, 60,  0x686D7478, 246, 8);
+    dir_entry(buf, 76,  0x6C6F6361, 254, 6);
+    dir_entry(buf, 92,  0x676C7966, 260, 44);
+    dir_entry(buf, 108, 0x636D6170, 304, 40);
+
+    put_u16(buf, 124 + 18, 1000);      # unitsPerEm
+    put_u16(buf, 124 + 50, 0);         # short loca
+    put_u16(buf, 178 + 4, 2);          # numGlyphs = 2
+    put_u16(buf, 210 + 4, 800);        # ascender
+    put_u16(buf, 210 + 6, 65536 - 200);
+    put_u16(buf, 210 + 34, 2);         # numberOfHMetrics = 2
+    put_u16(buf, 246 + 0, 500);        # gid 0: adv 500
+    put_u16(buf, 246 + 4, 600);        # gid 1: adv 600
+    # loca (short): glyph0 [0,26), glyph1 [26,44)
+    put_u16(buf, 254 + 0, 0);
+    put_u16(buf, 254 + 2, 13);
+    put_u16(buf, 254 + 4, 22);
+
+    # glyph 0 @260: triangle (10,10)(90,10)(50,90), all on-curve — the path_test glyph
+    var g = 260;
+    put_u16(buf, g + 0, 1);
+    put_u16(buf, g + 2, 10);
+    put_u16(buf, g + 4, 10);
+    put_u16(buf, g + 6, 90);
+    put_u16(buf, g + 8, 90);
+    put_u16(buf, g + 10, 2);
+    put_u16(buf, g + 12, 0);
+    store8(buf + g + 14, 0x01);
+    store8(buf + g + 15, 0x21);
+    store8(buf + g + 16, 0x03);
+    put_u16(buf, g + 17, 10);
+    put_u16(buf, g + 19, 80);
+    store8(buf + g + 21, 40);
+    put_u16(buf, g + 22, 10);
+    put_u16(buf, g + 24, 80);
+
+    # glyph 1 @286: composite -> glyph 0 offset by (100, 200) — the composite_test glyph
+    var c = 286;
+    put_u16(buf, c + 0, 0xFFFF);
+    put_u16(buf, c + 10, 0x03);        # ARGS_ARE_XY_VALUES | ARG_1_AND_2_ARE_WORDS, no MORE
+    put_u16(buf, c + 12, 0);
+    put_u16(buf, c + 14, 100);
+    put_u16(buf, c + 16, 200);
+
+    # cmap: format 4, one segment 'A'(65)..'B'(66) -> gid 0..1, plus the 0xFFFF terminator
+    var cm = 304;
+    put_u16(buf, cm + 2, 1);           # numTables
+    put_u16(buf, cm + 4, 3);           # platformID 3
+    put_u16(buf, cm + 6, 1);           # encodingID 1
+    put_u32(buf, cm + 8, 12);
+    var sub = cm + 12;
+    put_u16(buf, sub + 0, 4);          # format
+    put_u16(buf, sub + 2, 28);         # length
+    put_u16(buf, sub + 6, 4);          # segCountX2 -> 2 segments
+    put_u16(buf, sub + 14, 66);        # endCode[0] = 'B'
+    put_u16(buf, sub + 16, 65535);
+    put_u16(buf, sub + 20, 65);        # startCode[0] = 'A'
+    put_u16(buf, sub + 22, 65535);
+    put_u16(buf, sub + 24, 65536 - 65);   # idDelta[0] = -65 -> 'A' maps to gid 0
+    put_u16(buf, sub + 26, 1);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var len = 512;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+    build_font(buf);
+    var scale = SD_ONE / 16;
+    var oy = 6 * SD_ONE;
+
+    # ── A) NO HOOK: THE GLOBAL HEAP PAYS, AND IT PAYS THE SAME EVERY CALL ─────────────
+    check(sd_alloc_get(), 0);                                          # 1
+    var f = rekha_font_open(buf, len);
+    check(f != 0, 1);                                                  # 2
+    check(rekha_char_to_glyph(f, 65), 0);                              # 3
+    check(rekha_char_to_glyph(f, 66), 1);                              # 4
+    var g0 = alloc_used();
+    var p = rekha_char_to_sdpath(f, 65, scale, 0, oy);
+    var glyph_cost = alloc_used() - g0;
+    # ⛔ THE BASELINE, ASSERTED RATHER THAN ASSUMED. If this ever reads 0 the zeros below are
+    # measured against nothing. MEASURED 4,328 B: 136 B of rekha outline scratch + 4,192 B of
+    # sadish path (sd_path_new 4,144 + 3 points x 16).
+    check(glyph_cost > 0, 1);                                          # 5
+    check(sd_path_verb_count(p), 4);                                   # 6 — moveto, 2 lineto, close
+    g0 = alloc_used();
+    rekha_char_to_sdpath(f, 65, scale, 0, oy);
+    check(alloc_used() - g0, glyph_cost);                              # 7 — identical on the 2nd call
+    g0 = alloc_used();
+    var o = rekha_load_glyph(f, 0);
+    var outline_cost = alloc_used() - g0;
+    check(outline_cost >= REKHA_OUTLINE_SIZE, 1);                      # 8 — MEASURED 136 B
+    check(rekha_outline_n_points(o), 3);                               # 9
+    # Reading a font allocates nothing: a consumer that only measures text pays 0 under any hook.
+    g0 = alloc_used();
+    check(rekha_char_to_glyph(f, 66), 1);                              # 10
+    check(rekha_advance_width(f, 1), 600);                             # 11
+    check(rekha_units_per_em(f), 1000);                                # 12
+    check(alloc_used() - g0, 0);                                       # 13
+
+    # ── B) UNDER AN ARENA HOOK TWENTY GLYPHS COST THE GLOBAL HEAP EXACTLY 0 ───────────
+    g_arena = arena_new_growable(4194304);
+    check(g_arena != 0, 1);                                            # 14
+    check(sd_alloc_set(&hook_alloc), 0);                               # 15 — previous hook was none
+    check(sd_alloc_get(), &hook_alloc);                                # 16
+    # One warm-up call so any one-time cost (sadish's scratch is a FILL cost and never fires here,
+    # but the check must not depend on that) is paid before the measured window.
+    rekha_char_to_sdpath(f, 65, scale, 0, oy);
+    var gb = alloc_used();
+    var ab = arena_used(g_arena);
+    var i = 0;
+    while (i < 20) {
+        var pi = rekha_char_to_sdpath(f, 65, scale, 0, oy);
+        check(sd_path_verb_count(pi), 4);                              # 17..36 — the work is real
+        i = i + 1;
+    }
+    var hw1 = arena_used(g_arena) - ab;
+    # ⭐ THE HEADLINE. Twenty character -> path conversions: not one byte on the global heap.
+    # MEASURED: the twenty calls put 86,560 B on the arena (4,328 B per call — the same bytes group
+    # A saw on the global heap, moved). Before 0.3.10 the same loop leaked 2,720 B (136 x 20) on the
+    # global heap under this very hook. The arena is 4 MiB so it never chains a chunk — a chunk would
+    # come from the global allocator and fail this, which is the correct answer for an arena sized
+    # too small.
+    check(alloc_used() - gb, 0);                                       # 37
+    check(hw1, 20 * glyph_cost);                                       # 38 — every byte moved, none added
+    # Convergence: reset, repeat (warm-up included, so the window is the same one), same high-water
+    # mark — the arena is not growing frame over frame.
+    arena_reset(g_arena);
+    rekha_char_to_sdpath(f, 65, scale, 0, oy);
+    i = 0;
+    while (i < 20) {
+        rekha_char_to_sdpath(f, 65, scale, 0, oy);
+        i = i + 1;
+    }
+    check(arena_used(g_arena) - ab, hw1);                              # 39
+    check(alloc_used() - gb, 0);                                       # 40
+
+    # ── C) THE OUTLINE ITSELF IS IN THE ARENA — glyf.cyr's sites moved, not just sadish's ──
+    gb = alloc_used();
+    ab = arena_used(g_arena);
+    var oa = rekha_load_glyph(f, 0);
+    check(alloc_used() - gb, 0);                                       # 41
+    check(arena_used(g_arena) - ab, outline_cost);                     # 42 — the 136 B, on the arena
+    check(rekha_outline_n_points(oa), 3);                              # 43
+    check(in_arena(oa), 1);                                            # 44 — the record
+    check(in_arena(rekha_outline_end_pts(oa)), 1);                     # 45
+    check(in_arena(rekha_outline_xs(oa)), 1);                          # 46
+    check(in_arena(rekha_outline_ys(oa)), 1);                          # 47
+    check(in_arena(rekha_outline_on_curve(oa)), 1);                    # 48
+    check(load64(rekha_outline_xs(oa) + 16), 50);                      # 49 — and it decoded (apex x)
+    # The composite merge buffers (REKHA_COMPOSITE_MAXP x 2 x 8 + MAXP + MAXC x 8 = 70,656 B) are
+    # the largest thing rekha allocates and the one a per-label leak would show first. MEASURED
+    # 70,856 B per composite load (buffers + the component's 136 + two spans + the record).
+    gb = alloc_used();
+    ab = arena_used(g_arena);
+    var oc = rekha_load_glyph(f, 1);
+    var comp_cost = arena_used(g_arena) - ab;
+    check(alloc_used() - gb, 0);                                       # 50
+    check(comp_cost >= REKHA_COMPOSITE_MAXP * 17 + REKHA_COMPOSITE_MAXC * 8, 1);   # 51
+    check(in_arena(oc), 1);                                            # 52
+    check(in_arena(rekha_outline_xs(oc)), 1);                          # 53
+    check(in_arena(rekha_outline_end_pts(oc)), 1);                     # 54
+    check(load64(rekha_outline_xs(oc) + 0), 110);                      # 55 — translated by (100, 200)
+    check(load64(rekha_outline_ys(oc) + 0), 210);                      # 56
+    # The RekhaFont record follows the hook too (sfnt.cyr's one site) — which is WHY a consumer
+    # opens fonts outside a scoped hook: a font opened here dies with the arena's reset.
+    gb = alloc_used();
+    ab = arena_used(g_arena);
+    var fh = rekha_font_open(buf, len);
+    check(fh != 0, 1);                                                 # 57
+    check(alloc_used() - gb, 0);                                       # 58
+    check(arena_used(g_arena) - ab, REKHA_FONT_SIZE);                  # 59 — 40 B, on the arena
+    check(in_arena(fh), 1);                                            # 60
+    # ...and reading a font under the hook costs the arena nothing either.
+    ab = arena_used(g_arena);
+    check(rekha_char_advance_px(fh, 65, 16), 8);                       # 61 — 500/1000 * 16
+    check(arena_used(g_arena) - ab, 0);                                # 62
+
+    # ── D) sd_alloc_set(0) RESTORES; THE NEXT CALL IS BACK ON THE GLOBAL HEAP ──────────
+    check(sd_alloc_set(0), &hook_alloc);                               # 63 — restore returns the hook
+    check(sd_alloc_get(), 0);                                          # 64
+    var gd = alloc_used();
+    var ad = arena_used(g_arena);
+    rekha_char_to_sdpath(f, 66, scale, 0, oy);                         # the composite, via cmap
+    check((alloc_used() - gd) > 0, 1);                                 # 65
+    check(arena_used(g_arena) - ad, 0);                                # 66 — the arena saw nothing
+    gd = alloc_used();
+    rekha_char_to_sdpath(f, 65, scale, 0, oy);
+    check(alloc_used() - gd, glyph_cost);                              # 67 — exactly group A's cost
+
+    if (g_fails == 0) {
+        var ok = "alloc_test: PASS (rekha on sd_alloc; a hooked draw costs the heap 0)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "alloc_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
