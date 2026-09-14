@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.3.7
+Version: 0.3.8
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -57,12 +57,34 @@ rekha is a **system library** in the Sanskrit/Hindi naming lane. It is the
                 sadish (fill → coverage) ─▶ pixels
 ```
 
+## The embedded default face
+
+rekha ships one face as **data**, so a target with no font on disk still has
+something to open: `fonts/face_data.cyr` is a freestanding module (no stdlib)
+generated from `fonts/LiberationSans-Regular.ttf` (SIL OFL 1.1, unmodified;
+licence in `fonts/LICENSE-LiberationFonts`). A kernel consumes it by path —
+
+```toml
+[deps.rekha]
+path    = "../rekha"
+modules = ["fonts/face_data.cyr"]
+```
+
+— copies it into one contiguous buffer with `rekha_face_default_copy(dst, cap)`
+and **must** check `rekha_face_default_verify(buf, len)` before exposing it
+(see the 0.3.8 changelog for the compiler defect that makes the check
+load-bearing). Regenerate with `python3 scripts/face2cyr.py fonts/<face>.ttf
+fonts/face_data.cyr`; `programs/face_test.cyr` is the RUN proof.
+
 ## Consumers
 
-rekha has no live consumer yet; downstream repos pull `dist/rekha.cyr` via
-a `[deps.rekha]` git-tag entry. Its intended consumers are the AGNOS
-text/typography path — the `dhancha` UI toolkit, a terminal, document /
-UI text — anywhere scalable glyphs are needed.
+**agnos** (1.57.2) is the first live consumer — of the *data* half: the
+kernel folds `fonts/face_data.cyr` into its build and serves the face
+read-only at `/fonts/default.ttf` (see *The embedded default face* above).
+Downstream repos pull the *parser* half, `dist/rekha.cyr`, via a
+`[deps.rekha]` git-tag entry; its intended consumers are the AGNOS
+text/typography path — the `dhancha` UI toolkit, `crab`, a terminal,
+document / UI text — anywhere scalable glyphs are needed.
 
 ## Dependencies
 
@@ -74,7 +96,7 @@ UI text — anywhere scalable glyphs are needed.
 - No inflate/thread deps yet — SFNT tables are read raw (uncompressed).
   WOFF/WOFF2 (which need `sankoch`) are a later scope.
 
-The toolchain pin is `cyrius = "6.4.7"`.
+The toolchain pin is `cyrius = "6.6.3"`.
 
 ## Quick Start
 

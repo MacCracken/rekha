@@ -80,6 +80,19 @@ jobs:
           fi
           echo "dist/rekha.cyr matches src/"
 
+      - name: Verify the embedded default face is in sync with its source .ttf
+        # fonts/face_data.cyr is GENERATED from fonts/LiberationSans-Regular.ttf by
+        # scripts/face2cyr.py and lives outside src/ on purpose: cyrfmt refuses files over
+        # 1028 KB, and the module is data, not code. This gate is what keeps the two from
+        # drifting — regenerate into a temp file and require a byte-identical result.
+        run: |
+          python3 scripts/face2cyr.py fonts/LiberationSans-Regular.ttf /tmp/face_data.regen.cyr
+          if ! cmp -s fonts/face_data.cyr /tmp/face_data.regen.cyr; then
+            echo "ERROR: fonts/face_data.cyr is stale. Run scripts/face2cyr.py and commit the result."
+            exit 1
+          fi
+          echo "fonts/face_data.cyr matches fonts/LiberationSans-Regular.ttf"
+
       - name: Build (link-check, DCE on)
         run: |
           mkdir -p build

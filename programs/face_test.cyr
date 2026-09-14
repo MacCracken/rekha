@@ -1,0 +1,70 @@
+# programs/face_test.cyr — RUN test for the embedded default face (fonts/face_data.cyr).
+#
+# The face module is FREESTANDING and generated; this test is the proof that what it
+# carries is (a) byte-exact against the generator's FNV-1a and (b) a face rekha itself
+# can open and use: sfnt open, glyf/loca/cmap present, 'A' -> a glyph with contours,
+# a positive advance, unitsPerEm 2048 (Liberation Sans). Exit code = failed checks.
+#
+# ⚠ It exercises the SAME copy+verify path a kernel consumer runs, so a compiler that
+# corrupts a literal (the 64 KB even-length trap the generator documents) fails HERE, on
+# the host, before the bytes reach a target.
+include "src/lib.cyr"
+include "fonts/face_data.cyr"
+
+var g_fails = 0;
+
+fn check(got, want): i64 {
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    return 1;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var n = rekha_face_default_len();
+    check(n, 410820);
+    check(rekha_face_default_chunk_count(), 101);
+    # too-small cap is refused, not truncated
+    var tiny = alloc(16);
+    check(rekha_face_default_copy(tiny, 16), 0 - 1);
+    # full copy + verify
+    var buf = alloc(n + 64);
+    check(rekha_face_default_copy(buf, n + 64), n);
+    check(rekha_face_default_verify(buf, n), 1);
+    # verify must FAIL on one flipped byte (the gate is not vacuous)
+    var b0 = load8(buf + 12345);
+    store8(buf + 12345, b0 ^ 0x5A);
+    check(rekha_face_default_verify(buf, n), 0);
+    store8(buf + 12345, b0);
+    check(rekha_face_default_verify(buf, n), 1);
+    # ...and on a wrong length
+    check(rekha_face_default_verify(buf, n - 1), 0);
+
+    # through rekha proper
+    var f = rekha_font_open(buf, n);
+    if (f == 0) { g_fails = g_fails + 1; return g_fails; }
+    check(rekha_units_per_em(f), 2048);
+    if (rekha_find_table(f, REKHA_TAG_GLYF) == 0) { g_fails = g_fails + 1; }
+    if (rekha_find_table(f, REKHA_TAG_CMAP) == 0) { g_fails = g_fails + 1; }
+    if (rekha_glyph_count(f) < 100) { g_fails = g_fails + 1; }
+    var ga = rekha_char_to_glyph(f, 65);              # 'A'
+    if (ga <= 0) { g_fails = g_fails + 1; }
+    var o = rekha_load_glyph(f, ga);
+    if (o == 0) { g_fails = g_fails + 1; }
+    else { if (rekha_outline_n_contours(o) < 1) { g_fails = g_fails + 1; } }
+    if (rekha_char_advance(f, 65) <= 0) { g_fails = g_fails + 1; }
+    # proportional: 'i' narrower than 'W' — the property crab's derived widths depend on
+    if (rekha_char_advance(f, 105) >= rekha_char_advance(f, 87)) { g_fails = g_fails + 1; }
+
+    if (g_fails == 0) {
+        var ok = "face_test: PASS (embedded default face byte-exact + usable through rekha)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "face_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

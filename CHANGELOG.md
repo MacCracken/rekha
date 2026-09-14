@@ -5,6 +5,46 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.8] - 2026-09-13 — the embedded default face: kernel support, half one
+
+### Added — `fonts/face_data.cyr`, a freestanding data module carrying one TrueType face
+
+⭐ **AGNOS had no proportional face a client could open, and the operator ruled rekha the
+answer** (agnos issue `2026-09-13-no-proportional-face-on-the-target.md`, filed by crab). Stack-wide
+there was no `.ttf` in any first-party repo; rekha parsed faces it never shipped. This is the
+rekha half of the fix, shaped exactly like kashi's `src/font_data.cyr`: a **freestanding** module
+(no stdlib, no heap, no syscalls — string literals, integer arithmetic, `load8`/`store8`) that a
+freestanding kernel concatenates by path via `[deps.rekha] modules = ["fonts/face_data.cyr"]`.
+
+- **The face is Liberation Sans Regular 2.1.5, embedded UNMODIFIED** (410,820 bytes, glyf outlines,
+  format-4 BMP cmap — the two things `rekha_font_open` requires). `fonts/LiberationSans-Regular.ttf`
+  is the source of truth and `fonts/LICENSE-LiberationFonts` (SIL OFL 1.1, Reserved Font Name
+  *Liberation*) travels with it. ⚠ **Unmodified on purpose**: a subset is a Modified Version under
+  the OFL and may not keep the Reserved Font Name, and no first-party subsetter exists; the full
+  face costs a kernel ~410 KB of `.rodata` and a 2 MB page at boot, which agnos accepted.
+- **API**: `rekha_face_default_len()` · `rekha_face_default_copy(dst, cap)` (→ length, or −1 when
+  `cap` is short) · `rekha_face_default_verify(buf, len)` (FNV‑1a‑64 against the generator's hash of
+  the source file → 1/0) · `rekha_face_default_name()`/`_name_len()` · per-chunk accessors.
+- ⛔ **4096-byte chunks, and the reason is a compiler defect found while building this.** A cyrius
+  6.6.3 string literal of EVEN length ≥ 65536 is emitted **shifted by one byte** (its first byte
+  lost) on every alternate literal — `rc=0`, byte count intact, content wrong. Bisected over
+  4096..131072 against an FNV‑1a of the file: odd lengths ≥ 65536 and every length < 65536 are
+  byte-exact. Filed against cyrius; the generator stays far below the trap **and** the module carries
+  the whole-face hash so a consumer verifies what it assembled rather than trusting the compiler.
+  `programs/face_test.cyr` runs the same copy+verify path on the host, so the trap fails there before
+  the bytes reach a target, and proves the verify is not vacuous (one flipped byte → 0).
+- **`scripts/face2cyr.py`** (Python stdlib only — no fonttools) generates the module and refuses a
+  CFF face or one missing `glyf`/`loca`/`cmap`/`hhea`/`hmtx`/`head`/`maxp`. CI regenerates into a
+  temp file and requires a byte-identical match, so the data cannot drift from the `.ttf`.
+- **Not in `[lib].modules`, not in `dist/rekha.cyr`, and outside `src/`**: 1.6 MB of generated
+  literals must never ride into a consumer's bundle, and `cyrfmt` refuses files over 1028 KB.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.3`** (vendored `lib/` re-synced from the pin; `cyrius.lock` re-emitted in
+  the sorted order 6.6.3 now writes — same entries, order only). All eight RUN suites pass, including
+  the new `face_test`.
+
 ## [0.3.6] - 2026-09-02 — horizontal metrics: hhea + hmtx
 
 ### Added — `rekha_advance_width`, and the reason the tags existed without it
