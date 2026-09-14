@@ -5,6 +5,24 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.9] - 2026-09-14 — the literal defect is fixed upstream; the chunks stay
+
+### Changed
+
+- **Toolchain `6.6.3` → `6.6.4`**, moving with agnos 1.57.4 and kashi 1.0.8 (vendored `lib/` re-synced;
+  `cyrius.lock` moves only for the six stdlib files 6.6.4 changed). All eight RUN suites pass.
+- ✅ **The compiler defect 0.3.8 filed is FIXED in cyrius 6.6.4** — the lexer packed every string
+  token as `(pool offset << 16) | length`, so a length ≥ 65,536 OR-ed into its own offset (the
+  filing's "even length / alternate literal" narrative was the pool layout, not the mechanism);
+  widened to `<< 32`. **Re-measured under 6.6.4:** the self-proving repro exits 0 and a SINGLE
+  410,820-byte literal of this face compiles byte-exact (the same bisection that found it: 65,536,
+  131,072 and 410,820 all OK). `scripts/face2cyr.py` and the generated header now record the defect
+  as history rather than as a live constraint.
+- ⚠ **The 4 KB chunks and `rekha_face_default_verify` stay.** A consumer that exposes bytes it has
+  not hashed is trusting the compiler again; the boot-time verify that a chunked module makes cheap
+  is what caught the last defect and is the only thing that would catch the next. `fonts/face_data.cyr`
+  is byte-identical to 0.3.8 outside its header comment (regenerate-and-diff gate green).
+
 ## [0.3.8] - 2026-09-13 — the embedded default face: kernel support, half one
 
 ### Added — `fonts/face_data.cyr`, a freestanding data module carrying one TrueType face

@@ -17,11 +17,13 @@
 # rekha itself is GPL-3.0-only; the OFL permits bundling with software under any licence.
 #
 # Storage model: 101 string literals of 4096 bytes (the tail shorter), reachable by index
-# through rekha_face_default_chunk(i). ⛔ 4 KB ON PURPOSE — cyrius 6.6.3 emits a string
-# literal of EVEN length >= 65536 shifted by one byte on every alternate literal, silently
-# (rc=0, count intact, content wrong); measured by bisection, filed against cyrius. A
-# consumer assembles the chunks into ONE contiguous buffer with rekha_face_default_copy()
-# and MUST check rekha_face_default_verify() before exposing the result to anyone.
+# through rekha_face_default_chunk(i). 4 KB chunks — history: cyrius 6.6.3 emitted a string
+# literal of >= 65536 bytes read from its SECOND byte on alternate literals, silently (rc=0,
+# count intact, content wrong); found by bisection here, filed, FIXED in cyrius 6.6.4 (the
+# lexer packed a 16-bit length into the pool offset). The chunks stay: a consumer assembles
+# them into ONE contiguous buffer with rekha_face_default_copy() and MUST check
+# rekha_face_default_verify() before exposing the result — that verify is what found the last
+# compiler defect and is the only thing that would find the next one.
 #
 # Consumption contract (agnos kernel):
 #   var n = rekha_face_default_len();

@@ -7,12 +7,15 @@ The output uses NO stdlib, NO heap, NO syscalls — only string literals, intege
 the load8/store8 intrinsics — so a freestanding kernel (agnos: `[deps] stdlib = []`) can
 `include`/concatenate it exactly the way it consumes kashi's src/font_data.cyr.
 
-⛔ WHY 4096-BYTE CHUNKS, MEASURED (cyrius 6.6.3, 2026-09-13): a string literal of EVEN length
->= 65536 is emitted SHIFTED BY ONE BYTE (its first byte lost) on every alternate literal —
-rc=0, byte COUNT intact, only the CONTENT wrong. Odd lengths >= 65536 and every length below
-65536 came out byte-exact (bisected over 4096..131072 against an FNV-1a of the source file).
-Filed against cyrius. Chunks stay far below the trap, and the module carries the FNV-1a of the
-whole face so a consumer verifies the bytes it assembled instead of trusting the compiler.
+⛔ WHY 4096-BYTE CHUNKS — HISTORY, AND WHY THEY STAY. Measured on cyrius 6.6.3 (2026-09-13): a
+string literal of >= 65536 bytes came back read from its SECOND byte on alternate literals —
+rc=0, byte COUNT intact, only the CONTENT wrong (bisected over 4096..131072 against an FNV-1a of
+the source file; filed as cyrius issues/2026-09-13-agnos-large-string-literal-loses-first-byte).
+✅ FIXED in cyrius 6.6.4 (2026-09-14): the lexer packed `(pool offset << 16) | length`, so a
+length >= 65536 OR-ed into its own offset; widened to `<< 32`. Re-measured under 6.6.4: the
+repro exits 0 and a SINGLE 410,820-byte literal of this face compiles byte-exact. The chunks
+stay anyway — a consumer that reads bytes it has not hashed is trusting the compiler again,
+and the boot-time verify a chunked module makes cheap is what caught the last one.
 Python stdlib only — no fonttools. The face is embedded UNMODIFIED (no subsetting), which is
 what keeps an OFL face's Reserved Font Name intact; see fonts/LICENSE-LiberationFonts.
 """
@@ -81,11 +84,13 @@ def main():
         w('# rekha itself is GPL-3.0-only; the OFL permits bundling with software under any licence.\n')
         w('#\n')
         w('# Storage model: %d string literals of %d bytes (the tail shorter), reachable by index\n' % (len(chunks), CHUNK))
-        w('# through rekha_face_default_chunk(i). ⛔ 4 KB ON PURPOSE — cyrius 6.6.3 emits a string\n')
-        w('# literal of EVEN length >= 65536 shifted by one byte on every alternate literal, silently\n')
-        w('# (rc=0, count intact, content wrong); measured by bisection, filed against cyrius. A\n')
-        w('# consumer assembles the chunks into ONE contiguous buffer with rekha_face_default_copy()\n')
-        w('# and MUST check rekha_face_default_verify() before exposing the result to anyone.\n')
+        w('# through rekha_face_default_chunk(i). 4 KB chunks — history: cyrius 6.6.3 emitted a string\n')
+        w('# literal of >= 65536 bytes read from its SECOND byte on alternate literals, silently (rc=0,\n')
+        w('# count intact, content wrong); found by bisection here, filed, FIXED in cyrius 6.6.4 (the\n')
+        w('# lexer packed a 16-bit length into the pool offset). The chunks stay: a consumer assembles\n')
+        w('# them into ONE contiguous buffer with rekha_face_default_copy() and MUST check\n')
+        w('# rekha_face_default_verify() before exposing the result — that verify is what found the last\n')
+        w('# compiler defect and is the only thing that would find the next one.\n')
         w('#\n')
         w('# Consumption contract (agnos kernel):\n')
         w('#   var n = rekha_face_default_len();\n')

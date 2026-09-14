@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.3.8
+Version: 0.3.9
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -72,8 +72,8 @@ modules = ["fonts/face_data.cyr"]
 
 — copies it into one contiguous buffer with `rekha_face_default_copy(dst, cap)`
 and **must** check `rekha_face_default_verify(buf, len)` before exposing it
-(see the 0.3.8 changelog for the compiler defect that makes the check
-load-bearing). Regenerate with `python3 scripts/face2cyr.py fonts/<face>.ttf
+(the 0.3.8 changelog records the compiler defect that check caught — fixed
+in cyrius 6.6.4 — and 0.3.9 why the check stays). Regenerate with `python3 scripts/face2cyr.py fonts/<face>.ttf
 fonts/face_data.cyr`; `programs/face_test.cyr` is the RUN proof.
 
 ## Consumers
@@ -96,7 +96,7 @@ document / UI text — anywhere scalable glyphs are needed.
 - No inflate/thread deps yet — SFNT tables are read raw (uncompressed).
   WOFF/WOFF2 (which need `sankoch`) are a later scope.
 
-The toolchain pin is `cyrius = "6.6.3"`.
+The toolchain pin is `cyrius = "6.6.4"`.
 
 ## Quick Start
 
