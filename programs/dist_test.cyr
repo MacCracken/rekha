@@ -1,0 +1,95 @@
+# programs/dist_test.cyr — RUN test for the SHIPPED bundle, dist/rekha.cyr, compiled the way a
+# consumer compiles it.
+#
+# ⭐ WHAT THIS EXISTS TO PROVE. Every other suite includes src/lib.cyr, so a bundle that
+# `cyrius distlib` folded wrong (a module dropped, an order swapped, an include left behind, a
+# helper that only src/ defines) would pass all of them and fail the first consumer. This suite
+# never touches src/: it includes the stdlib prelude exactly as src/lib.cyr lists it, then sadish,
+# then dist/rekha.cyr, then the embedded face — the consumer's include chain — and drives the
+# bundle end to end through the public API.
+#
+# ⚠ The bundle must be CURRENT for this to mean anything: `cyrius distlib --check` compares
+# dist/rekha.cyr against src/ (read-only) and is the companion gate. This suite proves the bundle
+# COMPILES and WORKS; that check proves it is the bundle of today's src/.
+#
+# Every build log is clean under CYRIUS_DCE=0 and 1 (no `undefined function`: the classic symptom
+# of a bundle that calls something only src/ defines). Exit code = failed checks; each failure
+# prints its check number to fd 2.
+
+# ---- the consumer's include chain: the stdlib prelude of src/lib.cyr, sadish, the bundle ----
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+include "lib/bench.cyr"
+include "lib/sadish.cyr"
+include "dist/rekha.cyr"
+include "fonts/face_data.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "dist_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    # ── the record layout the bundle ships ──
+    check(REKHA_FONT_SIZE, 160);                                       # 1
+    check(REKHA_OUTLINE_SIZE, 48);                                     # 2
+    check(rekha_font_open(0, 0), 0);                                   # 3 — no buffer, no font
+
+    # ── the embedded face, copied + verified exactly as a kernel consumer does ──
+    var n = rekha_face_default_len();
+    var buf = alloc(n + 64);
+    check(rekha_face_default_copy(buf, n + 64), n);                    # 4
+    check(rekha_face_default_verify(buf, n), 1);                       # 5
+    var f = rekha_font_open(buf, n);
+    check(f != 0, 1);                                                  # 6
+    if (f == 0) {
+        var nf = "dist_test: FAIL (the bundle could not open the face)\n";
+        syscall(1, 2, nf, strlen(nf));
+        return g_fails;
+    }
+    check(rekha_units_per_em(f), 2048);                                # 7
+
+    # ── shape and metric, through the bundle ──
+    var ga = rekha_char_to_glyph(f, 65);                               # 'A'
+    check(ga > 0, 1);                                                  # 8
+    var scale = (32 * SD_ONE) / rekha_units_per_em(f);
+    var p = rekha_char_to_sdpath(f, 65, scale, 0, 30 * SD_ONE);
+    check(p != 0, 1);                                                  # 9
+    if (p != 0) {
+        check(sd_path_verb_count(p) > 0, 1);                           # 10
+    }
+    check(rekha_char_advance_px(f, 65, 32) > 0, 1);                    # 11
+    # the 0.3.11 16.16 advance is in the bundle too, and agrees with the rounded pixel one
+    var fx = rekha_char_advance_fx(f, 65, 32);
+    check(fx > 0, 1);                                                  # 12
+    check((fx + 32768) / 65536, rekha_char_advance_px(f, 65, 32));     # 13
+
+    if (g_fails == 0) {
+        var ok = "dist_test: PASS (dist/rekha.cyr compiles and draws the consumer way)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "dist_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

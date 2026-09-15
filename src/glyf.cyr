@@ -1,13 +1,13 @@
 # @internal — glyf-table outline loader + the sadish path seam.
 # glyf.cyr — read a TrueType glyph's outline (contours of on-curve /
-# off-curve points) out of the 'glyf' table and emit it as a sequence of
-# path verbs (moveto / lineto / quadto / close) into a sink.
+# off-curve points) out of the 'glyf' table and emit it as sadish path verbs
+# (moveto / lineto / quadto / close) appended to an SdPath.
 #
 # rekha does NOT rasterize. It emits RESOLUTION-INDEPENDENT PATHS; the
 # `sadish` 2D vector core consumes those verbs and fills them to pixels.
-# This module is the seam between the two: rekha_outline_to_path walks a
-# RekhaOutline and calls the sink for each verb. sadish is the intended
-# consumer of that verb stream (deferred cross-dep — not wired at scaffold).
+# This module is the seam between the two: rekha_outline_to_sdpath walks a
+# RekhaOutline and appends each verb to a sadish SdPath. sadish is a wired,
+# hard dependency (src/lib.cyr includes it).
 #
 # TrueType glyf entry (per glyph, big-endian):
 #   +0  numberOfContours  i16  (>= 0 simple; < 0 composite)
@@ -21,38 +21,49 @@
 # RekhaOutline — a decoded glyph outline (48 bytes).
 # Point coords are in font design units (unitsPerEm space); the consumer
 # scales. Contour structure is captured as parallel arrays so
-# rekha_outline_to_path can reconstruct on-curve/off-curve runs into
+# rekha_outline_to_sdpath can reconstruct on-curve/off-curve runs into
 # quadratic segments.
 #
 #   +0   n_contours   (i64 — number of closed contours; 0 = empty glyph)
 #   +8   n_points     (i64 — total point count across all contours)
-#   +16  end_pts      (ptr — u16[n_contours] last-point index per contour, or 0)
-#   +24  xs           (ptr — i16[n_points] x coords in design units, or 0)
-#   +32  ys           (ptr — i16[n_points] y coords in design units, or 0)
+#   +16  end_pts      (ptr — i64[n_contours] last-point index per contour, or 0)
+#   +24  xs           (ptr — i64[n_points] x coords in design units, or 0)
+#   +32  ys           (ptr — i64[n_points] y coords in design units, or 0)
 #   +40  on_curve     (ptr — u8[n_points] 1 = on-curve, 0 = off-curve, or 0)
+#
+# ⭐ WHAT THE LOADERS GUARANTEE: end_pts STRICTLY increase and every one is < n_points, and the four
+# arrays are carved from the SAME allocation as the record (record first, then end_pts, xs, ys,
+# on_curve) — one sd_alloc per decoded glyph.
 #
 # ⭐ EVERY BYTE THIS MODULE ALLOCATES COMES FROM sadish's SEAM (`sd_alloc`, sadish >= 0.5.5), NOT
 # THE STDLIB `alloc`. rekha already hard-depends on sadish (rekha_outline_to_sdpath builds SdPaths),
 # so the draw stack has ONE allocation knob, owned by the leaf — the way it has one fixed-point
 # convention (16.16, sadish's). A consumer that scopes `sd_alloc_set` around a text draw gets the
 # outlines, the paths and the coverage from the same place, and a per-frame arena reclaims all
-# three at once. Before 0.3.10 the outline scratch below (span, end_pts, flags, on_curve, xs, ys,
-# the record) came from the global bump allocator, which has no free(): MEASURED 136 B per
+# three at once. Before 0.3.10 the outline scratch (span, end_pts, flags, on_curve, xs, ys, the
+# record) came from the global bump allocator, which has no free(): MEASURED 136 B per
 # rekha_char_to_sdpath of a 3-point glyph, PER GLYPH PER LABEL PER FRAME, leaking under a
 # consumer's hook even after sadish 0.5.5 had moved the 4,192 B path onto it (dhancha's filing,
 # 2026-09-13-scalable-text-allocates-per-call-outside-the-frame-arena.md).
-# ⚠ `rekha_font_open`'s 40-byte RekhaFont lands in the hook too when one is set. A font outlives
+# 0.3.11 carves each glyph into one block (the span lives on the stack, the flag bytes ride in
+# on_curve): MEASURED 112 B for that 3-point glyph, and a composite costs its children + an
+# n-slot pointer array + one exact-size merged block — MEASURED 232 B for alloc_test's
+# one-component composite, which 0.3.10 paid 70,856 B for (fixed 4096-point merge buffers).
+# ⚠ `rekha_font_open`'s 160-byte RekhaFont lands in the hook too when one is set. A font outlives
 # every frame, so a consumer opens fonts OUTSIDE a scoped hook. Reading one costs nothing:
 # rekha_char_to_glyph / rekha_advance_width / rekha_units_per_em allocate 0 B (MEASURED).
 # ⛔ A pointer that outlives the hook's backing store is dangling. An outline or a path made under
 # an arena hook must not be kept across that arena's reset; that is the consumer's lifetime call,
 # exactly as it is for sadish's own paths.
-# ⛔ THE HOOK MUST NOT RETURN 0. `rekha_outline_empty` and `rekha_font_open` check their allocation;
-# the loaders below (end_pts, flags, on_curve, xs, ys, the composite merge buffers, the span) store
-# straight through it, as they always did with `alloc` — MEASURED: under a hook that returns 0,
-# `rekha_font_open` returns 0 correctly and `rekha_char_to_sdpath` faults (rc 139). A hook backed by
-# an arena that can refuse must fall back to the global allocator, which is what dhancha's
-# `dh_falloc` does ("exhaustion degrades to a leak, never to a null deref"), not to 0.
+# ⛔ A HOOK THAT CAN REFUSE MUST STILL FALL BACK TO THE GLOBAL ALLOCATOR, NOT RETURN 0. rekha's own
+# sites all check now: the loaders return 0 ("0 only on OOM") instead of storing through a refused
+# block, and rekha_outline_to_sdpath maps a 0 outline to an empty path. sadish does not: sd_path_new
+# checks only its 48 B record, and the verb / point pushes and every SdPoint store through their
+# blocks unchecked. MEASURED with a hook that grants its first K blocks and then returns 0: when
+# the refusal lands on a rekha site, rekha_char_to_sdpath returns 0 (rc 0 — 0.3.10 faulted, rc 139);
+# when it lands on sadish's verb buffer, the draw still faults (rc 139). So a hook backed by an
+# arena that can refuse must do what dhancha's `dh_falloc` does ("exhaustion degrades to a leak,
+# never to a null deref").
 # ================================================================
 var REKHA_OUTLINE_SIZE = 48;
 
@@ -63,12 +74,10 @@ fn rekha_outline_xs(o): i64         { return load64(o + 24); }
 fn rekha_outline_ys(o): i64         { return load64(o + 32); }
 fn rekha_outline_on_curve(o): i64   { return load64(o + 40); }
 
-# Allocate an empty outline (all fields zeroed). Returns 0 on OOM.
-fn rekha_outline_empty(): i64 {
-    var o = sd_alloc(REKHA_OUTLINE_SIZE);
-    if (o == 0) {
-        return 0;
-    }
+# Zero an outline record in place, making it a valid empty outline. Returns `o`. A loader that
+# finds malformed data AFTER carving its block returns the block this way rather than allocating
+# a second, empty record.
+fn rekha_outline_clear(o): i64 {
     store64(o, 0);
     store64(o + 8, 0);
     store64(o + 16, 0);
@@ -78,93 +87,151 @@ fn rekha_outline_empty(): i64 {
     return o;
 }
 
-# ================================================================
-# Path verb opcodes — the sadish path-verb vocabulary rekha emits.
-# rekha_outline_to_path calls sink(verb, x, y) with these.
-# ================================================================
-enum RekhaPathVerb {
-    REKHA_VERB_MOVETO = 0;   # start a new contour at (x, y)
-    REKHA_VERB_LINETO = 1;   # straight edge to (x, y)
-    REKHA_VERB_QUADTO = 2;   # quadratic curve; control point delivered separately
-    REKHA_VERB_CLOSE  = 3;   # close the current contour (x, y ignored)
+# Allocate an empty outline (all fields zeroed). Returns 0 on OOM.
+fn rekha_outline_empty(): i64 {
+    var o = sd_alloc(REKHA_OUTLINE_SIZE);
+    if (o == 0) {
+        return 0;
+    }
+    return rekha_outline_clear(o);
 }
 
 # ================================================================
-# glyf access — count + load + path emit.
+# Load caps. They bound what ONE rekha_load_glyph may decode and allocate, whatever the font says —
+# an attacker writes maxp too, so none of them is read from the font.
+#
+#   REKHA_COMPOSITE_MAXP        points in ONE outline: a simple glyph declaring more, or a
+#                               composite whose children sum to more, is REJECTED (empty) — never
+#                               clamped, since a clamped point array under unclamped end_pts is an
+#                               out-of-bounds read at emit.
+#   REKHA_COMPOSITE_MAXC        contours in one composite outline (rejected past it, as above).
+#   REKHA_COMPOSITE_MAXDEPTH    component nesting; depth 0 is the glyph asked for.
+#   REKHA_GLYPH_MAXLOADS        glyph loads per rekha_load_glyph, the root included.
+#   REKHA_GLYPH_MAXPOINTS_TOTAL points decoded across the whole load: every simple glyph's np plus
+#                               every composite's merged total.
+# ⛔ The last two are the load-bearing DoS bound. Depth alone let a composite whose N components
+# reference one glyph (itself, or an acyclic chain of them) decode sum N^L bodies; cycle detection
+# alone does not catch the acyclic case. Tripping either one ABORTS the whole load — sticky, the
+# top-level result is an EMPTY outline, never a partial one — and so does a depth overrun or a gid
+# that already sits on its own component stack.
 # ================================================================
+var REKHA_COMPOSITE_MAXP        = 4096;
+var REKHA_COMPOSITE_MAXC        = 128;
+var REKHA_COMPOSITE_MAXDEPTH    = 5;
+var REKHA_GLYPH_MAXLOADS        = 64;
+var REKHA_GLYPH_MAXPOINTS_TOTAL = 16384;
 
-# Number of glyphs in the font (maxp.numGlyphs — u16 at maxp+4).
-fn rekha_glyph_count(font): i64 {
-    var maxp = rekha_find_table(font, REKHA_TAG_MAXP);
-    if (maxp == 0) { return 0; }
-    return rekha_rd_u16(rekha_font_data(font), maxp + 4);
+# The load context lives on rekha_load_glyph's STACK (0 B of heap), as i64 slots:
+#   +0  loads remaining      +8  points remaining      +16  abort (0 / 1)
+#   +24 gid stack: the gid being loaded at depth d sits at +24 + d*8, d = 0..MAXDEPTH
+# ⛔ 3 + (REKHA_COMPOSITE_MAXDEPTH + 1) slots — rekha_load_glyph declares 9. Raise both together.
+fn rekha_load_abort(ctx): i64 {
+    store64(ctx + 16, 1);
+    return rekha_outline_empty();
 }
+
+# ================================================================
+# glyf access — load + path emit. (rekha_glyph_count, a maxp reader, lives in sfnt.cyr.)
+# Every byte a loader reads lies inside the glyph's span [start, end), which rekha_glyf_span has
+# already bounded by glyf's declared length; a read that would leave the span returns an empty
+# outline.
+# ================================================================
 
 # Parse a SIMPLE glyph (numberOfContours nc > 0) spanning [start, end). Arrays
 # are i64 (xs/ys/end_pts) + u8 (on_curve); coords are absolute (delta-decoded)
-# design units. Every read is bounds-checked; returns an empty outline on any
-# malformed / out-of-bounds read.
-fn rekha_load_simple(font, start, end, nc): i64 {
+# design units. Empty for a truncated glyph, for endPtsOfContours that do not
+# strictly increase, for np > REKHA_COMPOSITE_MAXP, and for more points than the
+# remaining bytes could carry as flags. 0 only on OOM.
+fn rekha_load_simple(font, start, end, nc, ctx): i64 {
     var buf = rekha_font_data(font);
     var p = start + 10;                    # skip numberOfContours(2) + bbox(8)
     if (p + nc * 2 > end) { return rekha_outline_empty(); }
-    var end_pts = sd_alloc(nc * 8);
-    var np = 0;
-    var i = 0;
-    while (i < nc) {
-        var ep = rekha_rd_u16(buf, p + i * 2);
-        store64(end_pts + i * 8, ep);
-        np = ep + 1;
-        i = i + 1;
-    }
+    # O(1) gates FIRST: the LAST endPt sizes the arrays; strict increase is walked below, once the
+    # glyph has been charged. ⛔ Walking all nc endPts before any cap let a composite of 63 rejected
+    # 32,767-contour glyphs spend ~2 M iterations in one load — MEASURED 9.6 ms, outside every budget.
+    var np = rekha_rd_u16(buf, p + (nc - 1) * 2) + 1;
+    if (nc > np) { return rekha_outline_empty(); }
+    if (np > REKHA_COMPOSITE_MAXP) { return rekha_outline_empty(); }
+    var eps_at = p;
     p = p + nc * 2;
 
     if (p + 2 > end) { return rekha_outline_empty(); }
     var instr_len = rekha_rd_u16(buf, p);
     p = p + 2 + instr_len;
     if (p > end) { return rekha_outline_empty(); }
-    if (np <= 0) { return rekha_outline_empty(); }
+    # Two flag bytes (flag + REPEAT count) declare at most 256 points, so a glyph whose np exceeds
+    # what its remaining bytes could encode is refused BEFORE it costs an allocation.
+    if (np > (end - p) * 128 + 1) { return rekha_outline_empty(); }
+    # Charged BEFORE the O(nc) walk (nc <= np), so the walk itself is inside the points budget.
+    var pts_left = load64(ctx + 8) - np;
+    if (pts_left < 0) { return rekha_load_abort(ctx); }
+    store64(ctx + 8, pts_left);
+    # ⛔ STRICTLY INCREASING, so the last endPt bounds every contour: an earlier endPt past np would
+    # walk emit off the point arrays.
+    var last = 0 - 1;
+    var i = 0;
+    while (i < nc) {
+        var ep = rekha_rd_u16(buf, eps_at + i * 2);
+        if (ep <= last) { return rekha_outline_empty(); }
+        last = ep;
+        i = i + 1;
+    }
 
-    var flags = sd_alloc(np);
-    var on_curve = sd_alloc(np);
+    var o = sd_alloc(REKHA_OUTLINE_SIZE + nc * 8 + np * 17);
+    if (o == 0) { return 0; }
+    var end_pts = o + REKHA_OUTLINE_SIZE;
+    var xs = end_pts + nc * 8;
+    var ys = xs + np * 8;
+    var on_curve = ys + np * 8;
+    # ⚠ The bytes are fetched AGAIN here, across an sd_alloc a hook could use to rewrite a shared
+    # buffer, so the check is repeated on what is STORED — the guarantee emit and the composite
+    # merge rely on is about end_pts, not about the font bytes.
+    last = 0 - 1;
+    i = 0;
+    while (i < nc) {
+        var ep2 = rekha_rd_u16(buf, eps_at + i * 2);
+        if (ep2 <= last) { return rekha_outline_clear(o); }
+        store64(end_pts + i * 8, ep2);
+        last = ep2;
+        i = i + 1;
+    }
+    if (last != np - 1) { return rekha_outline_clear(o); }
+
+    # The raw flag bytes decode INTO on_curve; the y pass (their last reader) masks each to 0/1.
     var fi = 0;
     while (fi < np) {
-        if (p >= end) { return rekha_outline_empty(); }
+        if (p >= end) { return rekha_outline_clear(o); }
         var fl = load8(buf + p);
         p = p + 1;
-        store8(flags + fi, fl);
-        store8(on_curve + fi, fl & 1);
+        store8(on_curve + fi, fl);
         fi = fi + 1;
         if ((fl & 8) != 0) {
-            if (p >= end) { return rekha_outline_empty(); }
+            if (p >= end) { return rekha_outline_clear(o); }
             var rep = load8(buf + p);
             p = p + 1;
+            if (rep > np - fi) { rep = np - fi; }
             var r = 0;
             while (r < rep) {
-                if (fi < np) {
-                    store8(flags + fi, fl);
-                    store8(on_curve + fi, fl & 1);
-                    fi = fi + 1;
-                }
+                store8(on_curve + fi, fl);
+                fi = fi + 1;
                 r = r + 1;
             }
         }
     }
 
-    var xs = sd_alloc(np * 8);
     var x = 0;
     var xi = 0;
     while (xi < np) {
-        var fx = load8(flags + xi);
+        var fx = load8(on_curve + xi);
         var dx = 0;
         if ((fx & 2) != 0) {
-            if (p >= end) { return rekha_outline_empty(); }
+            if (p >= end) { return rekha_outline_clear(o); }
             dx = load8(buf + p);
             p = p + 1;
             if ((fx & 16) == 0) { dx = 0 - dx; }
         } else {
             if ((fx & 16) == 0) {
-                if (p + 2 > end) { return rekha_outline_empty(); }
+                if (p + 2 > end) { return rekha_outline_clear(o); }
                 dx = rekha_rd_i16(buf, p);
                 p = p + 2;
             }
@@ -174,20 +241,20 @@ fn rekha_load_simple(font, start, end, nc): i64 {
         xi = xi + 1;
     }
 
-    var ys = sd_alloc(np * 8);
     var y = 0;
     var yi = 0;
     while (yi < np) {
-        var fy = load8(flags + yi);
+        var fy = load8(on_curve + yi);
+        store8(on_curve + yi, fy & 1);
         var dy = 0;
         if ((fy & 4) != 0) {
-            if (p >= end) { return rekha_outline_empty(); }
+            if (p >= end) { return rekha_outline_clear(o); }
             dy = load8(buf + p);
             p = p + 1;
             if ((fy & 32) == 0) { dy = 0 - dy; }
         } else {
             if ((fy & 32) == 0) {
-                if (p + 2 > end) { return rekha_outline_empty(); }
+                if (p + 2 > end) { return rekha_outline_clear(o); }
                 dy = rekha_rd_i16(buf, p);
                 p = p + 2;
             }
@@ -197,7 +264,6 @@ fn rekha_load_simple(font, start, end, nc): i64 {
         yi = yi + 1;
     }
 
-    var o = sd_alloc(REKHA_OUTLINE_SIZE);
     store64(o, nc);
     store64(o + 8, np);
     store64(o + 16, end_pts);
@@ -207,111 +273,194 @@ fn rekha_load_simple(font, start, end, nc): i64 {
     return o;
 }
 
-# Composite-glyph caps (also bound pathological / adversarial fonts).
-var REKHA_COMPOSITE_MAXP     = 4096;
-var REKHA_COMPOSITE_MAXC     = 128;
-var REKHA_COMPOSITE_MAXDEPTH = 5;
-
-# Parse a COMPOSITE glyph (numberOfContours < 0): a sequence of component
-# records, each a glyph reference + a 2x2 F2Dot14 transform + x/y offset.
-# Recursively loads each component (depth-guarded), applies the transform, and
-# merges the transformed points/contours into one outline. Bounds-checked.
-fn rekha_load_composite(font, start, end, depth): i64 {
-    var buf = rekha_font_data(font);
-    var p = start + 10;
-    var xs = sd_alloc(REKHA_COMPOSITE_MAXP * 8);
-    var ys = sd_alloc(REKHA_COMPOSITE_MAXP * 8);
-    var oc = sd_alloc(REKHA_COMPOSITE_MAXP);
-    var eps = sd_alloc(REKHA_COMPOSITE_MAXC * 8);
-    var tot_pts = 0;
-    var tot_ctr = 0;
-    var more = 1;
-    while (more != 0) {
-        if (p + 4 > end) {
-            more = 0;
+# Parse the component record at p into `rec` (i64[8]: flags, glyphIndex, arg1, arg2, xx, xy, yx,
+# yy — the 2x2 in F2Dot14, identity when absent). arg1/arg2 are SIGNED offsets when
+# ARGS_ARE_XY_VALUES is set and UNSIGNED point numbers when it is clear. Returns the offset past
+# the record, or 0 if the record does not fit in [p, end).
+fn rekha_comp_record(buf, p, end, rec): i64 {
+    if (p + 4 > end) { return 0; }
+    var flags = rekha_rd_u16(buf, p);
+    store64(rec, flags);
+    store64(rec + 8, rekha_rd_u16(buf, p + 2));
+    p = p + 4;
+    if ((flags & 1) != 0) {                    # ARG_1_AND_2_ARE_WORDS
+        if (p + 4 > end) { return 0; }
+        if ((flags & 2) != 0) {
+            store64(rec + 16, rekha_rd_i16(buf, p));
+            store64(rec + 24, rekha_rd_i16(buf, p + 2));
         } else {
-            var flags = rekha_rd_u16(buf, p);
-            var cgid = rekha_rd_u16(buf, p + 2);
+            store64(rec + 16, rekha_rd_u16(buf, p));
+            store64(rec + 24, rekha_rd_u16(buf, p + 2));
+        }
+        p = p + 4;
+    } else {
+        if (p + 2 > end) { return 0; }
+        if ((flags & 2) != 0) {
+            store64(rec + 16, rekha_rd_i8(buf, p));
+            store64(rec + 24, rekha_rd_i8(buf, p + 1));
+        } else {
+            store64(rec + 16, load8(buf + p));
+            store64(rec + 24, load8(buf + p + 1));
+        }
+        p = p + 2;
+    }
+    var xx = 16384;                            # 1.0 in F2Dot14 (identity)
+    var xy = 0;
+    var yx = 0;
+    var yy = 16384;
+    if ((flags & 8) != 0) {                    # WE_HAVE_A_SCALE
+        if (p + 2 > end) { return 0; }
+        xx = rekha_rd_i16(buf, p);
+        yy = xx;
+        p = p + 2;
+    } else {
+        if ((flags & 64) != 0) {               # WE_HAVE_AN_X_AND_Y_SCALE
+            if (p + 4 > end) { return 0; }
+            xx = rekha_rd_i16(buf, p);
+            yy = rekha_rd_i16(buf, p + 2);
             p = p + 4;
-            var arg1 = 0;
-            var arg2 = 0;
-            if ((flags & 1) != 0) {                # ARG_1_AND_2_ARE_WORDS
-                if (p + 4 > end) { return rekha_outline_empty(); }
-                arg1 = rekha_rd_i16(buf, p);
-                arg2 = rekha_rd_i16(buf, p + 2);
-                p = p + 4;
-            } else {
-                if (p + 2 > end) { return rekha_outline_empty(); }
-                arg1 = rekha_rd_i8(buf, p);
-                arg2 = rekha_rd_i8(buf, p + 1);
-                p = p + 2;
-            }
-            var xx = 16384;                        # 1.0 in F2Dot14 (identity)
-            var xy = 0;
-            var yx = 0;
-            var yy = 16384;
-            if ((flags & 8) != 0) {                # WE_HAVE_A_SCALE
-                if (p + 2 > end) { return rekha_outline_empty(); }
+        } else {
+            if ((flags & 128) != 0) {          # WE_HAVE_A_TWO_BY_TWO
+                if (p + 8 > end) { return 0; }
                 xx = rekha_rd_i16(buf, p);
-                yy = xx;
-                p = p + 2;
-            } else {
-                if ((flags & 64) != 0) {           # WE_HAVE_AN_X_AND_Y_SCALE
-                    if (p + 4 > end) { return rekha_outline_empty(); }
-                    xx = rekha_rd_i16(buf, p);
-                    yy = rekha_rd_i16(buf, p + 2);
-                    p = p + 4;
-                } else {
-                    if ((flags & 128) != 0) {      # WE_HAVE_A_TWO_BY_TWO
-                        if (p + 8 > end) { return rekha_outline_empty(); }
-                        xx = rekha_rd_i16(buf, p);
-                        xy = rekha_rd_i16(buf, p + 2);
-                        yx = rekha_rd_i16(buf, p + 4);
-                        yy = rekha_rd_i16(buf, p + 6);
-                        p = p + 8;
-                    }
-                }
+                xy = rekha_rd_i16(buf, p + 2);
+                yx = rekha_rd_i16(buf, p + 4);
+                yy = rekha_rd_i16(buf, p + 6);
+                p = p + 8;
             }
-            var dx = 0;
-            var dy = 0;
-            if ((flags & 2) != 0) {                # ARGS_ARE_XY_VALUES
-                dx = arg1;
-                dy = arg2;
-            }
-            var co = rekha_load_glyph_d(font, cgid, depth + 1);
-            var cnp = rekha_outline_n_points(co);
-            var cnc = rekha_outline_n_contours(co);
-            var cxs = rekha_outline_xs(co);
-            var cys = rekha_outline_ys(co);
-            var coc = rekha_outline_on_curve(co);
-            var ceps = rekha_outline_end_pts(co);
-            var base = tot_pts;
-            var j = 0;
-            while (j < cnp) {
-                if (tot_pts < REKHA_COMPOSITE_MAXP) {
-                    var cpx = load64(cxs + j * 8);
-                    var cpy = load64(cys + j * 8);
-                    store64(xs + tot_pts * 8, (xx * cpx + yx * cpy) / 16384 + dx);
-                    store64(ys + tot_pts * 8, (xy * cpx + yy * cpy) / 16384 + dy);
-                    store8(oc + tot_pts, load8(coc + j));
-                    tot_pts = tot_pts + 1;
-                }
-                j = j + 1;
-            }
-            var k = 0;
-            while (k < cnc) {
-                if (tot_ctr < REKHA_COMPOSITE_MAXC) {
-                    store64(eps + tot_ctr * 8, load64(ceps + k * 8) + base);
-                    tot_ctr = tot_ctr + 1;
-                }
-                k = k + 1;
-            }
-            if ((flags & 32) == 0) { more = 0; }   # no MORE_COMPONENTS
         }
     }
+    store64(rec + 32, xx);
+    store64(rec + 40, xy);
+    store64(rec + 48, yx);
+    store64(rec + 56, yy);
+    return p;
+}
+
+# Parse a COMPOSITE glyph (numberOfContours < 0): a sequence of component
+# records, each a glyph reference + a 2x2 F2Dot14 transform + an offset or a
+# point-matching pair. Three passes over the records:
+#   1. count them, refusing a truncated record (empty);
+#   2. load every child through rekha_load_glyph_d (the shared load context);
+#   3. merge into ONE exact-size carved block — the children's points
+#      transformed x' = (xx*x + yx*y + 8192) >> 14 (arithmetic: ROUNDED, exact
+#      for identity / ±1 / 0), then offset.
+# The offset is (arg1, arg2) — scaled by the 2x2 when SCALED_COMPONENT_OFFSET
+# (0x800) is set and UNSCALED_COMPONENT_OFFSET (0x1000) is clear — or, when
+# ARGS_ARE_XY_VALUES is clear, whatever moves child point arg2 (transformed) onto
+# merged point arg1. Empty when the merge exceeds REKHA_COMPOSITE_MAXP /
+# REKHA_COMPOSITE_MAXC or a point number is out of range; 0 only on OOM.
+fn rekha_load_composite(font, start, end, depth, ctx): i64 {
+    var buf = rekha_font_data(font);
+    var rec: i64[8];
+
+    var n = 0;
+    var p = start + 10;
+    var more = 1;
+    while (more != 0) {
+        p = rekha_comp_record(buf, p, end, &rec);
+        if (p == 0) { return rekha_outline_empty(); }
+        n = n + 1;
+        # More components than loads left can only end in an abort; take it before allocating.
+        if (n > load64(ctx)) { return rekha_load_abort(ctx); }
+        if ((load64(&rec) & 32) == 0) { more = 0; }   # no MORE_COMPONENTS
+    }
+
+    var comps = sd_alloc(n * 8);
+    if (comps == 0) { return 0; }
+    var tot_pts = 0;
+    var tot_ctr = 0;
+    p = start + 10;
+    var k = 0;
+    while (k < n) {
+        p = rekha_comp_record(buf, p, end, &rec);
+        var co = rekha_load_glyph_d(font, load64(&rec + 8), depth + 1, ctx);
+        if (co == 0) { return 0; }
+        if (load64(ctx + 16) != 0) { return rekha_outline_empty(); }   # sticky abort
+        store64(comps + k * 8, co);
+        tot_pts = tot_pts + rekha_outline_n_points(co);
+        tot_ctr = tot_ctr + rekha_outline_n_contours(co);
+        k = k + 1;
+    }
     if (tot_ctr == 0) { return rekha_outline_empty(); }
-    var o = sd_alloc(REKHA_OUTLINE_SIZE);
-    store64(o + 0, tot_ctr);
+    if (tot_pts > REKHA_COMPOSITE_MAXP) { return rekha_outline_empty(); }
+    if (tot_ctr > REKHA_COMPOSITE_MAXC) { return rekha_outline_empty(); }
+    var pts_left = load64(ctx + 8) - tot_pts;
+    if (pts_left < 0) { return rekha_load_abort(ctx); }
+    store64(ctx + 8, pts_left);
+
+    var o = sd_alloc(REKHA_OUTLINE_SIZE + tot_ctr * 8 + tot_pts * 17);
+    if (o == 0) { return 0; }
+    var eps = o + REKHA_OUTLINE_SIZE;
+    var xs = eps + tot_ctr * 8;
+    var ys = xs + tot_pts * 8;
+    var oc = ys + tot_pts * 8;
+    var base = 0;
+    var cbase = 0;
+    p = start + 10;
+    k = 0;
+    while (k < n) {
+        p = rekha_comp_record(buf, p, end, &rec);
+        var c = load64(comps + k * 8);
+        var cnp = rekha_outline_n_points(c);
+        var cnc = rekha_outline_n_contours(c);
+        var cxs = rekha_outline_xs(c);
+        var cys = rekha_outline_ys(c);
+        var coc = rekha_outline_on_curve(c);
+        var ceps = rekha_outline_end_pts(c);
+        var flags = load64(&rec);
+        var xx = load64(&rec + 32);
+        var xy = load64(&rec + 40);
+        var yx = load64(&rec + 48);
+        var yy = load64(&rec + 56);
+        var dx = 0;
+        var dy = 0;
+        if ((flags & 2) != 0) {                # ARGS_ARE_XY_VALUES
+            dx = load64(&rec + 16);
+            dy = load64(&rec + 24);
+            if ((flags & 0x1800) == 0x800) {   # SCALED_COMPONENT_OFFSET, not UNSCALED
+                var sdx = sd_asr(xx * dx + yx * dy + 8192, 14);
+                dy = sd_asr(xy * dx + yy * dy + 8192, 14);
+                dx = sdx;
+            }
+        } else {                               # point matching: merged[arg1] <- child[arg2]
+            var pa = load64(&rec + 16);
+            var pb = load64(&rec + 24);
+            if (pa >= base) { return rekha_outline_clear(o); }
+            if (pb >= cnp) { return rekha_outline_clear(o); }
+            var bx = load64(cxs + pb * 8);
+            var by = load64(cys + pb * 8);
+            dx = load64(xs + pa * 8) - sd_asr(xx * bx + yx * by + 8192, 14);
+            dy = load64(ys + pa * 8) - sd_asr(xy * bx + yy * by + 8192, 14);
+        }
+        var j = 0;
+        if (xx == 16384 && yy == 16384 && xy == 0 && yx == 0) {
+            while (j < cnp) {
+                store64(xs + (base + j) * 8, load64(cxs + j * 8) + dx);
+                store64(ys + (base + j) * 8, load64(cys + j * 8) + dy);
+                store8(oc + base + j, load8(coc + j));
+                j = j + 1;
+            }
+        } else {
+            while (j < cnp) {
+                var cpx = load64(cxs + j * 8);
+                var cpy = load64(cys + j * 8);
+                store64(xs + (base + j) * 8, sd_asr(xx * cpx + yx * cpy + 8192, 14) + dx);
+                store64(ys + (base + j) * 8, sd_asr(xy * cpx + yy * cpy + 8192, 14) + dy);
+                store8(oc + base + j, load8(coc + j));
+                j = j + 1;
+            }
+        }
+        var m = 0;
+        while (m < cnc) {
+            store64(eps + (cbase + m) * 8, load64(ceps + m * 8) + base);
+            m = m + 1;
+        }
+        base = base + cnp;
+        cbase = cbase + cnc;
+        k = k + 1;
+    }
+    store64(o, tot_ctr);
     store64(o + 8, tot_pts);
     store64(o + 16, eps);
     store64(o + 24, xs);
@@ -320,27 +469,46 @@ fn rekha_load_composite(font, start, end, depth): i64 {
     return o;
 }
 
-# Depth-guarded glyph load: dispatch simple (nc>0) vs composite (nc<0).
-fn rekha_load_glyph_d(font, gid, depth): i64 {
-    if (depth > REKHA_COMPOSITE_MAXDEPTH) { return rekha_outline_empty(); }
-    var span = sd_alloc(16);
-    if (rekha_glyf_span(font, gid, span) == 0) {
+# Budgeted glyph load: charge the context, then dispatch simple (nc>0) vs composite (nc<0).
+fn rekha_load_glyph_d(font, gid, depth, ctx): i64 {
+    if (load64(ctx + 16) != 0) { return rekha_outline_empty(); }
+    if (depth > REKHA_COMPOSITE_MAXDEPTH) { return rekha_load_abort(ctx); }
+    var loads = load64(ctx);
+    if (loads <= 0) { return rekha_load_abort(ctx); }
+    # A cycle is a gid already on THIS component path; a sibling reusing a component is not one.
+    var d = 0;
+    while (d < depth) {
+        if (load64(ctx + 24 + d * 8) == gid) { return rekha_load_abort(ctx); }
+        d = d + 1;
+    }
+    store64(ctx, loads - 1);
+    store64(ctx + 24 + depth * 8, gid);
+
+    var span: i64[2];
+    if (rekha_glyf_span(font, gid, &span) == 0) {
         return rekha_outline_empty();
     }
-    var start = load64(span);
-    var end = start + load64(span + 8);
+    var start = load64(&span);
+    var end = start + load64(&span + 8);
     var buf = rekha_font_data(font);
     if (start + 10 > end) { return rekha_outline_empty(); }
     var nc = rekha_rd_i16(buf, start);
     if (nc == 0) { return rekha_outline_empty(); }
-    if (nc > 0) { return rekha_load_simple(font, start, end, nc); }
-    return rekha_load_composite(font, start, end, depth);
+    if (nc > 0) { return rekha_load_simple(font, start, end, nc, ctx); }
+    return rekha_load_composite(font, start, end, depth, ctx);
 }
 
 # @public — load glyph `gid`'s outline (simple OR composite) into a
-# RekhaOutline. Empty for space / malformed / out-of-range; 0 only on OOM.
+# RekhaOutline. Empty for space / malformed / out-of-range / over a load cap; 0 only on OOM.
 fn rekha_load_glyph(font, gid): i64 {
-    return rekha_load_glyph_d(font, gid, 0);
+    var ctx: i64[9];
+    store64(&ctx, REKHA_GLYPH_MAXLOADS);
+    store64(&ctx + 8, REKHA_GLYPH_MAXPOINTS_TOTAL);
+    store64(&ctx + 16, 0);
+    var o = rekha_load_glyph_d(font, gid, 0, &ctx);
+    if (o == 0) { return 0; }
+    if (load64(&ctx + 16) != 0) { return rekha_outline_clear(o); }
+    return o;
 }
 
 # ================================================================
@@ -350,10 +518,6 @@ fn rekha_load_glyph(font, gid): i64 {
 #   sd_x = ox + design_x * scale        (scale = 16.16 pixels per design unit)
 #   sd_y = oy - design_y * scale        (y-flip: fonts are y-up, sadish y-down)
 # ================================================================
-
-# design coord -> sadish 16.16 pixel coord.
-fn rekha_px(xs, i, scale, ox): i64 { return ox + load64(xs + i * 8) * scale; }
-fn rekha_py(ys, i, scale, oy): i64 { return oy - load64(ys + i * 8) * scale; }
 
 # Emit one closed contour (absolute point range [cstart, cend]) into `path`,
 # converting TrueType quadratic runs to sadish verbs. On-curve points end a
@@ -369,19 +533,23 @@ fn rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy): i64 {
     var startidx = 0;
     var count = 0;
     if (load8(oc + cstart) != 0) {
-        sx = rekha_px(xs, cstart, scale, ox);
-        sy = rekha_py(ys, cstart, scale, oy);
+        sx = ox + load64(xs + cstart * 8) * scale;
+        sy = oy - load64(ys + cstart * 8) * scale;
         startidx = cstart + 1;
         count = n - 1;
     } else {
         if (load8(oc + cend) != 0) {
-            sx = rekha_px(xs, cend, scale, ox);
-            sy = rekha_py(ys, cend, scale, oy);
+            sx = ox + load64(xs + cend * 8) * scale;
+            sy = oy - load64(ys + cend * 8) * scale;
             startidx = cstart;
             count = n - 1;
         } else {
-            sx = sd_asr(rekha_px(xs, cstart, scale, ox) + rekha_px(xs, cend, scale, ox), 1);
-            sy = sd_asr(rekha_py(ys, cstart, scale, oy) + rekha_py(ys, cend, scale, oy), 1);
+            var ax = ox + load64(xs + cstart * 8) * scale;
+            var ay = oy - load64(ys + cstart * 8) * scale;
+            var bx = ox + load64(xs + cend * 8) * scale;
+            var by = oy - load64(ys + cend * 8) * scale;
+            sx = sd_asr(ax + bx, 1);
+            sy = sd_asr(ay + by, 1);
             startidx = cstart;
             count = n;
         }
@@ -394,8 +562,8 @@ fn rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy): i64 {
     var k = 0;
     while (k < count) {
         var idx = startidx + k;
-        var px = rekha_px(xs, idx, scale, ox);
-        var py = rekha_py(ys, idx, scale, oy);
+        var px = ox + load64(xs + idx * 8) * scale;
+        var py = oy - load64(ys + idx * 8) * scale;
         if (load8(oc + idx) != 0) {
             if (have_ctrl != 0) {
                 sd_path_quadto(path, cx, cy, px, py);
@@ -427,11 +595,18 @@ fn rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy): i64 {
 
 # @public — convert a decoded glyph `outline` into a sadish SdPath, positioned
 # by `scale` (16.16 px/design-unit) at pixel offset (ox, oy) (both 16.16).
-# Returns a fresh SdPath (possibly empty for a 0-contour outline).
+# Returns a fresh SdPath (empty for a 0-contour or 0 outline), or 0 if sd_path_new fails.
+# Contours stop at the first end_pts entry that is negative or >= n_points, so a
+# self-inconsistent outline cannot walk emit off its arrays. ⚠ A HAND-BUILT outline must
+# still really hold n_points entries in xs / ys / on_curve and n_contours in end_pts —
+# this seam cannot see an allocation's size.
 fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
+    if (outline == 0) { return sd_path_new(); }
     var path = sd_path_new();
+    if (path == 0) { return 0; }
     var nc = rekha_outline_n_contours(outline);
-    if (nc == 0) { return path; }
+    if (nc <= 0) { return path; }
+    var npts = rekha_outline_n_points(outline);
     var eps = rekha_outline_end_pts(outline);
     var xs = rekha_outline_xs(outline);
     var ys = rekha_outline_ys(outline);
@@ -441,6 +616,8 @@ fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
     var ci = 0;
     while (ci < nc) {
         var cend = load64(eps + ci * 8);
+        if (cend < 0) { break; }
+        if (cend >= npts) { break; }
         if (cend >= cstart) {
             rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy);
         }
@@ -450,9 +627,8 @@ fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
     return path;
 }
 
-# @public — load glyph `gid` and convert it to a positioned sadish SdPath.
+# @public — load glyph `gid` and convert it to a positioned sadish SdPath
+# (an empty path when the glyph loads empty or its load hits OOM).
 fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
-    var o = rekha_load_glyph(font, gid);
-    if (o == 0) { return sd_path_new(); }
-    return rekha_outline_to_sdpath(o, scale, ox, oy);
+    return rekha_outline_to_sdpath(rekha_load_glyph(font, gid), scale, ox, oy);
 }

@@ -27,15 +27,20 @@ include "lib/assert.cyr"
 include "lib/bench.cyr"
 
 # sadish — the 2D vector rasterizer rekha emits glyph paths into (dep).
-# rekha is sadish's first consumer; glyf.cyr calls sd_path_* / sd_canvas_*.
+# rekha is sadish's first consumer. src/ calls sd_path_* and sd_asr (glyf.cyr)
+# and the sd_alloc seam (error.cyr, sfnt.cyr, glyf.cyr); sd_canvas_* is
+# test-only (programs/path_test.cyr) — rekha emits paths, not canvas ops.
 include "lib/sadish.cyr"
 
 # ================================================================
 # rekha domain modules — flat, dependency order.
-# error.cyr is dep-free. sfnt.cyr (big-endian byte readers + the
-# RekhaFont SFNT handle + table-directory lookup) builds on error.cyr;
-# glyf.cyr (glyph-outline load + the rekha->sadish path-verb seam) sits
-# atop sfnt.cyr.
+# error.cyr depends on nothing in rekha, and nothing in rekha calls it.
+# sfnt.cyr (big-endian byte readers + the RekhaFont SFNT handle + the
+# table cache) depends on neither; glyf.cyr (glyph-outline load + the
+# rekha->sadish path-verb seam) sits atop sfnt.cyr; cmap.cyr uses both.
+# ⚠ error.cyr stays FIRST: its rekha_err_new holds the first sd_alloc call
+# in code order, and that site is what decides how a build against a sadish
+# below the 0.5.5 floor degrades (see the [deps.sadish] note in cyrius.cyml).
 # ================================================================
 include "src/error.cyr"
 include "src/sfnt.cyr"

@@ -8,15 +8,147 @@
 # ⚠ It exercises the SAME copy+verify path a kernel consumer runs, so a compiler that
 # corrupts a literal (the 64 KB even-length trap the generator documents) fails HERE, on
 # the host, before the bytes reach a target.
+#
+# ⭐ AND THE WHOLE FACE, NOT ONE GLYPH (0.3.11). Every gid 0..numGlyphs-1 is loaded and converted
+# to an SdPath under an arena hook reset per glyph, and the totals are asserted EXACTLY: composite
+# count (read from the raw glyf bytes, independently of the loader), contours, points, verbs,
+# path points, an FNV-1a digest of every decoded coordinate, empty outlines, and composites that
+# loaded empty (a load cap tripping on a real font). The loop costs the global heap exactly 0 and
+# no glyph costs the arena more than a stated bound. The whole BMP is then swept through
+# rekha_char_to_glyph (mapping count + gid digest) and rekha_char_advance_px (digest). A change to
+# the loader, the cmap search or the metrics path that alters ONE value on this face fails here.
+# Every failure prints its check number to fd 2.
 include "src/lib.cyr"
 include "fonts/face_data.cyr"
 
 var g_fails = 0;
+var g_n = 0;
 
 fn check(got, want): i64 {
+    g_n = g_n + 1;
     if (got == want) { return 0; }
     g_fails = g_fails + 1;
+    var m = "face_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, "\n", 1);
     return 1;
+}
+
+# ---- whole-face constants, MEASURED on LiberationSans Regular 2.1.5 (fonts/face_data.cyr) ----
+# Each one was cross-checked by an independent Python decoder of fonts/LiberationSans-Regular.ttf
+# (simple + composite glyf, the emit rules of rekha_emit_contour, format-4 cmap, hmtx), which
+# reproduced every total and all three digests exactly.
+var FACE_GLYPHS           = 2620;
+var FACE_COMPOSITES       = 1076;           # numberOfContours < 0 in the raw glyf bytes
+var FACE_CONTOURS         = 5288;
+var FACE_POINTS           = 71785;
+var FACE_VERBS            = 63792;
+var FACE_PATH_POINTS      = 86811;
+var FACE_COORD_FNV        = 0 - 7775546921704031034;
+var FACE_EMPTY_OUTLINES   = 17;             # no glyf bytes (space, CR, ...) or nc == 0
+var FACE_EMPTY_COMPOSITES = 2;              # composites of an empty glyph (98 -> 3, 2037 -> 2006)
+var FACE_ARENA_MAX_BOUND  = 32768;          # MEASURED max 24,144 B (gid 2192: 84 contours, 336 points)
+var FACE_CMAP_MAPPED      = 2327;           # nonzero rekha_char_to_glyph over U+0000..U+FFFF
+var FACE_CMAP_FNV         = 0 - 2826677413184350978;
+var FACE_ADV_PX           = 16;
+var FACE_ADV_FNV          = 3123330806514574639;
+
+var FNV_OFFSET = 0xcbf29ce484222325;
+var FNV_PRIME  = 0x100000001b3;
+
+# FNV-1a-64 over the low 4 bytes of `v`, little-endian (two's complement, so negative
+# coordinates hash distinctly).
+fn fnv_u32(h, v): i64 {
+    var i = 0;
+    while (i < 4) {
+        h = (h ^ ((v >> (i * 8)) & 255)) * FNV_PRIME;
+        i = i + 1;
+    }
+    return h;
+}
+
+# ---- the consumer's hook: every byte rekha and sadish ask for goes onto g_arena ----
+var g_arena = 0;
+
+fn hook_alloc(n): i64 {
+    return arena_alloc(g_arena, n);
+}
+
+# Totals of the whole-face sweep, filled by sweep_glyphs.
+var g_composites = 0;
+var g_contours = 0;
+var g_points = 0;
+var g_verbs = 0;
+var g_path_points = 0;
+var g_coord_fnv = 0;
+var g_empty = 0;
+var g_empty_composites = 0;
+var g_arena_max = 0;
+var g_null = 0;
+
+fn sweep_glyphs(f): i64 {
+    var ng = rekha_glyph_count(f);
+    var buf = rekha_font_data(f);
+    var span: i64[2];
+    var scale = (32 * SD_ONE) / rekha_units_per_em(f);
+    var h = FNV_OFFSET;
+    var gid = 0;
+    while (gid < ng) {
+        arena_reset(g_arena);
+        var is_comp = 0;
+        if (rekha_glyf_span(f, gid, &span) == 1) {
+            if (load64(&span + 8) >= 2) {
+                if (rekha_rd_i16(buf, load64(&span)) < 0) { is_comp = 1; }
+            }
+        }
+        g_composites = g_composites + is_comp;
+        var a0 = arena_used(g_arena);
+        var o = rekha_load_glyph(f, gid);
+        if (o == 0) {
+            g_null = g_null + 1;
+        } else {
+            var nc = rekha_outline_n_contours(o);
+            var np = rekha_outline_n_points(o);
+            if (nc == 0) {
+                g_empty = g_empty + 1;
+                g_empty_composites = g_empty_composites + is_comp;
+            }
+            g_contours = g_contours + nc;
+            g_points = g_points + np;
+            h = fnv_u32(h, gid);
+            h = fnv_u32(h, nc);
+            h = fnv_u32(h, np);
+            var eps = rekha_outline_end_pts(o);
+            var ci = 0;
+            while (ci < nc) {
+                h = fnv_u32(h, load64(eps + ci * 8));
+                ci = ci + 1;
+            }
+            var xs = rekha_outline_xs(o);
+            var ys = rekha_outline_ys(o);
+            var oc = rekha_outline_on_curve(o);
+            var pi = 0;
+            while (pi < np) {
+                h = fnv_u32(h, load64(xs + pi * 8));
+                h = fnv_u32(h, load64(ys + pi * 8));
+                h = fnv_u32(h, load8(oc + pi));
+                pi = pi + 1;
+            }
+            var p = rekha_outline_to_sdpath(o, scale, 0, 0);
+            if (p == 0) {
+                g_null = g_null + 1;
+            } else {
+                g_verbs = g_verbs + sd_path_verb_count(p);
+                g_path_points = g_path_points + sd_path_point_count(p);
+            }
+        }
+        var used = arena_used(g_arena) - a0;
+        if (used > g_arena_max) { g_arena_max = used; }
+        gid = gid + 1;
+    }
+    g_coord_fnv = h;
+    return ng;
 }
 
 fn main(): i64 {
@@ -55,6 +187,56 @@ fn main(): i64 {
     if (rekha_char_advance(f, 65) <= 0) { g_fails = g_fails + 1; }
     # proportional: 'i' narrower than 'W' — the property crab's derived widths depend on
     if (rekha_char_advance(f, 105) >= rekha_char_advance(f, 87)) { g_fails = g_fails + 1; }
+
+    # ── THE WHOLE FACE: every gid loaded + converted under an arena hook reset per glyph ──
+    check(rekha_glyph_count(f), FACE_GLYPHS);
+    g_arena = arena_new_growable(16777216);
+    check(g_arena != 0, 1);
+    check(sd_alloc_set(&hook_alloc), 0);
+    var gb = alloc_used();
+    check(sweep_glyphs(f), FACE_GLYPHS);
+    # ⭐ 2,620 loads and 2,620 conversions: not one byte on the global heap. The arena is 16 MiB and
+    # a glyph needs at most FACE_ARENA_MAX_BOUND, so it never chains a chunk (a chunk would come
+    # from the global allocator and fail this).
+    check(alloc_used() - gb, 0);
+    check(sd_alloc_set(0), &hook_alloc);
+    check(g_null, 0);                                  # no OOM anywhere
+    check(g_composites, FACE_COMPOSITES);
+    check(g_contours, FACE_CONTOURS);
+    check(g_points, FACE_POINTS);
+    check(g_verbs, FACE_VERBS);
+    check(g_path_points, FACE_PATH_POINTS);
+    check(g_coord_fnv, FACE_COORD_FNV);
+    check(g_empty, FACE_EMPTY_OUTLINES);
+    # No composite on a real, well-formed face trips a load cap or a merge limit: exactly two
+    # composites load empty, gid 98 and gid 2037, whose ONE component each is an empty glyph (3, the
+    # space, and 2006). A cap or a merge rule rejecting a real composite raises this count.
+    check(g_empty_composites, FACE_EMPTY_COMPOSITES);
+    check(g_arena_max < FACE_ARENA_MAX_BOUND, 1);
+    check(g_arena_max > 0, 1);
+
+    # ── THE WHOLE BMP through cmap, and every codepoint's advance at one size ──
+    gb = alloc_used();
+    var mapped = 0;
+    var hg = FNV_OFFSET;
+    var ha = FNV_OFFSET;
+    var cp = 0;
+    while (cp < 65536) {
+        var g = rekha_char_to_glyph(f, cp);
+        if (g != 0) {
+            mapped = mapped + 1;
+            hg = fnv_u32(hg, cp);
+            hg = fnv_u32(hg, g);
+        }
+        ha = fnv_u32(ha, rekha_char_advance_px(f, cp, FACE_ADV_PX));
+        cp = cp + 1;
+    }
+    check(alloc_used() - gb, 0);                       # reading a font allocates nothing
+    check(mapped, FACE_CMAP_MAPPED);
+    check(hg, FACE_CMAP_FNV);
+    check(ha, FACE_ADV_FNV);
+    # beyond the BMP format 4 maps nothing
+    check(rekha_char_to_glyph(f, 65536), 0);
 
     if (g_fails == 0) {
         var ok = "face_test: PASS (embedded default face byte-exact + usable through rekha)\n";

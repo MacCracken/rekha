@@ -5,6 +5,203 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.11] - 2026-09-15 — hostile fonts: four overreads closed, fan-out bounded, the hot path cached
+
+A full audit/hardening/optimization sweep. Eight independent audit lenses produced 88 raw findings
+(59 after dedup, plus 3 from a completeness pass); every P0/P1 was reproduced with a running PoC
+before it was fixed, and a second, fresh security review plus mutation testing ran against the
+result. Public signatures are unchanged; the behaviour changes a consumer can observe are listed
+under **Changed**.
+
+### Security — out-of-bounds reads and unbounded work on untrusted font bytes
+
+Every item below was reachable through `rekha_char_to_sdpath` (dhancha's per-glyph draw call) with a
+crafted font that `rekha_font_open` accepts. Overreads on the bump allocator mostly land in mapped
+memory, so they were PROVEN by a sentinel differential (the bytes past `len`, or an arena prefilled
+A vs B — any output difference is a read outside the buffer) and then forced to fault at a guard page.
+
+- ⛔ **Non-increasing `endPtsOfContours` → overread in `rekha_emit_contour`.** `rekha_load_simple`
+  sized the point arrays from the LAST endPt only; an earlier one past it (`[65535, 2]` on a 3-point
+  glyph) walked emit off xs / ys / on_curve. MEASURED: 59,417 verbs from 3 points; rc 139 at a
+  guard page. Now: endPts must STRICTLY increase (checked again on the stored copy, after the
+  allocation a hook could use to rewrite a shared buffer), and `rekha_outline_to_sdpath` stops at the
+  first `end_pts` entry `< 0` or `>= n_points` whatever produced the outline.
+- ⛔ **Composite merge past 4,096 points → `end_pts >= n_points`.** The merge clamped points at
+  `REKHA_COMPOSITE_MAXP` but stored contour ends unclamped — from a fully VALID >4,096-point
+  component. MEASURED: 16,381 verbs read from 4,096-entry buffers; rc 139. Now a merge over 4,096
+  points or 128 contours is REJECTED (empty), never clamped.
+- ⛔ **Composite fan-out: `sum N^L` bodies at ~70 KB each.** Nothing bounded total work across the
+  depth-5 recursion. MEASURED: a 288-byte font whose glyph holds 4 self-references cost
+  **96,733,552 B** in one `rekha_char_to_sdpath`; 6 self-references (~662 MB) faulted under a
+  384 MB limit. ⚠ **Cycle detection alone does not fix it** — an ACYCLIC fan-out (glyph → 30× glyph
+  → 30× glyph) amplifies the same way, which is why the fix is a budget. Now each
+  `rekha_load_glyph` carries a stack context (0 B of heap): ≤ 64 glyph loads, ≤ 16,384 decoded points,
+  depth ≤ 5, no gid repeated on its own component path; tripping any ABORTS the whole load (sticky —
+  the result is EMPTY, never partial). MEASURED after: N = 1..8 self-references cost `8N + 96` B; the
+  30×30 fan-out 11,184 B.
+- ⛔ **`head` / `maxp` fields read past `len`.** `unitsPerEm` (+18), `indexToLocFormat` (+50) and
+  `numGlyphs` (+4) were read after checking only that the table's declared span fit — a 0-length
+  table at EOF read 16–48 B past the buffer (rc 139 at a guard page). Now `head` needs a declared
+  length ≥ 54 B, `maxp` ≥ 6 B, `hhea` ≥ 36 B, or the table is treated as absent.
+- ⛔ **Simple-glyph point count uncapped.** A ~530-byte glyph could declare 65,536 points via REPEAT
+  flags: MEASURED 1,179,720 B per load. Now np > 4,096 is refused, and so is an np the remaining bytes
+  could not encode as flags (2 bytes declare ≤ 256 points) — both before any allocation (48 B).
+- ⚠ **Found by the second review, after the fixes above:** the endPts walk ran BEFORE the point cap
+  and the budget, so a composite of 63 rejected 32,767-contour glyphs spent **9.6 ms** in one load.
+  The O(1) gates and the budget charge now come first: MEASURED **10.5 µs**.
+
+### Changed — hardening a consumer may observe
+
+- **Tables obey an extent rule, checked once at open.** A table must start at/after the end of the
+  directory and end inside `len` (a table overlapping the header/directory is absent). `cmap`
+  records, the chosen format-4 subtable's header and all four segment arrays, and the glyphIdArray
+  index are bounded by the `cmap` table's DECLARED length; `hmtx` reads by `hmtx`'s (a truncated
+  `hmtx` now reads as advance 0 = unknown, never the next table's bytes); `loca` reads by `loca`'s and
+  a glyph span by `glyf`'s (a last glyph overshooting `glyf` is refused, not clamped).
+  `indexToLocFormat` other than 0 / 1 → no outline. Before, all of these were bounded by the FILE, so
+  metrics and outlines could be decoded from a neighbouring table. Checked against 1,750 system
+  `.ttf` files: 0 violate these rules.
+- **`rekha_char_to_glyph` returns 0 for a mapped gid ≥ `maxp.numGlyphs`** (when maxp is present) — an
+  id with no glyph behind it is `.notdef`, as FreeType maps it; `rekha_char_advance*` then report
+  `.notdef`'s advance instead of the last hmetric's.
+- **Every public reader returns 0 for a 0 font handle**; `rekha_font_open(0, n)` returns 0.
+- **Composite decode is now spec-complete for positioning:** point matching (`ARGS_ARE_XY_VALUES`
+  clear — unsigned point numbers; out-of-range → empty) was silently placed at (0, 0);
+  `SCALED_COMPONENT_OFFSET` (0x800 without 0x1000) now scales the offset; the F2Dot14 transform
+  ROUNDS, `sd_asr(v + 8192, 14)` (floor of v + ½), where 0.3.10 truncated toward zero. ⚠ Scaled or
+  rotated components can move by up to 1 design unit: MEASURED old-vs-new over 71 system fonts
+  (1,402,156 glyphs) — 69 identical, 53 composite glyphs in 2 fonts moved (contour/point/verb counts
+  unchanged). LiberationSans is byte-identical (identity transforms only). A truncated LAST component
+  record now yields an empty glyph (0.3.10 treated it as the end; FreeType rejects it).
+- **`RekhaFont` is 160 B (was 40) and caches the table directory** — see Performance. ⚠ The buffer
+  stays borrowed and the cache is a SNAPSHOT: mutating font bytes after `rekha_font_open` is
+  unsupported (reads stay inside `len`; upem / numGlyphs / numberOfHMetrics / the cmap choice would
+  describe the bytes as they were).
+- **Allocation failure no longer faults inside rekha.** Every `sd_alloc` in the loaders is checked and
+  0 propagates ("0 only on OOM"); `rekha_outline_to_sdpath(0, …)` returns an empty path. ⚠ sadish's
+  `sd_path_new` / pushes still store through refused blocks, so a hook that can refuse must still
+  fall back to the global allocator for a draw (MEASURED both ways; glyf.cyr head comment).
+- **Removed (internal, unused downstream):** `rekha_px` / `rekha_py` (inlined), and the
+  `RekhaPathVerb` enum — its QUADTO/CLOSE values disagreed with the sadish verb tags rekha actually
+  emits. `rekha_load_glyph_d` takes a load context. `rekha_glyph_count` moved to sfnt.cyr (same
+  signature).
+
+### Added
+
+- **`rekha_glyph_advance_px(font, gid, px)`** (what `rekha_char_advance_px` now wraps) so a consumer
+  maps a codepoint ONCE and reuses the gid; **`rekha_glyph_advance_fx` / `rekha_char_advance_fx`**
+  return the 16.16 advance. ⭐ Summing per-glyph-rounded pixel advances still drifts — MEASURED
+  "ABABABABABAB" at 15 px: 78 px summed rounded vs 75 px from the 16.16 sum rounded once. The cmap.cyr
+  comment that presented half-up rounding as the drift fix is corrected. All 0 B, 0 = unknown.
+- **Ten new RUN suites (19 gating suites in all, each run under `CYRIUS_DCE=0` and `1`):**
+  `hostile_test` (511 checks — a crafted corpus per audit class, an in-process A/B sentinel
+  differential over every public entry point, and a 120-seed mutation loop over the embedded face;
+  proven to fail against 12 deliberately broken copies of `src/`), `glyf_neg_test` (292 — one
+  one-defect fixture per simple-glyph guard), `composite_flags_test` (262 — every component flag to
+  hand-computed coordinates), `path_start_test` (247 — every contour-start branch, exact 16.16
+  points), `extent_test` (325), `cmap_ext_test` (130 — incl. binary-search parity over all 65,536
+  codepoints against a linear reference), `glyf_edge_test` / `sfnt_edge_test` (the gaps mutation
+  testing found), `error_test`, and `dist_test`, which compiles the SHIPPED `dist/rekha.cyr` the
+  consumer way (replacing the untested root `_distprobe.cyr`). `face_test` now loads and converts all
+  2,620 glyphs of the embedded face under an arena hook and asserts exact totals (1,076 composites,
+  5,288 contours, 71,785 points, 63,792 verbs, 2,327 mapped codepoints) at 0 B of global heap.
+- **Mutation testing** of every new guard: 223 single-edit mutants over sfnt.cyr / cmap.cyr / glyf.cyr.
+  The survivors that were real gaps (6 + 25) got the edge suites above, each verified to kill its
+  mutant; the rest are equivalent mutants or guards no in-process test can observe (a 1-byte overread
+  that changes no output). The reordered `rekha_load_simple` gates (Security, last item) were
+  mutated again: the post-carve endPts re-checks survived until `glyf_edge_test` G14 rewrote the bytes
+  from inside the allocation hook; the `nc > np` gate stays unkillable by an output check — removing
+  it changes only the time a malformed glyph costs.
+- **`programs/bench_hotpath.cyr`** — non-gating timings + arena bytes/op, with the result checksum
+  (`-6023123829465929365` over cp 32..255, identical to 0.3.10's output).
+
+### Performance — MEASURED, same machine, same session, median of 3 (bench_hotpath / audit bench)
+
+The table directory used to be walked per call — `rekha_char_advance_px` walked it for head, cmap,
+hhea and hmtx on every character, `rekha_char_to_sdpath` for cmap, maxp, loca, glyf and head. It is
+now resolved once in `rekha_font_open`; cmap lookup takes segment 0 directly when it covers the
+codepoint and binary-searches otherwise; each outline is ONE carved allocation; a composite is sized to
+its children instead of fixed 4,096-point buffers; the span out-param moved to the stack; emit's
+per-point helper calls are inlined.
+
+| LiberationSans | 0.3.10 | 0.3.11 |
+|---|---|---|
+| `rekha_char_advance_px` | 787 ns | **48 ns** |
+| `rekha_char_to_glyph` (ASCII) | 224 ns | **30 ns** |
+| `rekha_glyf_span` | 785 ns | **36 ns** |
+| `rekha_char_to_sdpath` (ASCII) | 2,473 ns | **1,398 ns** |
+| `rekha_char_to_sdpath` (composite) | 5,473 ns | **3,231 ns** |
+| 54-character label (advance + path per char) | 205,425 ns | **75,553 ns** |
+| `rekha_font_open` (once per font) | 36 ns | ~1,500 ns |
+| D2Coding (1,642 cmap segments), Hangul lookup | 7,686 ns | **85 ns** |
+
+| bytes | 0.3.10 | 0.3.11 |
+|---|---|---|
+| 3-point simple outline (alloc_test) | 136 B | **112 B** |
+| its `rekha_char_to_sdpath` | 4,328 B | **4,304 B** |
+| one-component composite (alloc_test #51) | 70,856 B | **232 B** |
+| `rekha_load_glyph` U+00C5 / U+00E9 | 71,632 / 71,464 B | **1,632 / 1,304 B** |
+| Latin-1 U+00A0..00FF load pass | 4,237,264 B | **95,808 B** |
+| `RekhaFont` (once) | 40 B | 160 B |
+
+⚠ alloc_test check #51 used to assert the fixed-buffer waste EXISTED (`>= MAXP*17 + MAXC*8`); it is
+now the exact composite cost, so a return to fixed buffers fails it by ~70 KB. The 0.3.10 table
+above stays as it was measured. Output is unchanged on LiberationSans: every glyph's decoded points
+and emitted 16.16 path match 0.3.10 and an independent spec-written Python reference (0 diff lines).
+
+### CI, release, supply chain
+
+- **Toolchain install pinned and verified** (`scripts/ci-install-cyrius.sh`, both workflows):
+  `install.sh` is fetched from the `6.6.4` TAG (not `main`) and the release tarball is sha256-checked
+  against hashes committed in the script (fails closed on a pin bump without a hash bump), under
+  `set -euo pipefail`; the pin is parsed from `[package]` and must be `x.y.z`.
+- **Permissions:** `contents: read` everywhere, `contents: write` only on the release job; every
+  checkout `persist-credentials: false`; all actions pinned to full commit SHAs + `dependabot.yml`.
+- **Build gate:** smoke and every `*_test.cyr` build AND run under `CYRIUS_DCE=0` and `1`; any
+  `warning` / `undefined function` / `refusing to emit` line in a build log fails — 0.3.10's
+  CHANGELOG described the green-build-that-faults and rekha's own CI never grepped for it.
+- **Lock gate:** after `rm -rf lib && cyrius deps`, `cyrius.lock` must equal the committed file, and a
+  live `path =` line in `cyrius.cyml` fails. **Dist gate:** `cyrius distlib --check` + no untracked
+  `dist/` files; the release ships the COMMITTED bundle instead of regenerating it, and refuses a tag
+  with no CHANGELOG section. **Lint gate** now fails on untracked deferrals and lint errors, not only
+  `warn` lines.
+- **Security scan** is an allowlist over every tracked `.cyr` / `.tcyr` (library code may only
+  `syscall(1, 2, …)`; programs may also exit), and refuses process-spawn names, process/dlopen
+  includes and inline `asm` (a working `asm` exit(7) passed the old scan).
+- Job timeouts, `$RUNNER_TEMP` instead of `/tmp`, a dead cleanup step removed, prerelease comment
+  corrected (every 0.x tag is a GitHub prerelease).
+
+### Dependencies
+
+- **`[deps.sadish]` drops `path = "../sadish"`.** It won over `tag` and skipped the commit pin, and
+  its reason (0.5.5 not yet tagged) is gone — the tag is published (9760ead). `cyrius.lock` was
+  regenerated from an EMPTY `lib/`: 110 → 23 entries plus the sadish `commit` pin; the 87 extra
+  hashes were leftovers of a local full-snapshot `lib/` that no manifest asks for (and the source of
+  the local "./lib/ shadows version-pinned" warning).
+
+### Tooling
+
+- `scripts/face2cyr.py` refuses short files, a directory past EOF, tables past EOF or over the
+  directory, and a face with no format-4 Unicode cmap rekha can map (it used to accept one on which
+  every codepoint is `.notdef`); writes atomically in UTF-8; escapes the file name in the generated
+  string and comment. `fonts/face_data.cyr` regenerates byte-identically.
+
+### Known limits (stated, not fixed here)
+
+- Glyphs over the load caps render EMPTY (a >4,096-point outline, a >128-contour composite, a
+  composite needing >64 loads or >16,384 decoded points). No face checked exceeds them; LiberationSans
+  peaks at 338 points (gid 2193).
+- cmap formats 12 / 6 / 0 and `(3,0)` symbol fonts still map nothing (README v0.4.0 / staged).
+- Transform rounding is floor(v + ½) on the sum; FreeType rounds each product half away from zero,
+  so exact negative halves can differ by 1 unit.
+- **Upstream, sadish:** `sd_flatten_quad` keeps recursing and allocating after its output cap is
+  full — MEASURED 12,386,304 B and 95 ms for ONE `sd_canvas_fill_path` of an adversarial glyph that
+  fits every rekha cap — and `sd_path_new` / grow store through refused allocations. Both belong to
+  sadish.
+- `[deps].stdlib` still declares `io`, `vec`, `str`, `syscalls`, `assert`, `bench` that `src/` does not
+  call; trimming it changes the `dist/rekha.deps` sidecar consumers resolve, so it waits for a
+  coordinated change with sadish.
+
 ## [0.3.10] - 2026-09-14 — rekha draws its memory from sadish's seam
 
 ### Changed — every allocation routes through `sd_alloc`; the draw stack has ONE knob

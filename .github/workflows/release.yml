@@ -3,8 +3,9 @@ name: Release
 on:
   push:
     # Bare-number tags (e.g. `0.1.0`) and `v`-prefixed forms both trigger.
-    # Pre-release `-rc.N` / `-beta.N` / `-alpha.N` suffixes are flagged as
-    # GitHub pre-releases so consumers' tag-resolvers skip them by default.
+    # Every 0.x tag and every `-rc.N` / `-beta.N` / `-alpha.N` tag is published as a GitHub
+    # PRERELEASE (the `prerelease:` expression below), so /releases/latest stays empty until 1.0.
+    # That flag is GitHub-UI only: `cyrius deps` resolves git tags and ignores it.
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - '[0-9]+.[0-9]+.[0-9]+'
@@ -15,68 +16,76 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
       - '[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
 
+# ⛔ Read-only by default. Only the `release` job gets `contents: write`, and it runs no rekha or
+# toolchain code — the ci and build jobs, which install a toolchain and execute what it builds,
+# never hold a write token.
 permissions:
-  contents: write
+  contents: read
+
+# `bash --noprofile --norc -eo pipefail {0}` for every run step (the implicit default has no pipefail).
+defaults:
+  run:
+    shell: bash
 
 jobs:
   ci:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   build:
     name: Build Release
     needs: [ci]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Verify version
         run: |
           FILE_VERSION=$(tr -d '[:space:]' < VERSION)
           TAG="${GITHUB_REF_NAME#v}"
-          echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$' || {
+          grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-(rc|beta|alpha)\.[0-9]+)?$' <<< "$TAG" || {
             echo "tag ($TAG) is not semver x.y.z[-{rc,beta,alpha}.N]"; exit 1; }
           [ "$FILE_VERSION" = "$TAG" ] || {
             echo "VERSION ($FILE_VERSION) != tag ($TAG)"; exit 1; }
           echo "Version verified: $TAG (cyrius.cyml pulls from VERSION via \${file:VERSION})"
 
       - name: Install Cyrius toolchain
-        run: |
-          set -e
-          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="$CYRIUS_VERSION" sh
-          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+        # Same verified installer as ci.yml (pin from cyrius.cyml, committed sha256s).
+        run: bash scripts/ci-install-cyrius.sh
 
-      - name: Resolve deps
+      - name: Resolve deps (lock gate)
         run: |
           rm -rf lib
           mkdir lib
           cyrius deps
+          if ! git diff --exit-code -- cyrius.lock; then
+            echo "ERROR: cyrius.lock does not match a clean resolve."
+            exit 1
+          fi
 
-      - name: Build (link-check, DCE on)
+      # No build/test here: the `ci` job this one `needs` ran the full gate (lint, fmt, dist sync,
+      # smoke + every RUN suite under DCE 0 and 1, undefined-function grep) on this same commit,
+      # with the same pinned, hash-verified toolchain and the same gated lock. Nothing built here
+      # would ship — the release assets are sources.
+
+      - name: Verify dist/ is the bundle of this tag's src/
+        # ⛔ Ship the COMMITTED dist/rekha.cyr, never a regenerated one: `--check` proves the
+        # committed bundle + sidecar equal a fresh `cyrius distlib` without writing, so the asset
+        # is byte-for-byte what `[deps.rekha]` consumers get from the tag.
         run: |
-          mkdir -p build
-          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/rekha-smoke
-          echo "smoke: $(wc -c < build/rekha-smoke) bytes"
-
-      - name: Test (RUN suites)
-        run: |
-          mkdir -p build
-          for t in programs/*_test.cyr; do
-            [ -e "$t" ] || continue
-            name=$(basename "$t" .cyr)
-            cyrius build "$t" "build/$name"
-            "./build/$name" || { echo "FAIL: $t"; exit 1; }
-          done
-          for f in tests/tcyr/*.tcyr; do [ -e "$f" ] || continue; cyrius test "$f" || exit 1; done
-
-      - name: Regenerate dist bundle
-        run: cyrius distlib
-
-      - name: Clean toolchain artifacts
-        run: rm -f cyrius-*.tar.gz
+          cyrius distlib --check
+          if [ -n "$(git status --porcelain -- dist/)" ]; then
+            git status --porcelain -- dist/
+            echo "ERROR: dist/ has uncommitted or untracked files."
+            exit 1
+          fi
 
       - name: Archive
         run: |
@@ -84,8 +93,9 @@ jobs:
           git archive --format=tar.gz --prefix="rekha-${TAG}/" -o "rekha-${TAG}-src.tar.gz" HEAD
           cp dist/rekha.cyr "rekha-${TAG}.cyr"
           sha256sum rekha-*.tar.gz rekha-*.cyr > SHA256SUMS
+          cat SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-artifacts
           path: |
@@ -97,20 +107,28 @@ jobs:
     name: Create GitHub Release
     needs: [build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-artifacts
       - name: Changelog
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
-      - uses: softprops/action-gh-release@v2
+          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > "$RUNNER_TEMP/body.md"
+          [ -s "$RUNNER_TEMP/body.md" ] || { echo "ERROR: no '## [$TAG]' section in CHANGELOG.md"; exit 1; }
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: "rekha ${{ github.ref_name }}"
-          body_path: /tmp/body.md
+          # `with:` inputs are not shell-expanded — $RUNNER_TEMP would be passed literally.
+          body_path: ${{ runner.temp }}/body.md
           prerelease: ${{ startsWith(github.ref_name, '0.') || startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-rc.') || contains(github.ref_name, '-beta.') || contains(github.ref_name, '-alpha.') }}
+          fail_on_unmatched_files: true
           files: |
             rekha-*.tar.gz
             rekha-*.cyr

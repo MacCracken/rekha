@@ -1,0 +1,700 @@
+# programs/glyf_neg_test.cyr — RUN test for rekha_load_simple's rejection guards (audit R-26).
+#
+# ⭐ ONE CASE PER GUARD, EACH PAIRED WITH A PASSING CONTROL. Every malformed SIMPLE glyph below is a
+# well-formed glyph with exactly one defect: a span cut short by a byte or two, one endPts value
+# changed, or one instructionLength changed. The control decodes to exact coordinates; the defective
+# copy must load as an EMPTY outline (n_contours 0, n_points 0, no arrays) and draw a path with 0
+# verbs. A guard that stops firing cannot hide behind a broken fixture, because the fixture minus its
+# defect is proven to decode.
+#
+# ⛔ AN OVER-READ ON A BUMP HEAP DOES NOT CRASH, SO "NO CRASH" PROVES NOTHING. Every glyph span is
+# followed in glyf by a FILLER glyph of 0x31 bytes (flag: on-curve, x same, y same). A loader that
+# reads past its span therefore reads bytes that DECODE — a missing flag byte becomes a valid point,
+# a missing REPEAT count a valid count, a missing coordinate byte a valid delta — and yields a
+# non-empty outline, which the n_contours == 0 assertion catches.
+#
+# ⭐ THE GUARD'S POSITION IS PINNED BY ITS COST. Header-level guards (endPts array, strictly
+# increasing endPts, np > REKHA_COMPOSITE_MAXP, instructionLength, the flag-byte bound) refuse BEFORE
+# the outline block is carved: the load costs exactly one 48 B empty record. Data-level guards
+# (flags, x, y) fire after the carve and return that block cleared: the load costs exactly the carved
+# size, 48 + 8 * nc + 17 * np aligned to 8. So the np-beyond-the-flag-byte-bound case (48 B) is told
+# apart from the np-at-the-bound case that runs out of flag bytes (the full block).
+#
+# Font: head (long loca) + maxp + loca + glyf, assembled from the glyph bytes written below.
+# Exit code = failed checks; each failure prints its check number and case name to fd 2.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_case = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "glyf_neg_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_case, strlen(g_case));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ---- glyph assembler: glyph bytes go to g_gl, each glyph's start offset to g_loca -------------
+var GB_CAP  = 65536;
+var GB_MAXG = 256;
+var g_gl    = 0;
+var g_gp    = 0;
+var g_loca  = 0;
+var g_ng    = 0;
+var g_start = 0;
+
+fn gb_init(): i64 {
+    g_gl = alloc(GB_CAP);
+    memset(g_gl, 0, GB_CAP);
+    g_loca = alloc(GB_MAXG * 8);
+    g_gp = 0;
+    g_ng = 0;
+    return 0;
+}
+
+# Begin a glyph at the current write offset; returns its gid.
+fn g_begin(): i64 {
+    store64(g_loca + g_ng * 8, g_gp);
+    g_start = g_gp;
+    g_ng = g_ng + 1;
+    return g_ng - 1;
+}
+
+fn w8(v): i64 {
+    store8(g_gl + g_gp, v & 255);
+    g_gp = g_gp + 1;
+    return 0;
+}
+
+fn w16(v): i64 {
+    w8((v >> 8) & 255);
+    w8(v & 255);
+    return 0;
+}
+
+# numberOfContours + a zero bbox (10 bytes).
+fn hdr(nc): i64 {
+    w16(nc);
+    w16(0);
+    w16(0);
+    w16(0);
+    w16(0);
+    return 0;
+}
+
+# Cut the glyph being written to its first n bytes (the rest is overwritten by what follows).
+fn g_cut(n): i64 {
+    g_gp = g_start + n;
+    return 0;
+}
+
+# End a glyph: append an 8-byte FILLER glyph of 0x31 flag bytes right after it (see the header).
+fn g_end(): i64 {
+    g_begin();
+    var i = 0;
+    while (i < 8) {
+        w8(0x31);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Assemble the font: head@76/54 (upem 1000, long loca) maxp@132/6 loca@140 glyf after it.
+fn gb_font(): i64 {
+    var ng = g_ng;
+    var loca = 140;
+    var loca_len = (ng + 1) * 4;
+    var glyf = loca + loca_len;
+    var len = glyf + g_gp;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 132, 6);
+    dir_entry(buf, 44, 0x6C6F6361, loca, loca_len);
+    dir_entry(buf, 60, 0x676C7966, glyf, g_gp);
+    put_u16(buf, 76 + 18, 1000);
+    put_u16(buf, 76 + 50, 1);
+    put_u16(buf, 132 + 4, ng);
+    var i = 0;
+    while (i < ng) {
+        put_u32(buf, loca + i * 4, load64(g_loca + i * 8));
+        i = i + 1;
+    }
+    put_u32(buf, loca + ng * 4, g_gp);
+    memcpy(buf + glyf, g_gl, g_gp);
+    return rekha_font_open(buf, len);
+}
+
+# ---- load helpers -----------------------------------------------------------------------------
+var g_font = 0;
+var g_o = 0;
+
+# Load `gid` into g_o; return the bytes the load cost the global heap.
+fn load(gid): i64 {
+    var a = alloc_used();
+    g_o = rekha_load_glyph(g_font, gid);
+    return alloc_used() - a;
+}
+
+# One carved simple-outline block: record 48 + end_pts 8/contour + 17/point, aligned to 8.
+fn blk(nc, np): i64 {
+    return (REKHA_OUTLINE_SIZE + nc * 8 + np * 17 + 7) & (0 - 8);
+}
+
+# A path's verb count for `gid` at 1 px per unit.
+fn verbs(gid): i64 {
+    return sd_path_verb_count(rekha_glyph_to_sdpath(g_font, gid, SD_ONE, 0, 0));
+}
+
+# The defect: `gid` loads EMPTY for exactly `cost` bytes, and draws nothing. (7 checks)
+fn neg(gid, cost): i64 {
+    check(load(gid), cost);
+    check(g_o != 0, 1);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    check(rekha_outline_end_pts(g_o), 0);
+    check(rekha_outline_xs(g_o), 0);
+    check(verbs(gid), 0);
+    return 0;
+}
+
+# The control: `gid` decodes to 1 contour of 3 on-curve points at the given coordinates. (12 checks)
+fn pos3(gid, x0, y0, x1, y1, x2, y2): i64 {
+    check(load(gid), blk(1, 3));
+    check(rekha_outline_n_contours(g_o), 1);
+    check(rekha_outline_n_points(g_o), 3);
+    check(load64(rekha_outline_end_pts(g_o)), 2);
+    var xs = rekha_outline_xs(g_o);
+    var ys = rekha_outline_ys(g_o);
+    var oc = rekha_outline_on_curve(g_o);
+    check(load64(xs), x0);
+    check(load64(ys), y0);
+    check(load64(xs + 8), x1);
+    check(load64(ys + 8), y1);
+    check(load64(xs + 16), x2);
+    check(load64(ys + 16), y2);
+    check(load8(oc) + load8(oc + 1) + load8(oc + 2), 3);   # each flag masked to 1
+    check(verbs(gid), 4);                                   # moveto, 2 lineto, close
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    gb_init();
+    var i = 0;
+
+    # ================= build every glyph (control, then its one-defect copies) =================
+
+    # A) endPtsOfContours array past the span. Control: 2 single-point contours, flags 0x31 x2.
+    #    bytes: hdr(10) eps 0,1 (4) instrLen 0 (2) flags (2) = 18.
+    var a_ok = g_begin();
+    hdr(2);
+    w16(0);
+    w16(1);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    g_end();
+    var a_half = g_begin();                # cut 13: endPts[1] has 1 of its 2 bytes
+    hdr(2);
+    w16(0);
+    w16(1);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    g_cut(13);
+    g_end();
+    var a_none = g_begin();                # cut 10: no endPts bytes at all
+    hdr(2);
+    w16(0);
+    w16(1);
+    g_cut(10);
+    g_end();
+    var a_huge = g_begin();                # nc 32767 over a 12-byte span
+    hdr(32767);
+    w16(0);
+    g_end();
+
+    # B) instructionLength. Control: 1 point, instrLen 2 (B0 01), flag 0x33, x byte 7 -> (7, 0).
+    #    bytes: hdr(10) ep(2) instrLen(2) instr(2) flag(1) x(1) = 18.
+    var b_ok = g_begin();
+    hdr(1);
+    w16(0);
+    w16(2);
+    w8(0xB0);
+    w8(0x01);
+    w8(0x33);
+    w8(7);
+    g_end();
+    var b_nofield = g_begin();             # cut 12: the instructionLength field is absent
+    hdr(1);
+    w16(0);
+    w16(2);
+    g_cut(12);
+    g_end();
+    var b_halffield = g_begin();           # cut 13: 1 of its 2 bytes
+    hdr(1);
+    w16(0);
+    w16(2);
+    g_cut(13);
+    g_end();
+    var b_over = g_begin();                # instrLen 5: p = 14 + 5 = 19 > end 18
+    hdr(1);
+    w16(0);
+    w16(5);
+    w8(0xB0);
+    w8(0x01);
+    w8(0x33);
+    w8(7);
+    g_end();
+    var b_max = g_begin();                 # instrLen 65535
+    hdr(1);
+    w16(0);
+    w16(65535);
+    w8(0xB0);
+    w8(0x01);
+    w8(0x33);
+    w8(7);
+    g_end();
+    # instrLen 4 ends EXACTLY at the span end: legal for the instruction guard (p == end), and the
+    # flag-byte bound admits np 1 (1 <= 0 * 128 + 1), so the block is carved — then the flag loop
+    # finds no byte. Pins "p > end", not "p >= end".
+    var b_swallow = g_begin();
+    hdr(1);
+    w16(0);
+    w16(4);
+    w8(0xB0);
+    w8(0x01);
+    w8(0x33);
+    w8(7);
+    g_end();
+
+    # C) flags truncated. All three controls: 3 points, flags with x-same + y-same (no coordinate
+    #    bytes), so every point is (0, 0) and the flag stream is the last thing in the span.
+    var c1_ok = g_begin();                 # flags 31 31 31 (17 bytes)
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    g_end();
+    var c1_neg = g_begin();                # mid-run: the third flag byte is missing
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    g_cut(16);
+    g_end();
+    var c2_ok = g_begin();                 # flags 39 02: REPEAT twice (16 bytes)
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x39);
+    w8(2);
+    g_end();
+    var c2_neg = g_begin();                # mid-REPEAT: the count byte is missing
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x39);
+    w8(2);
+    g_cut(15);
+    g_end();
+    var c3_ok = g_begin();                 # flags 39 01 31: a run, then one more flag (17 bytes)
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x39);
+    w8(1);
+    w8(0x31);
+    g_end();
+    var c3_neg = g_begin();                # the flag after the repeated run is missing
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x39);
+    w8(1);
+    w8(0x31);
+    g_cut(16);
+    g_end();
+
+    # D) x truncated (y-same flags, so x is the last data in the span).
+    #    d1: flags 33 23 33 (x short: +, -, +), x bytes 10 20 30 -> xs 10, 10-20 = -10, -10+30 = 20.
+    var d1_ok = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x33);
+    w8(0x23);
+    w8(0x33);
+    w8(10);
+    w8(20);
+    w8(30);
+    g_end();
+    var d1_neg = g_begin();                # the last 1-byte x is missing
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x33);
+    w8(0x23);
+    w8(0x33);
+    w8(10);
+    w8(20);
+    w8(30);
+    g_cut(19);
+    g_end();
+    #    d2: flags 21 x3 (x word), x words 100 -50 25 -> xs 100, 50, 75.
+    var d2_ok = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x21);
+    w8(0x21);
+    w8(0x21);
+    w16(100);
+    w16(0 - 50);
+    w16(25);
+    g_end();
+    var d2_neg = g_begin();                # the last 2-byte x has 1 byte
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x21);
+    w8(0x21);
+    w8(0x21);
+    w16(100);
+    w16(0 - 50);
+    w16(25);
+    g_cut(22);
+    g_end();
+    var d2_neg0 = g_begin();               # the last 2-byte x has 0 bytes
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x21);
+    w8(0x21);
+    w8(0x21);
+    w16(100);
+    w16(0 - 50);
+    w16(25);
+    g_cut(21);
+    g_end();
+
+    # E) y truncated (x-same flags).
+    #    e1: flags 35 15 35 (y short: +, -, +), y bytes 10 20 30 -> ys 10, -10, 20.
+    var e1_ok = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x35);
+    w8(0x15);
+    w8(0x35);
+    w8(10);
+    w8(20);
+    w8(30);
+    g_end();
+    var e1_neg = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x35);
+    w8(0x15);
+    w8(0x35);
+    w8(10);
+    w8(20);
+    w8(30);
+    g_cut(19);
+    g_end();
+    #    e2: flags 11 x3 (y word), y words 100 -50 25 -> ys 100, 50, 75.
+    var e2_ok = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x11);
+    w8(0x11);
+    w8(0x11);
+    w16(100);
+    w16(0 - 50);
+    w16(25);
+    g_end();
+    var e2_neg = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x11);
+    w8(0x11);
+    w8(0x11);
+    w16(100);
+    w16(0 - 50);
+    w16(25);
+    g_cut(22);
+    g_end();
+    #    e3: y truncated AFTER real x data. flags 01 x3 (x word, y word), x 1 2 3, y 4 5 6
+    #    -> xs 1, 3, 6; ys 4, 9, 15. 10 + 2 + 2 + 3 + 6 + 6 = 29 bytes.
+    var e3_ok = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x01);
+    w8(0x01);
+    w8(0x01);
+    w16(1);
+    w16(2);
+    w16(3);
+    w16(4);
+    w16(5);
+    w16(6);
+    g_end();
+    var e3_neg = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x01);
+    w8(0x01);
+    w8(0x01);
+    w16(1);
+    w16(2);
+    w16(3);
+    w16(4);
+    w16(5);
+    w16(6);
+    g_cut(28);
+    g_end();
+
+    # F) endPtsOfContours not strictly increasing. Control: eps [0, 2], flags 31 x3.
+    var f_ok = g_begin();
+    hdr(2);
+    w16(0);
+    w16(2);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    g_end();
+    var f_eq = g_begin();                  # [2, 2]
+    hdr(2);
+    w16(2);
+    w16(2);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    g_end();
+    var f_dec = g_begin();                 # [2, 1]
+    hdr(2);
+    w16(2);
+    w16(1);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    g_end();
+    var f_wild = g_begin();                # [65533, 1] — the R-01 shape (np from the LAST endPt)
+    hdr(2);
+    w16(65533);
+    w16(1);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    g_end();
+
+    # G) np > REKHA_COMPOSITE_MAXP. 17 flag pairs (39, 255) = 17 x 256 flag slots, so the flag stream
+    #    could carry 4097 points: only the endPt differs between control and defect.
+    var m_ok = g_begin();                  # ep 4095 -> np 4096 (= MAXP, accepted)
+    hdr(1);
+    w16(4095);
+    w16(0);
+    i = 0;
+    while (i < 17) {
+        w8(0x39);
+        w8(255);
+        i = i + 1;
+    }
+    g_end();
+    var m_neg = g_begin();                 # ep 4096 -> np 4097
+    hdr(1);
+    w16(4096);
+    w16(0);
+    i = 0;
+    while (i < 17) {
+        w8(0x39);
+        w8(255);
+        i = i + 1;
+    }
+    g_end();
+    var m_max = g_begin();                 # ep 65535 -> np 65536
+    hdr(1);
+    w16(65535);
+    w16(0);
+    i = 0;
+    while (i < 17) {
+        w8(0x39);
+        w8(255);
+        i = i + 1;
+    }
+    g_end();
+
+    # H) np beyond the flag-byte bound np <= (end - p) * 128 + 1. Two flag bytes (39, 255) follow
+    #    the instructions, so the bound is 2 * 128 + 1 = 257 and the bytes really carry 256 points.
+    var h_ok = g_begin();                  # ep 255 -> np 256: decodes
+    hdr(1);
+    w16(255);
+    w16(0);
+    w8(0x39);
+    w8(255);
+    g_end();
+    var h_at = g_begin();                  # ep 256 -> np 257: AT the bound, carved, flags run out
+    hdr(1);
+    w16(256);
+    w16(0);
+    w8(0x39);
+    w8(255);
+    g_end();
+    var h_over = g_begin();                # ep 257 -> np 258: past the bound, refused uncarved
+    hdr(1);
+    w16(257);
+    w16(0);
+    w8(0x39);
+    w8(255);
+    g_end();
+
+    g_font = gb_font();
+    check(g_font != 0, 1);                                             # 1
+    check(rekha_glyph_count(g_font), g_ng);                            # 2
+    check(rekha_loca_format(g_font), 1);                               # 3
+
+    # ================= assertions =================
+    var e48 = REKHA_OUTLINE_SIZE;          # a header-level refusal: one empty record, uncarved
+
+    g_case = "A endPts array";
+    check(load(a_ok), blk(2, 2));
+    check(rekha_outline_n_contours(g_o), 2);
+    check(rekha_outline_n_points(g_o), 2);
+    check(load64(rekha_outline_end_pts(g_o) + 8), 1);
+    check(verbs(a_ok), 4);                 # moveto, close per 1-point contour
+    neg(a_half, e48);
+    neg(a_none, e48);
+    neg(a_huge, e48);
+
+    g_case = "B instructionLength";
+    check(load(b_ok), blk(1, 1));
+    check(rekha_outline_n_points(g_o), 1);
+    check(load64(rekha_outline_xs(g_o)), 7);
+    check(load64(rekha_outline_ys(g_o)), 0);
+    neg(b_nofield, e48);
+    neg(b_halffield, e48);
+    neg(b_over, e48);
+    neg(b_max, e48);
+    neg(b_swallow, blk(1, 1));
+
+    g_case = "C flags truncated mid-run";
+    pos3(c1_ok, 0, 0, 0, 0, 0, 0);
+    neg(c1_neg, blk(1, 3));
+    g_case = "C flags truncated mid-REPEAT";
+    pos3(c2_ok, 0, 0, 0, 0, 0, 0);
+    neg(c2_neg, blk(1, 3));
+    g_case = "C flag after a repeated run";
+    pos3(c3_ok, 0, 0, 0, 0, 0, 0);
+    neg(c3_neg, blk(1, 3));
+
+    g_case = "D truncated 1-byte x";
+    pos3(d1_ok, 10, 0, 0 - 10, 0, 20, 0);
+    neg(d1_neg, blk(1, 3));
+    g_case = "D truncated 2-byte x";
+    pos3(d2_ok, 100, 0, 50, 0, 75, 0);
+    neg(d2_neg, blk(1, 3));
+    neg(d2_neg0, blk(1, 3));
+
+    g_case = "E truncated 1-byte y";
+    pos3(e1_ok, 0, 10, 0, 0 - 10, 0, 20);
+    neg(e1_neg, blk(1, 3));
+    g_case = "E truncated 2-byte y";
+    pos3(e2_ok, 0, 100, 0, 50, 0, 75);
+    neg(e2_neg, blk(1, 3));
+    g_case = "E truncated y after x words";
+    pos3(e3_ok, 1, 4, 3, 9, 6, 15);
+    neg(e3_neg, blk(1, 3));
+
+    g_case = "F non-increasing endPts";
+    check(load(f_ok), blk(2, 3));
+    check(rekha_outline_n_contours(g_o), 2);
+    check(rekha_outline_n_points(g_o), 3);
+    check(load64(rekha_outline_end_pts(g_o)), 0);
+    check(load64(rekha_outline_end_pts(g_o) + 8), 2);
+    check(verbs(f_ok), 5);                 # [moveto close] [moveto lineto close]
+    neg(f_eq, e48);
+    neg(f_dec, e48);
+    neg(f_wild, e48);
+
+    g_case = "G np > REKHA_COMPOSITE_MAXP";
+    # 48 + 8 + 17 * 4096 = 69,688 B (already a multiple of 8).
+    check(blk(1, 4096), 69688);
+    check(load(m_ok), 69688);
+    check(rekha_outline_n_contours(g_o), 1);
+    check(rekha_outline_n_points(g_o), REKHA_COMPOSITE_MAXP);
+    check(load64(rekha_outline_end_pts(g_o)), 4095);
+    check(load8(rekha_outline_on_curve(g_o) + 4095), 1);
+    check(load64(rekha_outline_xs(g_o) + 4095 * 8), 0);
+    neg(m_neg, e48);
+    neg(m_max, e48);
+
+    g_case = "H np vs the flag-byte bound";
+    # 48 + 8 + 17 * 256 = 4,408 B; at np 257: 4,425 -> 4,432 B.
+    check(load(h_ok), 4408);
+    check(rekha_outline_n_points(g_o), 256);
+    check(load8(rekha_outline_on_curve(g_o) + 255), 1);
+    neg(h_at, 4432);
+    neg(h_over, e48);
+
+    if (g_fails == 0) {
+        var ok = "glyf_neg_test: PASS (";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        var ok2 = " checks; every simple-glyph guard refuses its one-defect fixture)\n";
+        syscall(1, 1, ok2, strlen(ok2));
+    } else {
+        var bad = "glyf_neg_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

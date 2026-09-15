@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.3.10
+Version: 0.3.11
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -26,7 +26,8 @@ shim, no external binaries.
     `rekha_glyph_count`.
   - **loca → glyf** — `rekha_glyf_span` (glyph id → its glyf byte range).
   - **glyf decode** — `rekha_load_glyph` (contours, run-length flags,
-    delta-encoded coords → `RekhaOutline`); every read bounds-checked.
+    delta-encoded coords → `RekhaOutline`); reads bounded by the file (tightened
+    to each table's own extent in 0.3.11).
   - **sadish seam** — `rekha_outline_to_sdpath` / `rekha_glyph_to_sdpath`
     convert TrueType quadratic contours (implied midpoints, off-curve
     starts) into a sadish `SdPath`, y-flipped + scaled to pixel space.
@@ -45,6 +46,23 @@ shim, no external binaries.
   from the same arena: 20 `rekha_char_to_sdpath` calls under an arena hook cost
   the global heap **exactly 0 bytes** (MEASURED; 4,328 B each on the arena).
   ⚠ Open fonts OUTSIDE a scoped hook — `rekha_font_open` follows the seam too.
+- **v0.3.11 — hardened against hostile fonts, and faster (shipped).** An
+  audit found four out-of-bounds reads reachable from `rekha_char_to_sdpath`
+  with crafted bytes, plus composite fan-out that could demand gigabytes;
+  all are fixed and each has a regression suite. The invariant now enforced:
+  every table lies after the directory and inside the file, a fixed field is
+  read only when its table's DECLARED length covers it, variable arrays stay
+  inside their own table, and every outline's `end_pts` strictly increase and
+  stay `< n_points`. Load caps (not read from the font): 4,096 points / 128
+  contours per outline, 64 glyph loads and 16,384 decoded points per
+  `rekha_load_glyph`, nesting depth 5, no component cycles — tripping one
+  yields an EMPTY glyph, never a partial one. Table offsets are cached at open
+  (`RekhaFont` 40 → 160 B, once): a 54-character label draws **2.7× faster**
+  (205 → 76 µs MEASURED) and an accented composite loads in 1.6 KB instead of
+  71.6 KB. Composite point matching and scaled component offsets now decode;
+  new `rekha_glyph_advance_px` / `_fx` and `rekha_char_advance_fx` (16.16).
+  ⚠ The font buffer is borrowed and its metadata snapshotted at open — do not
+  mutate it afterwards.
 - **v0.4.0 / staged — next:** cmap formats 12 (full Unicode) / 6 / 0,
   OpenType/CFF (`OTTO`) outlines, WOFF/WOFF2 (needs `sankoch` inflate +
   Brotli), and hinting.
@@ -103,8 +121,9 @@ document / UI text — anywhere scalable glyphs are needed.
   still compile (`warning: undefined function 'sd_alloc'`, printed either way)
   and fault at the first `rekha_font_open`, or be refused outright, depending
   on where the first call site sits (CHANGELOG 0.3.10). Wired via
-  `[deps.sadish]` (`tag = "0.5.5"`, with a local
-  `path = "../sadish"` override for cross-repo dev — `path` wins over `tag`).
+  `[deps.sadish]` (`tag = "0.5.5"`, commit-pinned in `cyrius.lock`; for
+  cross-repo dev add `path = "../sadish"` in an UNCOMMITTED copy — `path`
+  wins over `tag`, skips the pin, and CI refuses a committed `path` line).
   A consumer vendoring `dist/rekha.cyr` next to its own `dist/sadish.cyr`
   must clear the same floor.
 - **Cyrius stdlib** — `string`, `fmt`, `alloc`, `io`, `vec`, `str`,
@@ -121,10 +140,15 @@ cyrius deps                                          # resolve stdlib + sadish i
 cyrius build programs/smoke.cyr build/rekha-smoke    # link-check
 ./build/rekha-smoke                                  # prints the banner
 
-# RUN tests (each self-checks and exits non-zero on failure)
-for t in sfnt meta glyf path cmap composite hmtx face alloc; do
-  cyrius build "programs/${t}_test.cyr" "build/${t}_test" && "./build/${t}_test"
+# RUN tests (each self-checks and exits non-zero on failure; CI runs them all
+# under CYRIUS_DCE=0 and 1 and fails on any build-log warning)
+for t in programs/*_test.cyr; do
+  n=$(basename "$t" .cyr)
+  cyrius build "$t" "build/$n" && "./build/$n" || break
 done
+
+# hot-path timings (visibility only; not a gate)
+cyrius build programs/bench_hotpath.cyr build/bench_hotpath && ./build/bench_hotpath
 ```
 
 ## License

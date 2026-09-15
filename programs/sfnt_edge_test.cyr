@@ -1,0 +1,192 @@
+# programs/sfnt_edge_test.cyr — RUN test: the sfnt.cyr / cmap.cyr edges the other suites let slip (0.3.11).
+#
+# ⭐ WHY THIS FILE EXISTS. Mutation testing of 0.3.11's src/sfnt.cyr + src/cmap.cyr (110 mutants)
+# left six real test gaps alive: (1) with hhea absent or short, rekha_descender / rekha_line_gap
+# must not fall through to the SFNT header's searchRange / entrySelector — every other fixture left
+# those bytes 0; (2) no fixture had an ODD unitsPerEm, so `upem / 2` vs `(upem + 1) / 2` rounding in
+# rekha_glyph_advance_px / _fx was unpinned; (3) a cmap encoding record whose format word straddles
+# the cmap extent must not be chosen even when the byte past the extent reads 4, and a format-4
+# record inside the extent whose 14-byte header is cut means NO subtable. Plus the direct
+# rekha_cmap_subtable(0) guard. Exit code = failed checks.
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var BUF_LEN = 32768;
+var CM = 592;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "sfnt_edge_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " got ", 5);
+    fmt_int_fd(2, got);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ---- P1: no hhea / short hhea with a spec-valid, NON-ZERO searchRange / entrySelector ----
+fn p_hhea(buf): i64 {
+    memset(buf, 0, BUF_LEN);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 2);
+    put_u16(buf, 6, 32);                          # searchRange  (2 tables)
+    put_u16(buf, 8, 1);                           # entrySelector
+    put_u16(buf, 10, 0);                          # rangeShift
+    dir_entry(buf, 12, REKHA_TAG_HEAD, 44, 54);
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 98, 6);
+    put_u16(buf, 44 + 18, 1000);
+    put_u16(buf, 98 + 4, 1);
+    var f = rekha_font_open(buf, 104);
+    check(f != 0, 1);
+    check(rekha_ascender(f), 0);                  # #2
+    check(rekha_descender(f), 0);                 # #3  S13b reads searchRange -> 32
+    check(rekha_line_gap(f), 0);                  # #4  S13c reads entrySelector -> 1
+    # 3 tables, hhea declares 35 B (one short of its fixed part)
+    put_u16(buf, 4, 3);
+    put_u16(buf, 6, 32);
+    put_u16(buf, 8, 1);
+    put_u16(buf, 10, 16);
+    dir_entry(buf, 12, REKHA_TAG_HEAD, 60, 54);
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 114, 6);
+    dir_entry(buf, 44, REKHA_TAG_HHEA, 120, 35);
+    memset(buf + 60, 0, 200);
+    put_u16(buf, 60 + 18, 1000);
+    put_u16(buf, 114 + 4, 1);
+    put_u16(buf, 120 + 4, 800);
+    put_u16(buf, 120 + 6, 0 - 200);
+    put_u16(buf, 120 + 8, 90);
+    f = rekha_font_open(buf, 160);
+    check(rekha_descender(f), 0);                 # #5
+    check(rekha_line_gap(f), 0);                  # #6
+    return 0;
+}
+
+# ---- P2: ODD unitsPerEm — half-up rounding must use upem / 2 (truncated), not (upem + 1) / 2 ----
+fn p_odd_upem(buf): i64 {
+    memset(buf, 0, BUF_LEN);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, REKHA_TAG_HEAD, 76, 54);
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 130, 6);
+    dir_entry(buf, 44, REKHA_TAG_HHEA, 136, 36);
+    dir_entry(buf, 60, REKHA_TAG_HMTX, 172, 4);
+    put_u16(buf, 76 + 18, 17);                    # unitsPerEm 17 (odd)
+    put_u16(buf, 130 + 4, 1);
+    put_u16(buf, 136 + 34, 1);
+    put_u16(buf, 172, 8);                         # advance 8
+    var f = rekha_font_open(buf, 176);
+    check(rekha_units_per_em(f), 17);             # #7
+    check(rekha_glyph_advance_px(f, 0, 1), 0);    # #8  8/17 = 0.47 -> 0   (S19d: 1)
+    check(rekha_glyph_advance_fx(f, 0, 1), 30840); # #9 524288/17 = 30840.47 -> 30840 (S20d: 30841)
+    return 0;
+}
+
+fn hdr(buf, ntab): i64 {
+    put_u16(buf, CM + 0, 0);
+    put_u16(buf, CM + 2, ntab);
+    return 0;
+}
+
+fn rec(buf, i, plat, enc, off): i64 {
+    var r = CM + 4 + i * 8;
+    put_u16(buf, r, plat);
+    put_u16(buf, r + 2, enc);
+    put_u32(buf, r + 4, off);
+    return 0;
+}
+
+fn f4_hdr(buf, s, segc): i64 {
+    put_u16(buf, s + 0, 4);
+    put_u16(buf, s + 2, 16 + segc * 8);
+    put_u16(buf, s + 6, segc * 2);
+    return 0;
+}
+
+fn f4_seg(buf, s, segc, i, start, end, delta, ro): i64 {
+    var sc2 = segc * 2;
+    put_u16(buf, s + 14 + i * 2, end);
+    put_u16(buf, s + 16 + sc2 + i * 2, start);
+    put_u16(buf, s + 16 + sc2 * 2 + i * 2, delta);
+    put_u16(buf, s + 16 + sc2 * 3 + i * 2, ro);
+    return 0;
+}
+
+fn cbase(buf, clen): i64 {
+    memset(buf, 0, BUF_LEN);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 2);
+    dir_entry(buf, 12, REKHA_TAG_MAXP, 44, 6);
+    dir_entry(buf, 28, REKHA_TAG_CMAP, CM, clen);
+    put_u16(buf, 44 + 4, 100);
+    return 0;
+}
+
+# ---- P3: the format word just outside / exactly at the end of the cmap extent ----
+fn p_fmt_word(buf): i64 {
+    # (3,1) -> A @+20 ('A' -> 5); (0,3) -> @+83, whose word straddles the end (cend = +84) and READS 4
+    cbase(buf, 84);
+    hdr(buf, 2);
+    rec(buf, 0, 3, 1, 20);
+    f4_hdr(buf, CM + 20, 2);
+    f4_seg(buf, CM + 20, 2, 0, 65, 65, 5 - 65, 0);
+    f4_seg(buf, CM + 20, 2, 1, 0xFFFF, 0xFFFF, 1, 0);
+    rec(buf, 1, 0, 3, 83);
+    store8(buf + CM + 84, 4);                     # first byte past the cmap: 0x00 0x04 across the end
+    var f = rekha_font_open(buf, BUF_LEN);
+    check(rekha_cmap_subtable(f), CM + 20);       # #10 straddling record does not exist (C05a: 0)
+    check(rekha_char_to_glyph(f, 65), 5);         # #11
+    # (0,3) -> @+82: format 4 ENTIRELY inside the extent but no room for its header -> no usable subtable
+    store8(buf + CM + 84, 0);
+    rec(buf, 1, 0, 3, 82);
+    put_u16(buf, CM + 82, 4);
+    f = rekha_font_open(buf, BUF_LEN);
+    check(rekha_cmap_subtable(f), 0);             # #12 last fmt-4 record wins, then its header is cut (C05b: CM+20)
+    check(rekha_char_to_glyph(f, 65), 0);         # #13
+    return 0;
+}
+
+# ---- P4: rekha_cmap_subtable(0) ----
+fn p_null(): i64 {
+    check(rekha_cmap_subtable(0), 0);             # #14 (C01: SIGSEGV)
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var buf = alloc(BUF_LEN);
+    p_hhea(buf);
+    p_odd_upem(buf);
+    p_fmt_word(buf);
+    p_null();
+    if (g_fails == 0) {
+        var ok = "sfnt_edge_test: PASS\n";
+        syscall(1, 1, ok, strlen(ok));
+    }
+    return g_fails;
+}
+
+var rc = main();
+syscall(60, rc);

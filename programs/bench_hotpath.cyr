@@ -1,0 +1,318 @@
+# programs/bench_hotpath.cyr — hot-path benchmark on the embedded face (LiberationSans Regular,
+# 19 tables, 2,620 glyphs). NON-GATING: CI builds and runs it for visibility only, never compares
+# its numbers (shared runners are noisy). The allocation cost is gated exactly by alloc_test and
+# face_test; this program reports time.
+#
+# Rows, each a per-op average over timed passes (lib/bench.cyr's inline batch API, which measures
+# and subtracts the host's clock-read floor and prints it):
+#   rekha_char_advance_px   ASCII 32..126 at 32 px
+#   rekha_char_to_glyph     ASCII 32..126 (format-4 hybrid search)
+#   rekha_units_per_em      the table-cache read every scaler starts with
+#   rekha_glyf_span         ASCII gids (loca -> glyf)
+#   rekha_load_glyph        ASCII gids, decode only                       + arena bytes/op
+#   rekha_outline_to_sdpath ASCII outlines preloaded, emit only           + arena bytes/op
+#   rekha_char_to_sdpath    ASCII, the full cmap + decode + emit          + arena bytes/op
+#   U+00C5 composite        rekha_char_to_sdpath of A-ring (2 components) + arena bytes/op
+#   54-char label           advance pre-pass + (sdpath + advance) per char, per LABEL + bytes/label
+#
+# ⚠ Everything runs under an sd_alloc arena hook, reset after every timed pass, so the numbers are
+# the consumer's (dhancha's per-frame arena), not a bump allocator's page faults; the program
+# prints the global-heap delta of all timed passes, which should read 0.
+# The result checksum over cp 32..255 (advance, gid, verbs, points, every path coordinate) is
+# printed FIRST, so two builds of rekha can be compared for identical output before their timings
+# are compared at all.
+
+include "src/lib.cyr"
+include "fonts/face_data.cyr"
+
+var g_arena = 0;
+
+fn hook_alloc(n): i64 {
+    return arena_alloc(g_arena, n);
+}
+
+fn say(s): i64 {
+    syscall(1, 1, s, strlen(s));
+    return 0;
+}
+
+fn sayn(v): i64 {
+    fmt_int_fd(1, v);
+    return 0;
+}
+
+# Print "    arena: <bytes / ops> B/<unit>" under a row.
+fn say_bytes(bytes, ops, unit): i64 {
+    say("    arena: ");
+    sayn(bytes / ops);
+    say(" B/");
+    say(unit);
+    say("\n");
+    return 0;
+}
+
+var ASCII_LO = 32;
+var ASCII_N = 95;
+var PX = 32;
+var PASSES = 200;
+
+fn main(): i64 {
+    alloc_init();
+    var n = rekha_face_default_len();
+    var buf = alloc(n + 64);
+    if (rekha_face_default_copy(buf, n + 64) != n) {
+        say("bench_hotpath: face copy failed\n");
+        return 1;
+    }
+    if (rekha_face_default_verify(buf, n) != 1) {
+        say("bench_hotpath: face verify failed\n");
+        return 1;
+    }
+    var f = rekha_font_open(buf, n);
+    if (f == 0) {
+        say("bench_hotpath: open failed\n");
+        return 1;
+    }
+    g_arena = arena_new_growable(16777216);
+    if (g_arena == 0) {
+        say("bench_hotpath: arena failed\n");
+        return 1;
+    }
+    var upem = rekha_units_per_em(f);
+    var scale = (PX * SD_ONE) / upem;
+    var ox = 5 * SD_ONE;
+    var oy = 30 * SD_ONE;
+
+    # ---- result checksum: identical output is the precondition for comparing timings ----
+    sd_alloc_set(&hook_alloc);
+    var ck = 0;
+    var cp = 32;
+    while (cp < 256) {
+        ck = ck * 31 + rekha_char_advance_px(f, cp, PX);
+        ck = ck * 31 + rekha_char_to_glyph(f, cp);
+        var pth = rekha_char_to_sdpath(f, cp, scale, ox, oy);
+        var nv = sd_path_verb_count(pth);
+        var np = sd_path_point_count(pth);
+        ck = ck * 31 + nv;
+        ck = ck * 31 + np;
+        var pts = load64(pth + SD_PATH_POINTS_OFFSET);
+        var q = 0;
+        while (q < np) {
+            var pp = load64(pts + q * 8);
+            ck = ck * 31 + sd_point_x(pp) + sd_point_y(pp) * 7;
+            q = q + 1;
+        }
+        arena_reset(g_arena);
+        cp = cp + 1;
+    }
+    say("bench_hotpath: result checksum (cp 32..255: advance_px, gid, verbs, points, coords): ");
+    sayn(ck);
+    say("\n");
+
+    # ASCII gids and preloaded outlines, built outside the timed passes. The outlines live on the
+    # global heap so the arena resets below cannot reclaim them.
+    sd_alloc_set(0);
+    var gids = alloc(ASCII_N * 8);
+    var outl = alloc(ASCII_N * 8);
+    var i = 0;
+    while (i < ASCII_N) {
+        var g0 = rekha_char_to_glyph(f, ASCII_LO + i);
+        store64(gids + i * 8, g0);
+        store64(outl + i * 8, rekha_load_glyph(f, g0));
+        i = i + 1;
+    }
+    var span: i64[2];
+    var label = "The quick brown fox jumps over the lazy dog 0123456789";
+    var llen = strlen(label);
+    var sink = 0;
+    var r = 0;
+    var k = 0;
+    var bytes = 0;
+
+    # Bench records come from the global heap (lib/bench.cyr's bench_new), so they are made BEFORE
+    # the heap baseline below.
+    var b_adv = bench_new("rekha_char_advance_px ASCII (32 px)");
+    var b_cmap = bench_new("rekha_char_to_glyph ASCII");
+    var b_upem = bench_new("rekha_units_per_em");
+    var b_span = bench_new("rekha_glyf_span ASCII");
+    var b_load = bench_new("rekha_load_glyph ASCII (decode only)");
+    var b_emit = bench_new("rekha_outline_to_sdpath ASCII (emit only)");
+    var b_draw = bench_new("rekha_char_to_sdpath ASCII (full)");
+    var b_comp = bench_new("rekha_char_to_sdpath U+00C5 (composite)");
+    var b_label = bench_new("54-char label draw (advance + sdpath per char), per label");
+
+    sd_alloc_set(&hook_alloc);
+    arena_reset(g_arena);
+    var heap0 = alloc_used();
+
+    # ---- read-only rows: several sweeps per timed pass, so a pass is far above the clock floor ----
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_adv);
+        k = 0;
+        while (k < 20) {
+            i = 0;
+            while (i < ASCII_N) {
+                sink = sink + rekha_char_advance_px(f, ASCII_LO + i, PX);
+                i = i + 1;
+            }
+            k = k + 1;
+        }
+        bench_batch_stop(b_adv, 20 * ASCII_N);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_adv);
+
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_cmap);
+        k = 0;
+        while (k < 20) {
+            i = 0;
+            while (i < ASCII_N) {
+                sink = sink + rekha_char_to_glyph(f, ASCII_LO + i);
+                i = i + 1;
+            }
+            k = k + 1;
+        }
+        bench_batch_stop(b_cmap, 20 * ASCII_N);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_cmap);
+
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_upem);
+        k = 0;
+        while (k < 2000) {
+            sink = sink + rekha_units_per_em(f);
+            k = k + 1;
+        }
+        bench_batch_stop(b_upem, 2000);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_upem);
+
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_span);
+        k = 0;
+        while (k < 20) {
+            i = 0;
+            while (i < ASCII_N) {
+                sink = sink + rekha_glyf_span(f, load64(gids + i * 8), &span);
+                i = i + 1;
+            }
+            k = k + 1;
+        }
+        bench_batch_stop(b_span, 20 * ASCII_N);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_span);
+
+    # ---- allocating rows: one sweep per timed pass, the arena reset after each ----
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_load);
+        i = 0;
+        while (i < ASCII_N) {
+            rekha_load_glyph(f, load64(gids + i * 8));
+            i = i + 1;
+        }
+        bench_batch_stop(b_load, ASCII_N);
+        bytes = arena_used(g_arena);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_load);
+    say_bytes(bytes, ASCII_N, "op");
+
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_emit);
+        i = 0;
+        while (i < ASCII_N) {
+            rekha_outline_to_sdpath(load64(outl + i * 8), scale, ox, oy);
+            i = i + 1;
+        }
+        bench_batch_stop(b_emit, ASCII_N);
+        bytes = arena_used(g_arena);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_emit);
+    say_bytes(bytes, ASCII_N, "op");
+
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_draw);
+        i = 0;
+        while (i < ASCII_N) {
+            rekha_char_to_sdpath(f, ASCII_LO + i, scale, ox, oy);
+            i = i + 1;
+        }
+        bench_batch_stop(b_draw, ASCII_N);
+        bytes = arena_used(g_arena);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_draw);
+    say_bytes(bytes, ASCII_N, "op");
+
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_comp);
+        k = 0;
+        while (k < 50) {
+            rekha_char_to_sdpath(f, 0xC5, scale, ox, oy);
+            k = k + 1;
+        }
+        bench_batch_stop(b_comp, 50);
+        bytes = arena_used(g_arena);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_comp);
+    say_bytes(bytes, 50, "op");
+
+    # dhancha-shaped label: a width pre-pass, then (sdpath for non-space + advance) per char.
+    r = 0;
+    while (r < PASSES) {
+        bench_batch_start(b_label);
+        var j = 0;
+        while (j < llen) {
+            sink = sink + rekha_char_advance_px(f, load8(label + j), PX);
+            j = j + 1;
+        }
+        j = 0;
+        while (j < llen) {
+            var c = load8(label + j);
+            if (c != 32) { rekha_char_to_sdpath(f, c, scale, ox, oy); }
+            sink = sink + rekha_char_advance_px(f, c, PX);
+            j = j + 1;
+        }
+        bench_batch_stop(b_label, 1);
+        bytes = arena_used(g_arena);
+        arena_reset(g_arena);
+        r = r + 1;
+    }
+    bench_report(b_label);
+    say_bytes(bytes, 1, "label");
+
+    var heap_delta = alloc_used() - heap0;
+    sd_alloc_set(0);
+    say("bench_hotpath: global heap delta over all timed passes (under the hook): ");
+    sayn(heap_delta);
+    say(" B\n");
+    say("bench_hotpath: sink ");
+    sayn(sink);
+    say("\n");
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

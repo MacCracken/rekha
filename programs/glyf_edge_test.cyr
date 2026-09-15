@@ -1,0 +1,667 @@
+# programs/glyf_edge_test.cyr — RUN test: the glyf.cyr edges the other suites let slip (0.3.11).
+#
+# ⭐ WHY THIS FILE EXISTS. Mutation testing of 0.3.11's src/glyf.cyr (113 single-edit mutants run
+# against every suite) left 25 mutants alive that were real test gaps, not equivalent code: the
+# REPEAT-count clamp (an overflow past the carved block that nothing read back), a truncated LAST
+# component record for each argument/transform size, a refused component-pointer array, a composite
+# of only empty children, the points budget tripping on a composite MERGE and its exact
+# 16,384 / 16,385 boundary, the identity fast path, a depth overrun and a 65th load that must abort
+# the WHOLE glyph (sticky), numberOfContours 0, rekha_outline_clear leaving a field, the sink's
+# `cend >= cstart` skip and `path == 0`, and the off-curve/off-curve start midpoint's floor. G14
+# was added after rekha_load_simple's gates were reordered: the post-carve endPts re-checks survived
+# until a hook rewrote the bytes between the walk and the copy. Each check below kills at least one
+# mutant; each group prints its tag on failure.
+# Exit code = failed checks.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_case = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "glyf_edge_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_case, strlen(g_case));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+var GB_CAP  = 131072;
+var GB_MAXG = 512;
+var g_gl    = 0;
+var g_gp    = 0;
+var g_loca  = 0;
+var g_ng    = 0;
+
+fn g_begin(): i64 {
+    store64(g_loca + g_ng * 8, g_gp);
+    g_ng = g_ng + 1;
+    return g_ng - 1;
+}
+
+fn w8(v): i64 {
+    store8(g_gl + g_gp, v & 255);
+    g_gp = g_gp + 1;
+    return 0;
+}
+
+fn w16(v): i64 {
+    w8((v >> 8) & 255);
+    w8(v & 255);
+    return 0;
+}
+
+fn hdr(nc): i64 {
+    w16(nc);
+    w16(0);
+    w16(0);
+    w16(0);
+    w16(0);
+    return 0;
+}
+
+# An 8-byte filler glyph of 0x31 bytes, so a read past the previous span lands on decodable bytes.
+fn filler(): i64 {
+    g_begin();
+    var i = 0;
+    while (i < 8) {
+        w8(0x31);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn crec(flags, gid, a1, a2): i64 {
+    w16(flags);
+    w16(gid);
+    if ((flags & 1) != 0) {
+        w16(a1);
+        w16(a2);
+    } else {
+        w8(a1);
+        w8(a2);
+    }
+    return 0;
+}
+
+fn gb_font(): i64 {
+    var ng = g_ng;
+    var loca = 140;
+    var loca_len = (ng + 1) * 4;
+    var glyf = loca + loca_len;
+    var len = glyf + g_gp;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 132, 6);
+    dir_entry(buf, 44, 0x6C6F6361, loca, loca_len);
+    dir_entry(buf, 60, 0x676C7966, glyf, g_gp);
+    put_u16(buf, 76 + 18, 1000);
+    put_u16(buf, 76 + 50, 1);
+    put_u16(buf, 132 + 4, ng);
+    var i = 0;
+    while (i < ng) {
+        put_u32(buf, loca + i * 4, load64(g_loca + i * 8));
+        i = i + 1;
+    }
+    put_u32(buf, loca + ng * 4, g_gp);
+    memcpy(buf + glyf, g_gl, g_gp);
+    return rekha_font_open(buf, len);
+}
+
+# ---- pool hook: bump over a buffer pre-filled with g_fillb; optional size limit -----------------
+var POOL_CAP = 2097152;
+var g_pool = 0;
+var g_pp = 0;
+var g_fillb = 0;
+var g_limit = 0 - 1;          # -1 = none; else refuse requests larger than g_limit
+var g_refuse_all = 0;
+
+fn pool_reset(b): i64 {
+    g_fillb = b;
+    memset(g_pool, b, POOL_CAP);
+    g_pp = 0;
+    return 0;
+}
+
+fn pool_hook(n): i64 {
+    if (g_refuse_all != 0) { return 0; }
+    if (g_limit >= 0) {
+        if (n > g_limit) { return 0; }
+    }
+    var sz = (n + 7) & (0 - 8);
+    var p = g_pool + g_pp;
+    g_pp = g_pp + sz;
+    return p;
+}
+
+var g_font = 0;
+var g_o = 0;
+
+# ---- a hook that rewrites a glyph's two endPts on its FIRST call, then allocates normally ------
+var g_evil_at = 0;
+var g_evil_armed = 0;
+var g_evil_e0 = 0;
+var g_evil_e1 = 0;
+
+fn evil_hook(n): i64 {
+    if (g_evil_armed != 0) {
+        g_evil_armed = 0;
+        put_u16(g_evil_at, 0, g_evil_e0);
+        put_u16(g_evil_at, 2, g_evil_e1);
+    }
+    return alloc(n);
+}
+
+# Load `gid` under evil_hook, restore the original endPts [0, 2], return n_contours.
+fn evil_load(gid): i64 {
+    g_evil_armed = 1;
+    sd_alloc_set(&evil_hook);
+    var o = rekha_load_glyph(g_font, gid);
+    sd_alloc_set(0);
+    put_u16(g_evil_at, 0, 0);
+    put_u16(g_evil_at, 2, 2);
+    return rekha_outline_n_contours(o);
+}
+
+fn load(gid): i64 {
+    var a = alloc_used();
+    g_o = rekha_load_glyph(g_font, gid);
+    return alloc_used() - a;
+}
+
+fn pt(i, x, y): i64 {
+    check(load64(rekha_outline_xs(g_o) + i * 8), x);
+    check(load64(rekha_outline_ys(g_o) + i * 8), y);
+    return 0;
+}
+
+fn empty(gid): i64 {
+    load(gid);
+    check(g_o != 0, 1);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    return 0;
+}
+
+# 1-point simple glyph flags stream for n points at (0,0): (0x39, count) pairs.
+fn flags_n(npts): i64 {
+    var left = npts;
+    while (left > 0) {
+        var r = left - 1;
+        if (r > 255) { r = 255; }
+        w8(0x39);
+        w8(r);
+        left = left - r - 1;
+    }
+    return 0;
+}
+
+fn simple_n(npts): i64 {
+    var gid = g_begin();
+    hdr(1);
+    w16(npts - 1);
+    w16(0);
+    flags_n(npts);
+    return gid;
+}
+
+fn comp1(child): i64 {
+    var gid = g_begin();
+    hdr(0 - 1);
+    crec(0x0003, child, 0, 0);
+    return gid;
+}
+
+# ---- hand-built outlines for the sink ----
+fn mk3(e0, e1, nc): i64 {
+    var xs = alloc(64);
+    var ys = alloc(64);
+    var oc = alloc(64);
+    var eps = alloc(64);
+    store64(xs, 0);
+    store64(ys, 0);
+    store64(xs + 8, 8);
+    store64(ys + 8, 0);
+    store64(xs + 16, 4);
+    store64(ys + 16, 8);
+    store8(oc, 1);
+    store8(oc + 1, 1);
+    store8(oc + 2, 1);
+    store64(eps, e0);
+    store64(eps + 8, e1);
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    store64(o, nc);
+    store64(o + 8, 3);
+    store64(o + 16, eps);
+    store64(o + 24, xs);
+    store64(o + 32, ys);
+    store64(o + 40, oc);
+    return o;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_gl = alloc(GB_CAP);
+    memset(g_gl, 0, GB_CAP);
+    g_loca = alloc(GB_MAXG * 8);
+    g_pool = alloc(POOL_CAP);
+    var i = 0;
+
+    # triangle T (10,10)(90,10)(50,90), word deltas
+    var t = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(1);
+    w8(1);
+    w8(1);
+    w16(10);
+    w16(80);
+    w16(0 - 40);
+    w16(10);
+    w16(0);
+    w16(80);
+    var e = g_begin();                     # empty glyph (no bytes)
+
+    # G1 REPEAT overflow: np 8 and np 3 over one (0x39, 255) flag pair
+    var r8 = g_begin();
+    hdr(1);
+    w16(7);
+    w16(0);
+    w8(0x39);
+    w8(255);
+    filler();
+    var r3 = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x39);
+    w8(255);
+    filler();
+
+    # G2 truncated LAST record (MORE clear), each followed by a filler glyph
+    var tr_w3 = g_begin();                 # word args, 3 of 4 bytes
+    hdr(0 - 1);
+    w16(0x0003);
+    w16(t);
+    w16(5);
+    w8(5);
+    filler();
+    var tr_b1 = g_begin();                 # byte args, 1 of 2 bytes
+    hdr(0 - 1);
+    w16(0x0002);
+    w16(t);
+    w8(5);
+    filler();
+    var tr_s1 = g_begin();                 # WE_HAVE_A_SCALE, 1 of 2 bytes
+    hdr(0 - 1);
+    w16(0x000A);
+    w16(t);
+    w8(5);
+    w8(5);
+    w8(0x40);
+    filler();
+    var tr_xy3 = g_begin();                # WE_HAVE_AN_X_AND_Y_SCALE, 3 of 4 bytes
+    hdr(0 - 1);
+    w16(0x0042);
+    w16(t);
+    w8(5);
+    w8(5);
+    w16(0x4000);
+    w8(0x40);
+    filler();
+
+    # G3 32-component composite (comps block 256 B)
+    var c32 = g_begin();
+    hdr(0 - 1);
+    i = 0;
+    while (i < 32) {
+        if (i < 31) { crec(0x0022, t, 0, 0); } else { crec(0x0002, t, 0, 0); }
+        i = i + 1;
+    }
+
+    # G4 empty composite
+    var c_e = comp1(e);
+
+    # G5 points budget boundary
+    var b4096 = simple_n(4096);
+    var c1 = comp1(b4096);
+    var c2 = comp1(c1);
+    var c3 = comp1(c2);
+    var c4 = comp1(c3);
+    var xtr = g_begin();                   # 1 point, x byte missing: charged 1, then cleared
+    hdr(1);
+    w16(0);
+    w16(0);
+    w8(0x33);
+    filler();
+    var c3x = g_begin();
+    hdr(0 - 1);
+    crec(0x0023, c2, 0, 0);
+    crec(0x0003, xtr, 0, 0);
+
+    # G6 non-identity transforms that share a diagonal with identity
+    var c_shx = g_begin();                 # xx 1, xy 0, yx 0.5, yy 1
+    hdr(0 - 1);
+    crec(0x0082, t, 0, 0);
+    w16(16384);
+    w16(0);
+    w16(8192);
+    w16(16384);
+    var c_shy = g_begin();                 # xx 1, xy 0.5, yx 0, yy 1
+    hdr(0 - 1);
+    crec(0x0082, t, 0, 0);
+    w16(16384);
+    w16(8192);
+    w16(0);
+    w16(16384);
+    var c_ysc = g_begin();                 # X_AND_Y_SCALE xx 1, yy -1
+    hdr(0 - 1);
+    crec(0x0042, t, 0, 0);
+    w16(16384);
+    w16(0 - 16384);
+
+    # G7 depth overrun behind a valid sibling: root [T, A1], A1..A5 chain, A5 = [T] at depth 6
+    var a5 = comp1(t);
+    var a4 = comp1(a5);
+    var a3 = comp1(a4);
+    var a2 = comp1(a3);
+    var a1 = comp1(a2);
+    var d_over = g_begin();
+    hdr(0 - 1);
+    crec(0x0023, t, 0, 0);
+    crec(0x0003, a1, 0, 0);
+    var d_ok = g_begin();                  # [T, A2]: the leaf T sits at depth 5
+    hdr(0 - 1);
+    crec(0x0023, t, 0, 0);
+    crec(0x0003, a2, 0, 0);
+
+    # G8 65 loads vs 64
+    var m62 = g_begin();
+    hdr(0 - 1);
+    i = 0;
+    while (i < 62) {
+        if (i < 61) { crec(0x0022, t, 0, 0); } else { crec(0x0002, t, 0, 0); }
+        i = i + 1;
+    }
+    var m61 = g_begin();
+    hdr(0 - 1);
+    i = 0;
+    while (i < 61) {
+        if (i < 60) { crec(0x0022, t, 0, 0); } else { crec(0x0002, t, 0, 0); }
+        i = i + 1;
+    }
+    var l65 = g_begin();
+    hdr(0 - 1);
+    crec(0x0023, m62, 0, 0);
+    crec(0x0003, t, 0, 0);
+    var l64 = g_begin();
+    hdr(0 - 1);
+    crec(0x0023, m61, 0, 0);
+    crec(0x0003, t, 0, 0);
+
+    # G9 numberOfContours 0 with a component record inside the span
+    var nc0 = g_begin();
+    hdr(0);
+    crec(0x0003, t, 5, 5);
+    filler();
+
+    # G10 data-level reject (x byte missing) and point-matching reject
+    var trunc3 = g_begin();
+    hdr(1);
+    w16(2);
+    w16(0);
+    w8(0x33);
+    w8(0x33);
+    w8(0x33);
+    w8(10);
+    w8(20);
+    filler();
+    var pm_bad = g_begin();
+    hdr(0 - 1);
+    crec(0x0022, t, 0, 0);
+    crec(0x0000, t, 3, 0);
+
+    # G14 two contours over 3 on-curve points at (0,0), endPts [0, 2], no coordinate bytes
+    var dbl = g_begin();
+    hdr(2);
+    w16(0);
+    w16(2);
+    w16(0);
+    w8(0x31);
+    w8(0x31);
+    w8(0x31);
+    filler();
+
+    g_font = gb_font();
+    check(g_font != 0, 1);
+
+    # ---------------- G1 ----------------
+    g_case = "G1 REPEAT clamp: no byte past the carved block";
+    pool_reset(0xEE);
+    sd_alloc_set(&pool_hook);
+    var o8 = rekha_load_glyph(g_font, r8);
+    var end8 = g_pp;
+    sd_alloc_set(0);
+    check(rekha_outline_n_points(o8), 8);
+    check(end8, 192);                      # 48 + 8 + 17 * 8
+    var bad = 0;
+    i = 0;
+    while (i < 512) {
+        if (load8(g_pool + end8 + i) != 0xEE) { bad = bad + 1; }
+        i = i + 1;
+    }
+    check(bad, 0);
+    pool_reset(0xEE);
+    sd_alloc_set(&pool_hook);
+    var o3 = rekha_load_glyph(g_font, r3);
+    var end3 = g_pp;
+    sd_alloc_set(0);
+    check(rekha_outline_n_points(o3), 3);
+    check(end3, 112);
+    bad = 0;
+    i = 0;
+    while (i < 512) {
+        if (load8(g_pool + end3 + i) != 0xEE) { bad = bad + 1; }
+        i = i + 1;
+    }
+    check(bad, 0);
+
+    # ---------------- G2 ----------------
+    g_case = "G2 truncated last record";
+    empty(tr_w3);
+    empty(tr_b1);
+    empty(tr_s1);
+    empty(tr_xy3);
+
+    # ---------------- G3 ----------------
+    g_case = "G3 size-refusing hook: comps refused";
+    pool_reset(0);
+    g_limit = 200;
+    sd_alloc_set(&pool_hook);
+    var oc32 = rekha_load_glyph(g_font, c32);
+    sd_alloc_set(0);
+    g_limit = 0 - 1;
+    check(oc32, 0);
+
+    # ---------------- G4 ----------------
+    g_case = "G4 empty composite has no arrays";
+    empty(c_e);
+    check(rekha_outline_end_pts(g_o), 0);
+    check(rekha_outline_xs(g_o), 0);
+    check(rekha_outline_ys(g_o), 0);
+    check(rekha_outline_on_curve(g_o), 0);
+
+    # ---------------- G5 ----------------
+    g_case = "G5 points budget boundary";
+    load(c3);
+    check(rekha_outline_n_points(g_o), 4096);
+    empty(c4);
+    empty(c3x);
+
+    # ---------------- G6 ----------------
+    g_case = "G6 shear x";
+    load(c_shx);
+    pt(0, 15, 10);
+    pt(1, 95, 10);
+    pt(2, 95, 90);
+    g_case = "G6 shear y";
+    load(c_shy);
+    pt(0, 10, 15);
+    pt(1, 90, 55);
+    pt(2, 50, 115);
+    g_case = "G6 y mirror";
+    load(c_ysc);
+    pt(0, 10, 0 - 10);
+    pt(1, 90, 0 - 10);
+    pt(2, 50, 0 - 90);
+
+    # ---------------- G7 ----------------
+    g_case = "G7 depth overrun behind a sibling";
+    empty(d_over);
+    load(d_ok);
+    check(rekha_outline_n_points(g_o), 6);
+
+    # ---------------- G8 ----------------
+    g_case = "G8 65 loads";
+    empty(l65);
+    load(l64);
+    check(rekha_outline_n_contours(g_o), 62);
+    check(rekha_outline_n_points(g_o), 186);
+
+    # ---------------- G9 ----------------
+    g_case = "G9 nc 0 with a record";
+    check(load(nc0), REKHA_OUTLINE_SIZE);
+    check(rekha_outline_n_points(g_o), 0);
+
+    # ---------------- G10 ----------------
+    g_case = "G10 empty outlines on dirty memory";
+    pool_reset(0xA5);
+    sd_alloc_set(&pool_hook);
+    var q1 = rekha_load_glyph(g_font, e);
+    var q2 = rekha_load_glyph(g_font, trunc3);
+    var q3 = rekha_load_glyph(g_font, pm_bad);
+    sd_alloc_set(0);
+    var q = 0;
+    while (q < 3) {
+        var oo = q1;
+        if (q == 1) { oo = q2; }
+        if (q == 2) { oo = q3; }
+        check(load64(oo), 0);
+        check(load64(oo + 8), 0);
+        check(load64(oo + 16), 0);
+        check(load64(oo + 24), 0);
+        check(load64(oo + 32), 0);
+        check(load64(oo + 40), 0);
+        q = q + 1;
+    }
+
+    # ---------------- G11 ----------------
+    g_case = "G11 sink: in-range non-increasing end_pts";
+    var ps = rekha_outline_to_sdpath(mk3(2, 1, 2), SD_ONE, 0, 0);
+    check(sd_path_verb_count(ps), 4);
+    check(sd_path_point_count(ps), 3);
+    ps = rekha_outline_to_sdpath(mk3(2, 2, 2), SD_ONE, 0, 0);
+    check(sd_path_verb_count(ps), 4);
+    check(sd_path_point_count(ps), 3);
+
+    # ---------------- G12 ----------------
+    g_case = "G12 sink under a refusing hook";
+    var ot = rekha_load_glyph(g_font, t);
+    g_refuse_all = 1;
+    sd_alloc_set(&pool_hook);
+    var pz = rekha_outline_to_sdpath(ot, SD_ONE, 0, 0);
+    sd_alloc_set(0);
+    g_refuse_all = 0;
+    check(pz, 0);
+
+    # ---------------- G13 ----------------
+    g_case = "G13 off-curve midpoint floors";
+    var xs = alloc(64);
+    var ys = alloc(64);
+    var ocb = alloc(64);
+    var eps = alloc(64);
+    store64(xs, 1);
+    store64(ys, 0);
+    store64(xs + 8, 0 - 4);
+    store64(ys + 8, 3);
+    store64(xs + 16, 0);
+    store64(ys + 16, 0 - 5);
+    store64(eps, 2);
+    var oh = alloc(REKHA_OUTLINE_SIZE);
+    store64(oh, 1);
+    store64(oh + 8, 3);
+    store64(oh + 16, eps);
+    store64(oh + 24, xs);
+    store64(oh + 32, ys);
+    store64(oh + 40, ocb);
+    var pc = rekha_outline_to_sdpath(oh, 1, 0, 0);
+    check(sd_path_point_count(pc), 7);
+    var pts = load64(pc + SD_PATH_POINTS_OFFSET);
+    check(sd_point_x(load64(pts + 2 * 8)), 0 - 2);
+    check(sd_point_y(load64(pts + 2 * 8)), 0 - 2);
+    check(sd_point_x(load64(pts + 4 * 8)), 0 - 2);
+    check(sd_point_y(load64(pts + 4 * 8)), 1);
+
+    # ---------------- G14 ----------------
+    # ⛔ rekha_load_simple walks endPts BEFORE its one sd_alloc and copies them AFTER it, so a hook
+    # that rewrites a shared font buffer inside that allocation changes the bytes between the two
+    # reads. The stored copy is re-checked; these fixtures fail exactly one of the two re-checks.
+    g_case = "G14 endPts rewritten during the carve";
+    g_evil_at = rekha_font_data(g_font) + rekha_find_table(g_font, REKHA_TAG_GLYF);
+    g_evil_at = g_evil_at + load64(g_loca + dbl * 8) + 10;
+    g_evil_e0 = 0;
+    g_evil_e1 = 2;
+    check(evil_load(dbl), 2);                     # control: the same bytes rewritten decode
+    g_evil_e0 = 5;
+    g_evil_e1 = 2;
+    check(evil_load(dbl), 0);                     # [5, 2]: not increasing (last is still np - 1)
+    g_evil_e0 = 0;
+    g_evil_e1 = 1;
+    check(evil_load(dbl), 0);                     # [0, 1]: increasing, but last != np - 1
+    load(dbl);
+    check(rekha_outline_n_contours(g_o), 2);      # evil_load put the bytes back
+
+    if (g_fails == 0) {
+        var ok = "glyf_edge_test: PASS (";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -60,12 +60,12 @@ stdlib = [
 # clear the same floor.
 [deps.sadish]
 git = "https://github.com/MacCracken/sadish.git"
-# ⚠ `path` re-added 0.3.10, for the same reason dhancha carries one: without it rekha can only
-# build against a PUBLISHED sadish tag, and 0.3.10 depends on `sd_alloc`, which landed in sadish
-# 0.5.5 minutes earlier and was not yet tagged.
-# ⛔ `path` WINS over `tag`, so a green build here is NOT evidence the declared tag resolves.
-# Re-verify with the `path` line disabled before any release that moves this tag.
-path = "../sadish"
+# ⛔ NO `path` LINE IN THE COMMITTED MANIFEST (removed 0.3.11). `path` WINS over `tag` and skips
+# the commit-pin verify, so while it was here cyrius.lock could never carry a sadish `commit` line
+# and a green local build was not evidence the tag resolves. 0.3.10 re-added it only because the
+# 0.5.5 tag did not exist yet; it is published now (9760ead), so the tag is the source of truth.
+# For cross-repo dev, add `path = "../sadish"` in an UNCOMMITTED working copy — CI refuses a
+# manifest with a live `path =` line.
 tag = "0.5.5"
 modules = ["dist/sadish.cyr"]
 

@@ -1,0 +1,139 @@
+# programs/error_test.cyr — RUN test for src/error.cyr, rekha's error-code surface.
+#
+# RekhaErr is a 16-byte record (code, detail pointer) built through sadish's sd_alloc seam, and
+# rekha_err_name maps each RekhaErrCode to a fixed cstring. Nothing else in rekha calls this
+# module, so no other suite reaches it: this one round-trips the record, pins EVERY code's name
+# byte for byte (an unknown code included), and checks the record follows an allocation hook.
+# Exit code = failed checks; each failure prints its check number to fd 2.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "error_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+# 1 if the NUL-terminated strings a and b hold the same bytes, else 0. Compared byte-wise, so a
+# name that matches only as a prefix, or differs in one byte, is a mismatch.
+fn str_same(a, b): i64 {
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    var i = 0;
+    while (1) {
+        var ca = load8(a + i);
+        if (ca != load8(b + i)) { return 0; }
+        if (ca == 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+var g_arena = 0;
+
+fn hook_alloc(n): i64 {
+    return arena_alloc(g_arena, n);
+}
+
+fn main(): i64 {
+    alloc_init();
+
+    # ── the code values are the ABI: a renumbering breaks every consumer that stored one ──
+    check(REKHA_OK, 0);                                                # 1
+    check(REKHA_ERR_OOM, 1);                                           # 2
+    check(REKHA_ERR_BAD_SFNT, 2);                                      # 3
+    check(REKHA_ERR_TRUNCATED, 3);                                     # 4
+    check(REKHA_ERR_NO_TABLE, 4);                                      # 5
+    check(REKHA_ERR_BAD_GLYF, 5);                                      # 6
+    check(REKHA_ERR_UNSUPPORTED, 6);                                   # 7
+    check(REKHA_ERR_OTHER, 99);                                        # 8
+
+    # ── round-trip: rekha_err_new / rekha_err / rekha_err_code / rekha_err_detail ──
+    var msg = "loca offset past glyf";
+    var e = rekha_err_new(REKHA_ERR_BAD_GLYF, msg);
+    check(e != 0, 1);                                                  # 9
+    check(rekha_err_code(e), REKHA_ERR_BAD_GLYF);                      # 10
+    check(rekha_err_detail(e), msg);                                   # 11 — the pointer itself
+    check(str_same(rekha_err_detail(e), "loca offset past glyf"), 1);  # 12
+    var e0 = rekha_err(REKHA_ERR_TRUNCATED);
+    check(e0 != 0, 1);                                                 # 13
+    check(e0 != e, 1);                                                 # 14 — a fresh record
+    check(rekha_err_code(e0), REKHA_ERR_TRUNCATED);                    # 15
+    check(rekha_err_detail(e0), 0);                                    # 16 — rekha_err has no detail
+    # the first record is untouched by the second
+    check(rekha_err_code(e), REKHA_ERR_BAD_GLYF);                      # 17
+    check(rekha_err_detail(e), msg);                                   # 18
+    # an OK record and an out-of-enum code round-trip unchanged too (the record does not validate)
+    var eok = rekha_err(REKHA_OK);
+    check(rekha_err_code(eok), 0);                                     # 19
+    check(rekha_err_detail(eok), 0);                                   # 20
+    var eodd = rekha_err_new(12345, msg);
+    check(rekha_err_code(eodd), 12345);                                # 21
+    check(rekha_err_detail(eodd), msg);                                # 22
+
+    # ── the record is 16 B from sd_alloc: under a hook it lands on the arena, not the heap ──
+    g_arena = arena_new_growable(65536);
+    check(g_arena != 0, 1);                                            # 23
+    check(sd_alloc_set(&hook_alloc), 0);                               # 24
+    var gb = alloc_used();
+    var ab = arena_used(g_arena);
+    var eh = rekha_err_new(REKHA_ERR_OOM, 0);
+    check(alloc_used() - gb, 0);                                       # 25
+    check(arena_used(g_arena) - ab, 16);                               # 26
+    check(rekha_err_code(eh), REKHA_ERR_OOM);                          # 27
+    check(sd_alloc_set(0), &hook_alloc);                               # 28
+    gb = alloc_used();
+    rekha_err(REKHA_ERR_OTHER);
+    check(alloc_used() - gb, 16);                                      # 29 — back on the heap
+
+    # ── rekha_err_name: every code, byte for byte, and the fallback for an unknown one ──
+    check(str_same(rekha_err_name(REKHA_OK), "ok"), 1);                               # 30
+    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of memory"), 1);               # 31
+    check(str_same(rekha_err_name(REKHA_ERR_BAD_SFNT), "bad SFNT header"), 1);        # 32
+    check(str_same(rekha_err_name(REKHA_ERR_TRUNCATED), "truncated input"), 1);       # 33
+    check(str_same(rekha_err_name(REKHA_ERR_NO_TABLE), "required table absent"), 1);  # 34
+    check(str_same(rekha_err_name(REKHA_ERR_BAD_GLYF), "malformed glyf entry"), 1);   # 35
+    check(str_same(rekha_err_name(REKHA_ERR_UNSUPPORTED), "unsupported feature"), 1); # 36
+    check(str_same(rekha_err_name(REKHA_ERR_OTHER), "other error"), 1);               # 37
+    check(str_same(rekha_err_name(7), "unknown error"), 1);                           # 38 — a gap
+    check(str_same(rekha_err_name(98), "unknown error"), 1);                          # 39
+    check(str_same(rekha_err_name(100), "unknown error"), 1);                         # 40
+    check(str_same(rekha_err_name(0 - 1), "unknown error"), 1);                       # 41
+    # the comparison is not vacuous: a near-miss and a prefix are both mismatches
+    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of memorY"), 0);               # 42
+    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of"), 0);                      # 43
+    # never null, for any code
+    var c = 0 - 4;
+    var nonnull = 1;
+    while (c < 256) {
+        if (rekha_err_name(c) == 0) { nonnull = 0; }
+        c = c + 1;
+    }
+    check(nonnull, 1);                                                 # 44
+
+    # ── rekha_err_print_name writes the name to fd 2 and returns 0 ──
+    var pre = "error_test: rekha_err_print_name -> ";
+    syscall(1, 2, pre, strlen(pre));
+    check(rekha_err_print_name(REKHA_ERR_TRUNCATED), 0);               # 45
+    syscall(1, 2, "\n", 1);
+
+    if (g_fails == 0) {
+        var ok = "error_test: PASS (RekhaErr round-trip + every code's name)\n";
+        syscall(1, 1, ok, strlen(ok));
+    } else {
+        var bad = "error_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

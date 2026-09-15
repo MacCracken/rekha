@@ -3,7 +3,10 @@
 # cmap.cyr — finds a Unicode BMP subtable (platform 3 / encoding 1, or the
 # generic platform 0) and parses format 4 (segment mapping to delta values),
 # the near-universal BMP encoding. Returns .notdef (0) for anything unmapped.
-# Every read is bounds-checked against the (untrusted) font length.
+# Bounds: the encoding-record walk, the subtable header and all four segment
+# arrays are validated ONCE, at rekha_font_open, against the cmap table's
+# DECLARED extent (not the file length); a lookup re-checks only the
+# glyphIdArray index, against the same extent.
 #
 # cmap table:  +0 version u16, +2 numTables u16, then numTables encoding
 #   records (8 bytes: platformID u16, encodingID u16, offset u32 from cmap).
@@ -12,83 +15,119 @@
 #   reservedPad(2) startCode[segCount] idDelta[segCount] idRangeOffset[segCount]
 #   glyphIdArray[].
 
-# Find a usable Unicode format-4 subtable; returns its absolute offset, or 0.
+# Resolve the Unicode format-4 subtable for the table cache; returns its absolute offset, or 0.
+# Called by rekha_font_resolve after cmap_off / cmap_len are cached. Selection: the LAST
+# (3,1) or (0,*) encoding record whose subtable is format 4 wins (directory records are sorted,
+# so (3,1) beats (0,*)). The winner must then hold its 14-byte header and all four segment
+# arrays inside the cmap extent, with segCountX2 >= 2 — else 0 (no usable subtable).
+#
+# ⚠ COVERAGE GAP, STATED: format 4 under (3,1) / (0,*) is the only mapping read. A symbol font
+# whose only subtable is (3,0) (glyphs at U+F0xx) and a font whose Unicode map is format 12 only
+# ((3,10) / (0,4)) map every codepoint to .notdef. cmap formats 12 / 6 / 0 are on README's
+# "v0.4.0 / staged" roadmap; a (3,0) symbol remap is not scheduled there.
 fn rekha_cmap_subtable(font): i64 {
-    var cmap = rekha_find_table(font, REKHA_TAG_CMAP);
+    if (font == 0) { return 0; }
+    var cmap = load64(font + 128);
     if (cmap == 0) { return 0; }
+    var cend = cmap + load64(font + 136);
     var buf = rekha_font_data(font);
-    var flen = rekha_font_len(font);
-    if (cmap + 4 > flen) { return 0; }
+    if (cmap + 4 > cend) { return 0; }
     var ntab = rekha_rd_u16(buf, cmap + 2);
     var best = 0;
     var i = 0;
     while (i < ntab) {
         var rec = cmap + 4 + i * 8;
-        if (rec + 8 > flen) { return best; }
-        var plat = rekha_rd_u16(buf, rec + 0);
-        var enc = rekha_rd_u16(buf, rec + 2);
-        var sub = cmap + rekha_rd_u32(buf, rec + 4);
-        var want = 0;
-        if (plat == 3) {
-            if (enc == 1) { want = 1; }   # Windows Unicode BMP
-        }
-        if (plat == 0) { want = 1; }      # Unicode (any)
-        if (want != 0) {
-            if (sub + 2 <= flen) {
-                if (rekha_rd_u16(buf, sub) == 4) { best = sub; }
+        if (rec + 8 > cend) {
+            i = ntab;                     # records past the cmap extent do not exist
+        } else {
+            var plat = rekha_rd_u16(buf, rec + 0);
+            var enc = rekha_rd_u16(buf, rec + 2);
+            var sub = cmap + rekha_rd_u32(buf, rec + 4);
+            var want = 0;
+            if (plat == 3) {
+                if (enc == 1) { want = 1; }   # Windows Unicode BMP
             }
+            if (plat == 0) { want = 1; }      # Unicode (any)
+            if (want != 0) {
+                if (sub + 2 <= cend) {
+                    if (rekha_rd_u16(buf, sub) == 4) { best = sub; }
+                }
+            }
+            i = i + 1;
         }
-        i = i + 1;
     }
+    if (best == 0) { return 0; }
+    if (best + 14 > cend) { return 0; }
+    var segc2 = rekha_rd_u16(buf, best + 6);
+    if (segc2 < 2) { return 0; }
+    # endCode[] @ +14, reservedPad, startCode[], idDelta[], idRangeOffset[] — the last must end in cmap
+    var range_arr = best + 14 + segc2 + 2 + segc2 + segc2;
+    if (range_arr + segc2 > cend) { return 0; }
     return best;
 }
 
 # @public — map a Unicode codepoint `cp` to a glyph id via the cmap format-4
-# subtable. Returns 0 (.notdef) if unmapped, beyond the BMP, or no subtable.
+# subtable. Returns 0 (.notdef) if the handle is 0, cp is unmapped or beyond the
+# BMP, there is no usable subtable, or the mapped id is >= maxp.numGlyphs (when
+# maxp is present) — an id with no glyph behind it IS .notdef. Allocates 0 B.
+#
+# Segment search is HYBRID: segment 0 directly when endCode[0] >= cp (the ASCII case on common
+# faces), else a binary search for the first endCode >= cp over [1, segCount). For the
+# ascending endCode[] the spec requires, that is exactly the first segment a linear scan finds.
+# MEASURED 0.3.11 (cache + hybrid vs the per-call resolve + linear scan it replaced), median of 3:
+# LiberationSans ASCII 224 -> 28 ns; D2Coding Nerd (1,642 segments) U+AC00.. 7,686 -> 85 ns.
+# Full-BMP gid digests are identical on LiberationSans, D2Coding and 70 sampled system TTFs.
 fn rekha_char_to_glyph(font, cp): i64 {
+    if (font == 0) { return 0; }
     if (cp < 0) { return 0; }
     if (cp > 65535) { return 0; }          # format 4 is BMP-only
-    var sub = rekha_cmap_subtable(font);
+    var sub = load64(font + 144);
     if (sub == 0) { return 0; }
-    var buf = rekha_font_data(font);
-    var flen = rekha_font_len(font);
-    if (sub + 14 > flen) { return 0; }
-
-    var segc2 = rekha_rd_u16(buf, sub + 6);
+    var buf = load64(font);
+    var segc2 = load64(font + 152);         # validated >= 2 with the arrays at open
     var segc = segc2 / 2;
-    if (segc == 0) { return 0; }
     var end_arr = sub + 14;
+
+    # first segment whose endCode >= cp
+    var seg = 0;
+    if (rekha_rd_u16(buf, end_arr) < cp) {
+        var lo = 1;
+        var hi = segc;
+        while (lo < hi) {
+            var mid = (lo + hi) / 2;
+            if (rekha_rd_u16(buf, end_arr + mid * 2) >= cp) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if (lo >= segc) { return 0; }
+        seg = lo;
+    }
+
     var start_arr = end_arr + segc2 + 2;    # +reservedPad
     var delta_arr = start_arr + segc2;
     var range_arr = delta_arr + segc2;
-    if (range_arr + segc2 > flen) { return 0; }
-
-    # first segment whose endCode >= cp
-    var seg = 0 - 1;
-    var i = 0;
-    while (i < segc) {
-        if (rekha_rd_u16(buf, end_arr + i * 2) >= cp) {
-            seg = i;
-            i = segc;
-        } else {
-            i = i + 1;
-        }
-    }
-    if (seg < 0) { return 0; }
-
     var startc = rekha_rd_u16(buf, start_arr + seg * 2);
     if (startc > cp) { return 0; }          # cp falls in a gap -> .notdef
     var delta = rekha_rd_i16(buf, delta_arr + seg * 2);
     var ro = rekha_rd_u16(buf, range_arr + seg * 2);
+    var g = 0;
     if (ro == 0) {
-        return (cp + delta) & 65535;
+        g = (cp + delta) & 65535;
+    } else {
+        # idRangeOffset is self-relative from its own slot in idRangeOffset[]
+        var gidx = range_arr + seg * 2 + ro + (cp - startc) * 2;
+        if (gidx + 2 > load64(font + 128) + load64(font + 136)) { return 0; }
+        var gid = rekha_rd_u16(buf, gidx);
+        if (gid == 0) { return 0; }
+        g = (gid + delta) & 65535;
     }
-    # idRangeOffset is self-relative from its own slot in idRangeOffset[]
-    var gidx = range_arr + seg * 2 + ro + (cp - startc) * 2;
-    if (gidx + 2 > flen) { return 0; }
-    var gid = rekha_rd_u16(buf, gidx);
-    if (gid == 0) { return 0; }
-    return (gid + delta) & 65535;
+    var ng = load64(font + 56);
+    if (ng > 0) {
+        if (g >= ng) { return 0; }
+    }
+    return g;
 }
 
 # @public — codepoint -> a positioned sadish SdPath (cmap + glyf + convert).
@@ -109,17 +148,23 @@ fn rekha_char_advance(font, cp): i64 {
 }
 
 # @public — advance `cp` in PIXELS at pixel size `px_size`, rounded to nearest. 0 = unknown.
+# = rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size).
 #
 # ⭐ THE SCALING LIVES HERE BECAUSE EVERY CONSUMER WOULD OTHERWISE WRITE IT, AND ONE OF THEM WOULD
-# WRITE IT WRONG. `adv * px_size / upem` truncates toward zero, which loses up to a pixel per glyph
-# and compounds across a line — a 40-character run drifts visibly left of where it should end.
-# Rounding half-up costs one add and bounds the error at half a pixel per glyph instead.
+# WRITE IT WRONG. `adv * px_size / upem` truncates toward zero, which loses up to a pixel per glyph,
+# always in the same direction — a 40-character run drifts visibly left of where it should end.
+# Rounding half-up costs one add and bounds EACH glyph's error at half a pixel.
+# ⛔ PER-GLYPH ROUNDING HALVES THE BIAS; IT DOES NOT STOP THE DRIFT. A run built by summing these
+# integers still accumulates up to half a pixel per glyph. Exact run widths come from summing
+# 16.16 advances (rekha_char_advance_fx / rekha_glyph_advance_fx) and rounding the pen ONCE.
 # ⚠ Returns 0 when the metric is unknown OR `upem` is 0, so the caller's fallback path is a single
 # `== 0` test rather than two.
 fn rekha_char_advance_px(font, cp, px_size): i64 {
-    var upem = rekha_units_per_em(font);
-    if (upem <= 0) { return 0; }
-    var adv = rekha_char_advance(font, cp);
-    if (adv <= 0) { return 0; }
-    return (adv * px_size + upem / 2) / upem;
+    return rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size);
+}
+
+# @public — advance `cp` at pixel size `px_size` as 16.16 fixed-point pixels. 0 = unknown.
+# = rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size). Allocates 0 B.
+fn rekha_char_advance_fx(font, cp, px_size): i64 {
+    return rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size);
 }

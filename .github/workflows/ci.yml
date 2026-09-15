@@ -7,52 +7,79 @@ on:
     branches: [main]
   workflow_call:
 
+# Read-only token for every job. A caller (release.yml) may grant no more than it holds, and
+# nothing here writes to the repo.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# `shell: bash` runs steps as `bash --noprofile --norc -eo pipefail {0}`. The implicit default is
+# `bash -e {0}` WITHOUT pipefail, under which a failed curl on the left of a pipe went green.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
-        # The cyrius.cyml `[package].cyrius` pin is the single source of truth
-        # for the toolchain version — no version is hardcoded in this YAML. Use
-        # the upstream installer so the versioned ~/.cyrius/versions/<ver>/
-        # layout matches how cyrius resolves the pin.
-        run: |
-          set -e
-          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
-            CYRIUS_VERSION="$CYRIUS_VERSION" sh
-          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+        # The cyrius.cyml `[package].cyrius` pin is the single source of truth for the toolchain
+        # version. The script fetches install.sh from that TAG (not main) and the release tarball,
+        # checks both against sha256s committed in the script, and fails closed on a pin it has no
+        # hashes for — bump the hashes with the pin.
+        run: bash scripts/ci-install-cyrius.sh
 
-      - name: Resolve dependencies
-        # `cyrius deps` copies the [deps].stdlib modules from the installed
-        # toolchain into lib/. rekha is a pure-Cyrius leaf — no external libs.
+      - name: Resolve dependencies (lock gate)
+        # `cyrius deps` copies the [deps].stdlib modules from the installed toolchain into lib/ and
+        # clones the [deps.sadish] git dep at its tag, verifying the commit pinned in cyrius.lock.
         # Never symlink lib/ to a cyrius checkout (cross-repo writes).
+        # ⛔ A live `path =` in a [deps*] section WINS over `tag` and skips the commit-pin verify,
+        # so the manifest is refused before resolving. Comment lines (the [deps.rekha] consumer
+        # example) are skipped.
+        # ⛔ The committed cyrius.lock must equal a clean resolve. A lock regenerated over a stale
+        # local lib/ carries entries no manifest asks for; `rm -rf lib && cyrius deps` and commit.
         run: |
+          # Whole-file, not per-section: cbt keeps reading a [deps.X] section across a following
+          # `[d…]` or `[[…]]` header, which a section-tracking guard would treat as closed.
+          if grep -nE '^[[:space:]]*path[[:space:]]*=' cyrius.cyml; then
+            echo "ERROR: cyrius.cyml has a live 'path =' dep line (above). Keep path overrides in an uncommitted working copy."
+            exit 1
+          fi
           rm -rf lib
           mkdir lib
           cyrius deps
+          if ! git diff --exit-code -- cyrius.lock; then
+            echo "ERROR: cyrius.lock does not match a clean resolve. Run 'rm -rf lib && cyrius deps' and commit cyrius.lock."
+            exit 1
+          fi
+          echo "cyrius.lock matches a clean resolve"
 
       - name: Lint
-        # Hard gate: any `warn` line (warning or untracked-deferral) fails CI.
+        # Hard gate: fails on any `warn` line, any untracked `deferral` line (cyrlint prints those
+        # on stderr, hence 2>&1), or a non-zero lint rc (read errors, too-large files). The rc is
+        # captured with `|| rc=$?` so -e does not end the loop at the first failing file.
         run: |
           fail=0
           for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do
             [ -e "$f" ] || continue
-            out=$(cyrius lint "$f" 2>&1 || true)
+            rc=0
+            out=$(cyrius lint "$f" --strict 2>&1) || rc=$?
             echo "$out"
-            if echo "$out" | grep -qE '^[[:space:]]*warn '; then
-              echo "lint: warnings in $f"; fail=1
+            if [ "$rc" -ne 0 ] || grep -qE '^[[:space:]]*(warn|deferral) ' <<< "$out"; then
+              echo "lint: $f failed (rc=$rc)"; fail=1
             fi
           done
-          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+          [ $fail -eq 0 ] || { echo "lint: warnings, deferrals or errors present"; exit 1; }
 
       - name: Format check
         # cyrius fmt reports via EXIT CODE with --check (0 = clean); file goes
@@ -70,15 +97,21 @@ jobs:
       - name: Vet
         run: cyrius vet programs/smoke.cyr
 
-      - name: Verify dist bundle is in sync with src/
+      - name: Verify dist/ is in sync with src/ (bundle + sidecar)
+        # `--check` verifies dist/rekha.cyr AND dist/rekha.deps (and every [lib.*] profile) without
+        # writing; `git diff dist/rekha.cyr` after a regenerate missed a stale sidecar. The
+        # porcelain test catches a bundle or leftover that is not committed at all.
         run: |
-          cyrius distlib
-          if ! git diff --quiet dist/rekha.cyr; then
-            echo "ERROR: dist/rekha.cyr is stale. Run 'cyrius distlib' and commit the result."
-            git --no-pager diff dist/rekha.cyr | head -40
+          if ! cyrius distlib --check; then
+            echo "ERROR: dist/ is stale. Run 'cyrius distlib' and commit dist/."
             exit 1
           fi
-          echo "dist/rekha.cyr matches src/"
+          if [ -n "$(git status --porcelain -- dist/)" ]; then
+            git status --porcelain -- dist/
+            echo "ERROR: dist/ has uncommitted or untracked files."
+            exit 1
+          fi
+          echo "dist/ matches src/"
 
       - name: Verify the embedded default face is in sync with its source .ttf
         # fonts/face_data.cyr is GENERATED from fonts/LiberationSans-Regular.ttf by
@@ -86,72 +119,149 @@ jobs:
         # 1028 KB, and the module is data, not code. This gate is what keeps the two from
         # drifting — regenerate into a temp file and require a byte-identical result.
         run: |
-          python3 scripts/face2cyr.py fonts/LiberationSans-Regular.ttf /tmp/face_data.regen.cyr
-          if ! cmp -s fonts/face_data.cyr /tmp/face_data.regen.cyr; then
+          regen="$RUNNER_TEMP/face_data.regen.cyr"
+          python3 scripts/face2cyr.py fonts/LiberationSans-Regular.ttf "$regen"
+          if ! cmp -s fonts/face_data.cyr "$regen"; then
             echo "ERROR: fonts/face_data.cyr is stale. Run scripts/face2cyr.py and commit the result."
             exit 1
           fi
           echo "fonts/face_data.cyr matches fonts/LiberationSans-Regular.ttf"
 
-      - name: Build (link-check, DCE on)
+      - name: Build & run (smoke + RUN suites, DCE off and on)
+        # Every programs/*_test.cyr is a self-checking RUN test: it draws/acts, asserts pixel/state,
+        # and exits non-zero on failure. Globbed, so new suites are auto-picked — including
+        # programs/hostile_test.cyr (malformed-font corpus + sentinel differential + face mutation
+        # loop, in-process, no fork) and the negative suites glyf_neg / extent / cmap_ext /
+        # composite_flags / path_start. NOTE: no test blits to /dev/fb0.
+        # ⛔ A build that prints `warning: undefined function` still exits 0 and links a binary that
+        # dies at the first call (SIGILL 132, or SIGSEGV 139 under DCE) — see the [deps.sadish]
+        # note in cyrius.cyml. So every build log is grepped for `warning`, `undefined function` and
+        # `refusing to emit`, under BOTH CYRIUS_DCE=0 and 1, and every binary, smoke included,
+        # must run to rc 0. The log goes to a file so the grep cannot mask the build rc.
+        # ⚠ `cyrius coverage` is NOT a gate here: it builds its corpus from tests/**/*.tcyr only
+        # and is blind to programs/, so it reports ~0% for a fully exercised API. The gates are
+        # these RUN suites and the hostile corpus.
         run: |
           mkdir -p build
-          CYRIUS_DCE=1 cyrius build programs/smoke.cyr build/rekha-smoke
-          echo "smoke: $(wc -c < build/rekha-smoke) bytes"
+          logs="$RUNNER_TEMP/buildlogs"
+          mkdir -p "$logs"
+          fail=0
+          for dce in 0 1; do
+            for t in programs/smoke.cyr programs/*_test.cyr; do
+              [ -e "$t" ] || continue
+              name="$(basename "$t" .cyr)-dce$dce"
+              log="$logs/$name.log"
+              echo "== $t (CYRIUS_DCE=$dce) =="
+              rc=0
+              CYRIUS_DCE=$dce cyrius build "$t" "build/$name" > "$log" 2>&1 || rc=$?
+              cat "$log"
+              if [ "$rc" -ne 0 ]; then
+                echo "BUILD FAIL: $t (DCE=$dce, rc=$rc)"; fail=1; continue
+              fi
+              if grep -nE 'warning|undefined function|refusing to emit' "$log"; then
+                echo "BUILD FAIL: $t (DCE=$dce): warning / undefined function / refusing to emit in the build log"
+                fail=1; continue
+              fi
+              rc=0
+              "./build/$name" || rc=$?
+              if [ "$rc" -ne 0 ]; then
+                echo "RUN FAIL: $t (DCE=$dce, rc=$rc)"; fail=1
+              fi
+            done
+          done
+          [ $fail -eq 0 ] || { echo "build/run gate failed"; exit 1; }
+          echo "smoke (DCE on): $(wc -c < build/smoke-dce1) bytes"
 
       - name: Verify ELF
-        run: xxd -l 4 build/rekha-smoke | grep -q "7f45 4c46"
+        run: '[ "$(xxd -l 4 -p build/smoke-dce1)" = "7f454c46" ]'
 
-      - name: Test (RUN suites)
-        # Every programs/*_test.cyr is a self-checking RUN test: it draws/acts,
-        # asserts pixel/state, and exits non-zero on failure. Globbed so new
-        # suites are auto-picked. Native cyrius test suites (tests/tcyr/*.tcyr)
-        # run too when they land. NOTE: no test blits to /dev/fb0.
+      - name: Test (native tcyr suites)
         run: |
-          mkdir -p build
-          for t in programs/*_test.cyr; do
-            [ -e "$t" ] || continue
-            name=$(basename "$t" .cyr)
-            echo "== $t =="
-            cyrius build "$t" "build/$name"
-            "./build/$name" || { echo "FAIL: $t"; exit 1; }
+          for f in tests/tcyr/*.tcyr; do
+            [ -e "$f" ] || continue
+            cyrius test "$f" || exit 1
           done
-          for f in tests/tcyr/*.tcyr; do [ -e "$f" ] || continue; cyrius test "$f" || exit 1; done
+
+      - name: Bench (hot path — visibility only, never gates)
+        # Shared runners are noisy: numbers are printed, never thresholded. Allocation cost is
+        # gated exactly by alloc_test. Skips cleanly if programs/bench_hotpath.cyr is absent.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          if [ ! -e programs/bench_hotpath.cyr ]; then
+            echo "no programs/bench_hotpath.cyr: skipping"
+            exit 0
+          fi
+          CYRIUS_DCE=1 cyrius build programs/bench_hotpath.cyr build/bench_hotpath
+          ./build/bench_hotpath
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Scan for dangerous patterns
-        # Matches code lines only — rejects patterns in # comments.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Scan for process spawning and non-allowlisted syscalls
+        # ALLOWLIST, not a denylist of spellings: rekha is a pure parser. Library code (src/, the
+        # shipped dist/ bundle, the fonts/ data module) may make exactly one raw syscall shape,
+        # `syscall(1, 2, ` (write to stderr); every other tracked .cyr/.tcyr may also write (1) and
+        # exit (60). Any process-spawn wrapper, constant, name, process/dlopen include or inline
+        # `asm` block fails anywhere. Matches code lines only — a line
+        # whose first non-blank character is `#` is a comment.
         run: |
+          export LC_ALL=C
+          shopt -s nullglob
           FAIL=0
-          scan() {
-            local label="$1"; shift
+          # code_lines <grep-ERE> <files...>: "file:line:text" for matching non-comment lines.
+          code_lines() {
             local pat="$1"; shift
-            local hits
-            hits=$(grep -rn "$pat" src/ programs/ 2>/dev/null | awk -F: '
-              { line=$3; for(i=4;i<=NF;i++) line=line":"$i;
-                sub(/^[[:space:]]+/,"",line);
-                if (substr(line,1,1) != "#") print $1":"$2":"line }')
-            if [ -n "$hits" ]; then
-              echo "FAIL: $label"
-              echo "$hits"
-              FAIL=1
-            fi
+            [ "$#" -gt 0 ] || return 0
+            { grep -anHE -- "$pat" "$@" || true; } | awk -F: '
+              { line = $3; for (i = 4; i <= NF; i++) line = line ":" $i
+                sub(/^[ \t]+/, "", line)
+                if (substr(line, 1, 1) != "#") print $1 ":" $2 ":" line }'
           }
-          scan "raw execve"  'syscall( *59'
-          scan "raw fork"    'syscall( *57'
-          scan "sys_system"  '\bsys_system\s*('
+          # syscall_offenders <allowed-prefix-ERE> <files...>: code lines still holding a
+          # `syscall(` after every allowed occurrence is removed (so an allowed call cannot
+          # shelter a second one on the same line).
+          syscall_offenders() {
+            local allow="$1"; shift
+            code_lines 'syscall[[:space:]]*[(]' "$@" | awk -v allow="$allow" '
+              { text = $0; sub(/^[^:]*:[^:]*:/, "", text); gsub(allow, "", text)
+                if (text ~ /syscall[ \t]*[(]/) print }'
+          }
+          report() {
+            if [ -n "$2" ]; then echo "FAIL: $1"; echo "$2"; FAIL=1; fi
+          }
+          # Every TRACKED Cyrius source, at any depth (a shell glob missed nested dirs and tests/tcyr).
+          mapfile -t LIB < <(git ls-files -- 'src/*.cyr' 'dist/*.cyr' 'fonts/*.cyr')
+          mapfile -t PROG < <(git ls-files -- '*.cyr' '*.tcyr' ':!:src/' ':!:dist/' ':!:fonts/')
+          [ "${#LIB[@]}" -gt 0 ] || { echo "FAIL: no library sources found (git ls-files)"; exit 1; }
+          SPAWN='\b(sys_(execve|execveat|execwait|exec_redirect|fork|vfork|clone|clone3|system|spawn|spawn_path|spawn_path_env)|exec_(cmd|vec|vec_str|capture|capture_str|env|env_str)|_exec3|spawn|run_capture|SYS_(EXECVE|EXECVEAT|EXECWAIT|EXEC_REDIRECT|FORK|VFORK|CLONE|CLONE3|SPAWN|SPAWN_PATH))\b'
+          report "process-spawn name" "$(code_lines "$SPAWN" "${LIB[@]}" "${PROG[@]}")"
+          # lib/process.cyr (spawn/run/exec_*) and the dlopen family resolve from the toolchain
+          # even though [deps].stdlib does not list them, so the include itself is refused.
+          report "process/dlopen stdlib module included" \
+            "$(code_lines 'include[[:space:]]*"lib/(process|fdlopen|dynlib|cffi)' "${LIB[@]}" "${PROG[@]}")"
+          # `asm { 0x0F; 0x05; }` is a raw syscall no `syscall(` pattern can see.
+          report "inline asm" "$(code_lines '\basm\b' "${LIB[@]}" "${PROG[@]}")"
+          report "raw syscall other than write(2, ...) in library code" \
+            "$(syscall_offenders 'syscall[(]1, 2, ' "${LIB[@]}")"
+          report "raw syscall other than write/exit in programs" \
+            "$(syscall_offenders 'syscall[(](1|60), ' "${PROG[@]}")"
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
 
   docs:
     name: Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Check required files
         run: |
           MISSING=0
@@ -175,7 +285,7 @@ jobs:
           # newcomer reads it FIRST is the one worth checking. (Same gate dhancha added after its
           # own README sat twenty-one releases stale.)
           if grep -q '^Version:' README.md; then
-            RV=$(grep '^Version:' README.md | head -1 | awk '{print $2}')
+            RV=$(awk '/^Version:/ { print $2; exit }' README.md)
             [ "$RV" = "$VERSION" ] || { echo "FAIL: README.md Version ($RV) != VERSION ($VERSION)"; exit 1; }
           fi
           echo "Version consistent (manifest pulls VERSION via \${file:VERSION})"

@@ -1,0 +1,489 @@
+# programs/path_start_test.cyr — RUN test for rekha_emit_contour's start-point branches and
+# rekha_outline_to_sdpath's contour bounds (audit R-27 path half).
+#
+# A TrueType contour may open off-curve. rekha_emit_contour then starts at the LAST point if that
+# one is on-curve, or at the synthesized midpoint of the first and last points if both are
+# off-curve; a single-point contour and an all-off-curve contour fall out of the same rules. Before
+# this suite every fixture opened on-curve, so those branches never ran. Each case below asserts
+# the EXACT verb sequence and EXACT 16.16 coordinates of every point the path holds.
+#
+# ⛔ MIDPOINTS USE sd_asr, WHICH FLOORS. Cyrius `>>` is logical and `/` truncates toward zero, so
+# the cases run at scale 1 (one design unit = 1/65536 px) with NEGATIVE ODD coordinate sums, where
+# floor and truncation differ: sd_asr(-3, 1) = -2 (truncation -1), sd_asr(-1, 1) = -1 (truncation 0).
+#
+# The same contours are checked twice: hand-built as RekhaOutline records (like path_test's
+# mk_outline), and decoded from a synthetic glyf glyph through rekha_glyph_to_sdpath. The sink bounds
+# (end_pts out of range, negative, a bad second contour, a 0 outline, n_contours <= 0) run on
+# hand-built outlines, since the loader never produces them.
+# Exit code = failed checks; each failure prints its check number and case name to fd 2.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_case = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "path_start_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_case, strlen(g_case));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ---- hand-built outlines: queue points / contour ends, then wrap them in a RekhaOutline --------
+var OB_CAP = 64;
+var g_xs   = 0;
+var g_ys   = 0;
+var g_oc   = 0;
+var g_eps  = 0;
+var g_pn   = 0;
+var g_en   = 0;
+
+# Start a fresh outline (new arrays, so earlier outlines stay intact).
+fn ob_begin(): i64 {
+    g_xs = alloc(OB_CAP * 8);
+    g_ys = alloc(OB_CAP * 8);
+    g_oc = alloc(OB_CAP);
+    g_eps = alloc(OB_CAP * 8);
+    g_pn = 0;
+    g_en = 0;
+    return 0;
+}
+
+fn ob_pt(x, y, on): i64 {
+    store64(g_xs + g_pn * 8, x);
+    store64(g_ys + g_pn * 8, y);
+    store8(g_oc + g_pn, on);
+    g_pn = g_pn + 1;
+    return 0;
+}
+
+fn ob_close(): i64 {
+    store64(g_eps + g_en * 8, g_pn - 1);
+    g_en = g_en + 1;
+    return 0;
+}
+
+# Overwrite end_pts[i] (for the sink-bounds cases).
+fn ob_set_ep(i, v): i64 {
+    store64(g_eps + i * 8, v);
+    return 0;
+}
+
+fn ob_done(): i64 {
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    store64(o + 0, g_en);
+    store64(o + 8, g_pn);
+    store64(o + 16, g_eps);
+    store64(o + 24, g_xs);
+    store64(o + 32, g_ys);
+    store64(o + 40, g_oc);
+    return o;
+}
+
+# ---- path readers -----------------------------------------------------------------------------
+# Verb letters: M moveto, L lineto, Q quadto, C close. Checks the count and every verb.
+fn vseq(path, s): i64 {
+    var n = strlen(s);
+    check(sd_path_verb_count(path), n);
+    var vs = load64(path + SD_PATH_VERBS_OFFSET);
+    var i = 0;
+    while (i < n) {
+        var c = load8(s + i);
+        var want = SD_VERB_CLOSE;
+        if (c == 77) { want = SD_VERB_MOVETO; }
+        if (c == 76) { want = SD_VERB_LINETO; }
+        if (c == 81) { want = SD_VERB_QUADTO; }
+        check(load64(vs + i * 8), want);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Point i of the path is (x, y), both 16.16.
+fn ppt(path, i, x, y): i64 {
+    var pp = load64(load64(path + SD_PATH_POINTS_OFFSET) + i * 8);
+    check(sd_point_x(pp), x);
+    check(sd_point_y(pp), y);
+    return 0;
+}
+
+# ---- the four start-branch contours, queued into the current outline, and their expected points
+# All at scale 1, origin (0, 0): a design point (x, y) maps to 16.16 (x, -y).
+
+# A — both ends off-curve: (-3,5)off (10,20)on (0,-2)off. Mapped (-3,-5) (10,-20) (0,2).
+#   start = midpoint(first, last) = (sd_asr(-3 + 0, 1), sd_asr(-5 + 2, 1)) = (-2, -2)
+#   [truncation would give (-1, -1)]. Walk: (-3,-5) off -> control; (10,-20) on -> quadto;
+#   (0,2) off -> control; end -> quadto back to start. Verbs M Q Q C, 5 points.
+fn queue_a(): i64 {
+    ob_pt(0 - 3, 5, 0);
+    ob_pt(10, 20, 1);
+    ob_pt(0, 0 - 2, 0);
+    ob_close();
+    return 0;
+}
+
+fn expect_a(path, pb): i64 {
+    ppt(path, pb + 0, 0 - 2, 0 - 2);
+    ppt(path, pb + 1, 0 - 3, 0 - 5);
+    ppt(path, pb + 2, 10, 0 - 20);
+    ppt(path, pb + 3, 0, 2);
+    ppt(path, pb + 4, 0 - 2, 0 - 2);
+    return 0;
+}
+
+# B — first off-curve, last on-curve: (4,0)off (8,4)on (4,8)off (0,4)on. Mapped (4,0) (8,-4)
+#   (4,-8) (0,-4). start = the LAST point (0,-4); the walk covers points 0..2 (count n-1): control,
+#   quadto (8,-4), control; end -> quadto back to (0,-4). Verbs M Q Q C, 5 points.
+fn queue_b(): i64 {
+    ob_pt(4, 0, 0);
+    ob_pt(8, 4, 1);
+    ob_pt(4, 8, 0);
+    ob_pt(0, 4, 1);
+    ob_close();
+    return 0;
+}
+
+fn expect_b(path, pb): i64 {
+    ppt(path, pb + 0, 0, 0 - 4);
+    ppt(path, pb + 1, 4, 0);
+    ppt(path, pb + 2, 8, 0 - 4);
+    ppt(path, pb + 3, 4, 0 - 8);
+    ppt(path, pb + 4, 0, 0 - 4);
+    return 0;
+}
+
+# C — all off-curve: (-1,0) (4,3) (0,-5). Mapped a0 (-1,0) a1 (4,-3) a2 (0,5).
+#   start = midpoint(a0, a2) = (sd_asr(-1, 1), sd_asr(5, 1)) = (-1, 2)   [truncation: (0, 2)]
+#   a0 -> control; a1 off after a control -> quadto(a0, mid(a0,a1)) with
+#   mid = (sd_asr(3, 1), sd_asr(-3, 1)) = (1, -2)   [truncation: (1, -1)]; control a1;
+#   a2 -> quadto(a1, mid(a1,a2)) with mid = (sd_asr(4, 1), sd_asr(2, 1)) = (2, 1); control a2;
+#   end -> quadto(a2, start). Verbs M Q Q Q C, 7 points.
+fn queue_c(): i64 {
+    ob_pt(0 - 1, 0, 0);
+    ob_pt(4, 3, 0);
+    ob_pt(0, 0 - 5, 0);
+    ob_close();
+    return 0;
+}
+
+fn expect_c(path, pb): i64 {
+    ppt(path, pb + 0, 0 - 1, 2);
+    ppt(path, pb + 1, 0 - 1, 0);
+    ppt(path, pb + 2, 1, 0 - 2);
+    ppt(path, pb + 3, 4, 0 - 3);
+    ppt(path, pb + 4, 2, 1);
+    ppt(path, pb + 5, 0, 5);
+    ppt(path, pb + 6, 0 - 1, 2);
+    return 0;
+}
+
+# D — a single off-curve point (-3,7). Mapped (-3,-7). Both ends are that point, so
+#   start = (sd_asr(-6, 1), sd_asr(-14, 1)) = (-3, -7); the walk (count n = 1) takes it as a
+#   control; end -> quadto(control, start). Verbs M Q C, 3 points, all (-3, -7).
+fn queue_d(): i64 {
+    ob_pt(0 - 3, 7, 0);
+    ob_close();
+    return 0;
+}
+
+fn expect_d(path, pb): i64 {
+    ppt(path, pb + 0, 0 - 3, 0 - 7);
+    ppt(path, pb + 1, 0 - 3, 0 - 7);
+    ppt(path, pb + 2, 0 - 3, 0 - 7);
+    return 0;
+}
+
+# ---- font assembly for the decoded case: head (long loca) + maxp + loca + glyf, one glyph ------
+var g_gl = 0;
+var g_gp = 0;
+
+fn w8(v): i64 {
+    store8(g_gl + g_gp, v & 255);
+    g_gp = g_gp + 1;
+    return 0;
+}
+
+fn w16(v): i64 {
+    w8((v >> 8) & 255);
+    w8(v & 255);
+    return 0;
+}
+
+# Encode the queued outline as glyph 0 (flags 0x01 / 0x00: x word, y word; no instructions) and
+# open a font holding it: head@76/54 maxp@132/6 loca@140/8 glyf@148.
+fn font_of_queue(): i64 {
+    g_gl = alloc(4096);
+    memset(g_gl, 0, 4096);
+    g_gp = 0;
+    w16(g_en);
+    w16(0);
+    w16(0);
+    w16(0);
+    w16(0);
+    var i = 0;
+    while (i < g_en) {
+        w16(load64(g_eps + i * 8));
+        i = i + 1;
+    }
+    w16(0);
+    i = 0;
+    while (i < g_pn) {
+        w8(load8(g_oc + i));
+        i = i + 1;
+    }
+    var prev = 0;
+    i = 0;
+    while (i < g_pn) {
+        w16(load64(g_xs + i * 8) - prev);
+        prev = load64(g_xs + i * 8);
+        i = i + 1;
+    }
+    prev = 0;
+    i = 0;
+    while (i < g_pn) {
+        w16(load64(g_ys + i * 8) - prev);
+        prev = load64(g_ys + i * 8);
+        i = i + 1;
+    }
+    var glyf = 148;
+    var len = glyf + g_gp;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 132, 6);
+    dir_entry(buf, 44, 0x6C6F6361, 140, 8);
+    dir_entry(buf, 60, 0x676C7966, glyf, g_gp);
+    put_u16(buf, 76 + 18, 1000);
+    put_u16(buf, 76 + 50, 1);
+    put_u16(buf, 132 + 4, 1);
+    put_u32(buf, 140, 0);
+    put_u32(buf, 144, g_gp);
+    memcpy(buf + glyf, g_gl, g_gp);
+    return rekha_font_open(buf, len);
+}
+
+fn main(): i64 {
+    alloc_init();
+    var one = SD_ONE;
+
+    # ================= hand-built: one contour per start branch =================
+    g_case = "A both ends off-curve";
+    ob_begin();
+    queue_a();
+    var pa = rekha_outline_to_sdpath(ob_done(), 1, 0, 0);
+    vseq(pa, "MQQC");
+    check(sd_path_point_count(pa), 5);
+    expect_a(pa, 0);
+
+    g_case = "B first off, last on";
+    ob_begin();
+    queue_b();
+    var pb = rekha_outline_to_sdpath(ob_done(), 1, 0, 0);
+    vseq(pb, "MQQC");
+    check(sd_path_point_count(pb), 5);
+    expect_b(pb, 0);
+
+    g_case = "B' first off, last two on";
+    # (4,0)off (8,4)on (0,4)on at scale SD_ONE, origin (2 px, 100 px): (x, y) -> (2 + x, 100 - y) px.
+    #   start = last (0,4) -> (2, 96) px; control (6, 100) px; quadto end (8,4) -> (10, 96) px. The
+    #   final on-curve edge back to the start is the close. Verbs M Q C, 3 points.
+    ob_begin();
+    ob_pt(4, 0, 0);
+    ob_pt(8, 4, 1);
+    ob_pt(0, 4, 1);
+    ob_close();
+    var pb2 = rekha_outline_to_sdpath(ob_done(), one, 2 * one, 100 * one);
+    vseq(pb2, "MQC");
+    check(sd_path_point_count(pb2), 3);
+    ppt(pb2, 0, 2 * one, 96 * one);
+    ppt(pb2, 1, 6 * one, 100 * one);
+    ppt(pb2, 2, 10 * one, 96 * one);
+
+    g_case = "C all off-curve";
+    ob_begin();
+    queue_c();
+    var pc = rekha_outline_to_sdpath(ob_done(), 1, 0, 0);
+    vseq(pc, "MQQQC");
+    check(sd_path_point_count(pc), 7);
+    expect_c(pc, 0);
+
+    g_case = "D single off-curve point";
+    ob_begin();
+    queue_d();
+    var pd = rekha_outline_to_sdpath(ob_done(), 1, 0, 0);
+    vseq(pd, "MQC");
+    check(sd_path_point_count(pd), 3);
+    expect_d(pd, 0);
+
+    g_case = "single on-curve point";
+    # (5,6) on at scale SD_ONE, origin (0,0) -> (5, -6) px. Verbs M C, 1 point.
+    ob_begin();
+    ob_pt(5, 6, 1);
+    ob_close();
+    var ps = rekha_outline_to_sdpath(ob_done(), one, 0, 0);
+    vseq(ps, "MC");
+    check(sd_path_point_count(ps), 1);
+    ppt(ps, 0, 5 * one, 0 - 6 * one);
+
+    g_case = "half-pixel midpoint at 16.16";
+    # Both ends off at scale SD_ONE: (1,0)off (3,3)on (0,1)off -> start = midpoint of (1,0) px and
+    # (0,-1) px = (sd_asr(65536, 1), sd_asr(-65536, 1)) = (0.5, -0.5) px = (32768, -32768).
+    ob_begin();
+    ob_pt(1, 0, 0);
+    ob_pt(3, 3, 1);
+    ob_pt(0, 1, 0);
+    ob_close();
+    var ph = rekha_outline_to_sdpath(ob_done(), one, 0, 0);
+    vseq(ph, "MQQC");
+    ppt(ph, 0, 32768, 0 - 32768);
+    ppt(ph, 4, 32768, 0 - 32768);
+
+    # ================= hand-built: all branches in one outline (contour starts advance) ==========
+    g_case = "multi-contour A B C D";
+    ob_begin();
+    queue_a();                              # points 0..2
+    queue_b();                              # points 3..6
+    queue_c();                              # points 7..9
+    queue_d();                              # point 10
+    var om = ob_done();
+    check(rekha_outline_n_contours(om), 4);
+    check(rekha_outline_n_points(om), 11);
+    var pm = rekha_outline_to_sdpath(om, 1, 0, 0);
+    vseq(pm, "MQQCMQQCMQQQCMQC");
+    check(sd_path_point_count(pm), 20);
+    expect_a(pm, 0);
+    expect_b(pm, 5);
+    expect_c(pm, 10);
+    expect_d(pm, 17);
+
+    # ================= decoded: the same four contours from glyf bytes =================
+    g_case = "decoded glyph A B C D";
+    var f = font_of_queue();
+    check(f != 0, 1);
+    var og = rekha_load_glyph(f, 0);
+    check(rekha_outline_n_contours(og), 4);
+    check(rekha_outline_n_points(og), 11);
+    check(load64(rekha_outline_end_pts(og) + 24), 10);
+    check(load8(rekha_outline_on_curve(og) + 6), 1);  # B's last point, on-curve
+    check(load8(rekha_outline_on_curve(og) + 7), 0);  # C's first point, off-curve
+    var pg = rekha_glyph_to_sdpath(f, 0, 1, 0, 0);
+    vseq(pg, "MQQCMQQCMQQQCMQC");
+    check(sd_path_point_count(pg), 20);
+    expect_a(pg, 0);
+    expect_b(pg, 5);
+    expect_c(pg, 10);
+    expect_d(pg, 17);
+    # At scale SD_ONE, origin (3 px, 50 px): B starts at its last point (0,4) -> (3, 46) px. A starts
+    # at the midpoint of (-3,5) -> (0, 45) px and (0,-2) -> (3, 52) px: x (0 + 3) / 2 = 1.5 px =
+    # 98,304; y (45 + 52) / 2 = 48.5 px = 3,178,496.
+    var pg2 = rekha_glyph_to_sdpath(f, 0, one, 3 * one, 50 * one);
+    ppt(pg2, 0, 98304, 3178496);
+    ppt(pg2, 5, 3 * one, 46 * one);
+
+    # ================= the sink's contour bounds (hand-built) =================
+    # A 3-point on-curve triangle (0,0)(8,0)(4,8) -> M L L C when end_pts is sane.
+    g_case = "sink: control";
+    ob_begin();
+    ob_pt(0, 0, 1);
+    ob_pt(8, 0, 1);
+    ob_pt(4, 8, 1);
+    ob_close();
+    vseq(rekha_outline_to_sdpath(ob_done(), one, 0, 0), "MLLC");
+
+    g_case = "sink: end_pts[0] >= n_points";
+    ob_set_ep(0, 3);
+    vseq(rekha_outline_to_sdpath(ob_done(), one, 0, 0), "");
+    ob_set_ep(0, 0x7FFFFFFFFFFFFFFF);
+    vseq(rekha_outline_to_sdpath(ob_done(), one, 0, 0), "");
+
+    g_case = "sink: negative end_pts";
+    ob_set_ep(0, 0 - 1);
+    vseq(rekha_outline_to_sdpath(ob_done(), one, 0, 0), "");
+    ob_set_ep(0, 0 - 0x7FFFFFFFFFFFFFFF);
+    vseq(rekha_outline_to_sdpath(ob_done(), one, 0, 0), "");
+
+    g_case = "sink: a bad FIRST entry stops the walk, it is not skipped";
+    # end_pts [3, 2] and [-5, 2] with n_contours 2: contour 1 is valid on its own, but the walk
+    # stops at contour 0. (Skipping instead would start contour 1 at 4 or at -4 — the latter reads
+    # before the arrays.)
+    ob_set_ep(0, 3);
+    ob_set_ep(1, 2);
+    var ob = ob_done();
+    store64(ob, 2);
+    vseq(rekha_outline_to_sdpath(ob, one, 0, 0), "");
+    ob_set_ep(0, 0 - 5);
+    vseq(rekha_outline_to_sdpath(ob, one, 0, 0), "");
+
+    g_case = "sink: second contour out of range";
+    ob_set_ep(0, 2);
+    ob_set_ep(1, 3);                        # end_pts [2, 3] over 3 points
+    var o2 = ob_done();
+    store64(o2, 2);
+    var p2 = rekha_outline_to_sdpath(o2, one, 0, 0);
+    vseq(p2, "MLLC");
+    check(sd_path_point_count(p2), 3);
+    ppt(p2, 2, 4 * one, 0 - 8 * one);
+    ob_set_ep(1, 0 - 5);                    # end_pts [2, -5]
+    vseq(rekha_outline_to_sdpath(o2, one, 0, 0), "MLLC");
+
+    g_case = "sink: outline 0";
+    var p0 = rekha_outline_to_sdpath(0, one, 0, 0);
+    check(p0 != 0, 1);
+    vseq(p0, "");
+    check(sd_path_point_count(p0), 0);
+
+    g_case = "sink: n_contours <= 0";
+    ob_set_ep(0, 2);
+    var oz = ob_done();
+    store64(oz, 0);
+    vseq(rekha_outline_to_sdpath(oz, one, 0, 0), "");
+    store64(oz, 0 - 1);
+    vseq(rekha_outline_to_sdpath(oz, one, 0, 0), "");
+
+    if (g_fails == 0) {
+        var ok = "path_start_test: PASS (";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        var ok2 = " checks; every contour start branch emits exact verbs and 16.16 points)\n";
+        syscall(1, 1, ok2, strlen(ok2));
+    } else {
+        var bad = "path_start_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

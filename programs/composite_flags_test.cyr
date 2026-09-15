@@ -1,0 +1,776 @@
+# programs/composite_flags_test.cyr — RUN test for composite glyph decode, flag by flag
+# (audit R-27 composite half, R-12 point matching, R-13 SCALED_COMPONENT_OFFSET, R-14 rounding).
+#
+# ⭐ EVERY EXPECTED COORDINATE IS COMPUTED BY HAND, AND THE ARITHMETIC IS IN THE COMMENTS. The
+# loader's transform is x' = sd_asr(xx*x + yx*y + 8192, 14), y' = sd_asr(xy*x + yy*y + 8192, 14):
+# floor(v / 16384 + 0.5), the F2Dot14 product ROUNDED HALF UP. Written as T(v) below.
+# ⛔ THE TIES ARE THE CONVENTION, SO THEY ARE ASSERTED. A value exactly k + 0.5 rounds to k + 1 for
+# both signs: 187.5 -> 188 but -187.5 -> -187 (half AWAY from zero would give -188; truncation, the
+# 0.3.10 behaviour, gives -187 and 187). A non-tie negative, -65.918 -> -66, separates floor(v+0.5)
+# from truncation (-65). Nested composites round PER LEVEL (fontTools keeps floats through levels and
+# rounds once, so the nested case below is 1 unit off fontTools on purpose — this pins what rekha
+# does, not a claim of parity).
+#
+# Components: T = triangle (10,10)(90,10)(50,90); P = probe (90,256)on (-90,-256)off (256,90)on
+# (-256,-90)off; Q = 2 contours, 7 points; R = (100,0)(0,50)(30,-20); E = an empty glyph (no glyf
+# bytes); B = 130 points, point i at (i+1, 2*(i+1)).
+# Flags: 0x0001 ARG_1_AND_2_ARE_WORDS, 0x0002 ARGS_ARE_XY_VALUES, 0x0008 WE_HAVE_A_SCALE, 0x0020
+# MORE_COMPONENTS, 0x0040 WE_HAVE_AN_X_AND_Y_SCALE, 0x0080 WE_HAVE_A_TWO_BY_TWO, 0x0800
+# SCALED_COMPONENT_OFFSET, 0x1000 UNSCALED_COMPONENT_OFFSET.
+#
+# Font: head (long loca) + maxp + loca + glyf, assembled from the glyph bytes written below.
+# Exit code = failed checks; each failure prints its check number and case name to fd 2.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_case = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "composite_flags_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_case, strlen(g_case));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ---- glyph assembler: glyph bytes go to g_gl, each glyph's start offset to g_loca -------------
+var GB_CAP  = 65536;
+var GB_MAXG = 256;
+var g_gl    = 0;
+var g_gp    = 0;
+var g_loca  = 0;
+var g_ng    = 0;
+var g_start = 0;
+
+fn gb_init(): i64 {
+    g_gl = alloc(GB_CAP);
+    memset(g_gl, 0, GB_CAP);
+    g_loca = alloc(GB_MAXG * 8);
+    g_gp = 0;
+    g_ng = 0;
+    return 0;
+}
+
+# Begin a glyph at the current write offset; returns its gid.
+fn g_begin(): i64 {
+    store64(g_loca + g_ng * 8, g_gp);
+    g_start = g_gp;
+    g_ng = g_ng + 1;
+    return g_ng - 1;
+}
+
+fn w8(v): i64 {
+    store8(g_gl + g_gp, v & 255);
+    g_gp = g_gp + 1;
+    return 0;
+}
+
+fn w16(v): i64 {
+    w8((v >> 8) & 255);
+    w8(v & 255);
+    return 0;
+}
+
+# numberOfContours + a zero bbox (10 bytes).
+fn hdr(nc): i64 {
+    w16(nc);
+    w16(0);
+    w16(0);
+    w16(0);
+    w16(0);
+    return 0;
+}
+
+# Assemble the font: head@76/54 (upem 1000, long loca) maxp@132/6 loca@140 glyf after it.
+fn gb_font(): i64 {
+    var ng = g_ng;
+    var loca = 140;
+    var loca_len = (ng + 1) * 4;
+    var glyf = loca + loca_len;
+    var len = glyf + g_gp;
+    var buf = alloc(len);
+    memset(buf, 0, len);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 4);
+    dir_entry(buf, 12, 0x68656164, 76, 54);
+    dir_entry(buf, 28, 0x6D617870, 132, 6);
+    dir_entry(buf, 44, 0x6C6F6361, loca, loca_len);
+    dir_entry(buf, 60, 0x676C7966, glyf, g_gp);
+    put_u16(buf, 76 + 18, 1000);
+    put_u16(buf, 76 + 50, 1);
+    put_u16(buf, 132 + 4, ng);
+    var i = 0;
+    while (i < ng) {
+        put_u32(buf, loca + i * 4, load64(g_loca + i * 8));
+        i = i + 1;
+    }
+    put_u32(buf, loca + ng * 4, g_gp);
+    memcpy(buf + glyf, g_gl, g_gp);
+    return rekha_font_open(buf, len);
+}
+
+# ---- simple glyph writer: queue points and contour ends, then emit with word deltas -----------
+var SP_CAP = 512;
+var g_px   = 0;
+var g_py   = 0;
+var g_pon  = 0;
+var g_pn   = 0;
+var g_eps  = 0;
+var g_en   = 0;
+
+fn sp_init(): i64 {
+    g_px = alloc(SP_CAP * 8);
+    g_py = alloc(SP_CAP * 8);
+    g_pon = alloc(SP_CAP * 8);
+    g_eps = alloc(SP_CAP * 8);
+    return 0;
+}
+
+fn sp_pt(x, y, on): i64 {
+    store64(g_px + g_pn * 8, x);
+    store64(g_py + g_pn * 8, y);
+    store64(g_pon + g_pn * 8, on);
+    g_pn = g_pn + 1;
+    return 0;
+}
+
+fn sp_close(): i64 {
+    store64(g_eps + g_en * 8, g_pn - 1);
+    g_en = g_en + 1;
+    return 0;
+}
+
+# Write the queued simple glyph as a new gid: flags 0x01 / 0x00 (x word, y word), no instructions.
+fn sp_emit(): i64 {
+    var gid = g_begin();
+    hdr(g_en);
+    var i = 0;
+    while (i < g_en) {
+        w16(load64(g_eps + i * 8));
+        i = i + 1;
+    }
+    w16(0);
+    i = 0;
+    while (i < g_pn) {
+        w8(load64(g_pon + i * 8));
+        i = i + 1;
+    }
+    var prev = 0;
+    i = 0;
+    while (i < g_pn) {
+        w16(load64(g_px + i * 8) - prev);
+        prev = load64(g_px + i * 8);
+        i = i + 1;
+    }
+    prev = 0;
+    i = 0;
+    while (i < g_pn) {
+        w16(load64(g_py + i * 8) - prev);
+        prev = load64(g_py + i * 8);
+        i = i + 1;
+    }
+    g_pn = 0;
+    g_en = 0;
+    return gid;
+}
+
+# ---- composite writer -------------------------------------------------------------------------
+fn chdr(): i64 {
+    hdr(0 - 1);
+    return 0;
+}
+
+# One component record head: flags, glyphIndex, then the two args as words (flag 0x0001) or bytes.
+# Transform values follow via w16.
+fn crec(flags, gid, a1, a2): i64 {
+    w16(flags);
+    w16(gid);
+    if ((flags & 1) != 0) {
+        w16(a1);
+        w16(a2);
+    } else {
+        w8(a1);
+        w8(a2);
+    }
+    return 0;
+}
+
+# ---- load helpers -----------------------------------------------------------------------------
+var g_font = 0;
+var g_o = 0;
+
+# Load `gid` into g_o; return the bytes the load cost the global heap.
+fn load(gid): i64 {
+    var a = alloc_used();
+    g_o = rekha_load_glyph(g_font, gid);
+    return alloc_used() - a;
+}
+
+fn pt(i, x, y): i64 {
+    check(load64(rekha_outline_xs(g_o) + i * 8), x);
+    check(load64(rekha_outline_ys(g_o) + i * 8), y);
+    return 0;
+}
+
+fn oc(i): i64 {
+    return load8(rekha_outline_on_curve(g_o) + i);
+}
+
+fn ep(i): i64 {
+    return load64(rekha_outline_end_pts(g_o) + i * 8);
+}
+
+# Load `gid` and expect nc contours / np points. (2 checks)
+fn shape(gid, nc, np): i64 {
+    load(gid);
+    check(rekha_outline_n_contours(g_o), nc);
+    check(rekha_outline_n_points(g_o), np);
+    return 0;
+}
+
+# Load `gid` and expect an EMPTY outline and an empty path. (4 checks)
+fn empty(gid): i64 {
+    load(gid);
+    check(g_o != 0, 1);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    check(sd_path_verb_count(rekha_glyph_to_sdpath(g_font, gid, SD_ONE, 0, 0)), 0);
+    return 0;
+}
+
+# The arena hook for the cost check under sd_alloc_set.
+var g_arena = 0;
+
+fn hook_alloc(n): i64 {
+    return arena_alloc(g_arena, n);
+}
+
+fn main(): i64 {
+    alloc_init();
+    gb_init();
+    sp_init();
+    var i = 0;
+
+    # ================= component glyphs =================
+    sp_pt(10, 10, 1);
+    sp_pt(90, 10, 1);
+    sp_pt(50, 90, 1);
+    sp_close();
+    var t = sp_emit();
+
+    sp_pt(90, 256, 1);
+    sp_pt(0 - 90, 0 - 256, 0);
+    sp_pt(256, 90, 1);
+    sp_pt(0 - 256, 0 - 90, 0);
+    sp_close();
+    var p = sp_emit();
+
+    sp_pt(0, 0, 1);
+    sp_pt(100, 0, 1);
+    sp_pt(100, 100, 1);
+    sp_pt(0, 100, 1);
+    sp_close();
+    sp_pt(25, 25, 1);
+    sp_pt(75, 25, 1);
+    sp_pt(50, 75, 1);
+    sp_close();
+    var q = sp_emit();
+
+    sp_pt(100, 0, 1);
+    sp_pt(0, 50, 1);
+    sp_pt(30, 0 - 20, 1);
+    sp_close();
+    var r = sp_emit();
+
+    var e = g_begin();                     # no bytes: loca[e] == loca[e + 1]
+
+    i = 0;
+    while (i < 130) {
+        sp_pt(i + 1, 2 * (i + 1), 1);
+        i = i + 1;
+    }
+    sp_close();
+    var b130 = sp_emit();
+
+    # ================= composites =================
+    # byte args, signed: (-100, 120). If read unsigned, -100 would be 156.
+    var c_byte = g_begin();
+    chdr();
+    crec(0x0002, t, 0 - 100, 120);
+
+    # word args: (-1000, 2000).
+    var c_word = g_begin();
+    chdr();
+    crec(0x0003, t, 0 - 1000, 2000);
+
+    # WE_HAVE_A_SCALE 12000 (0.732421875), byte offset (7, -3), unscaled (0x0800 clear).
+    var c_scale = g_begin();
+    chdr();
+    crec(0x000A, p, 7, 0 - 3);
+    w16(12000);
+
+    # WE_HAVE_AN_X_AND_Y_SCALE xx 12000, yy -8192 (-0.5), word offset (1000, -1000).
+    var c_xy = g_begin();
+    chdr();
+    crec(0x0043, p, 1000, 0 - 1000);
+    w16(12000);
+    w16(0 - 8192);
+
+    # WE_HAVE_A_TWO_BY_TWO, file order (xx, xy, yx, yy) = (0, 16384, -16384, 0): x' = -y, y' = x,
+    # a 90 degree counter-clockwise rotation. Byte offset (5, 6).
+    var c_rot = g_begin();
+    chdr();
+    crec(0x0082, r, 5, 6);
+    w16(0);
+    w16(16384);
+    w16(0 - 16384);
+    w16(0);
+
+    # SCALED_COMPONENT_OFFSET without UNSCALED: scale 12000, word offset (90, -256) is scaled too.
+    var c_soff = g_begin();
+    chdr();
+    crec(0x080B, t, 90, 0 - 256);
+    w16(12000);
+    # ... with UNSCALED as well: UNSCALED wins, the offset is applied as written.
+    var c_soff_both = g_begin();
+    chdr();
+    crec(0x180B, t, 90, 0 - 256);
+    w16(12000);
+    # ... UNSCALED alone (the Microsoft default, spelled out).
+    var c_uoff = g_begin();
+    chdr();
+    crec(0x100B, t, 90, 0 - 256);
+    w16(12000);
+    # SCALED_COMPONENT_OFFSET under the rotation: the offset goes through the whole 2x2.
+    var c_soff_rot = g_begin();
+    chdr();
+    crec(0x0882, r, 5, 6);
+    w16(0);
+    w16(16384);
+    w16(0 - 16384);
+    w16(0);
+
+    # Point matching (ARGS_ARE_XY_VALUES clear): merged[arg1] <- transformed child[arg2].
+    var c_pm_byte = g_begin();             # T at (0,0), then T with byte point numbers 2 <- 0
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0000, t, 2, 0);
+    var c_pm_word = g_begin();             # word point numbers 1 <- 2
+    chdr();
+    crec(0x0023, t, 0, 0);
+    crec(0x0001, t, 1, 2);
+    var c_pm_rot = g_begin();              # the child point is TRANSFORMED before matching: 2 <- R'[0]
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0080, r, 2, 0);
+    w16(0);
+    w16(16384);
+    w16(0 - 16384);
+    w16(0);
+    var c_pm_u8 = g_begin();               # byte point number 129 (0x81) is UNSIGNED: B[129] <- T[0]
+    chdr();
+    crec(0x0022, b130, 0, 0);
+    crec(0x0000, t, 129, 0);
+    var c_pm_u16 = g_begin();              # word point number 0x8000 = 32768 >= 130 -> empty
+    chdr();
+    crec(0x0023, b130, 0, 0);
+    crec(0x0001, t, 0x8000, 0);
+    var c_pm_pa = g_begin();               # pa 3 == merged-so-far (3) -> empty
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0000, t, 3, 0);
+    var c_pm_pb = g_begin();               # pb 3 == child points (3) -> empty
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0000, t, 0, 3);
+    var c_pm_first = g_begin();            # the FIRST component point-matched: nothing merged yet
+    chdr();
+    crec(0x0000, t, 0, 0);
+    var c_pm_echild = g_begin();           # matching onto an empty child (0 points)
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0000, e, 0, 0);
+
+    # MORE_COMPONENTS x3: T at (0,0), Q at (1000,0), T at (0,1000).
+    var c_three = g_begin();
+    chdr();
+    crec(0x0023, t, 0, 0);
+    crec(0x0023, q, 1000, 0);
+    crec(0x0003, t, 0, 1000);
+
+    # Nested: c_scale (itself P scaled + offset) under xx -16384 (-1.0), yy 8192 (0.5), (100, 200).
+    var c_nest = g_begin();
+    chdr();
+    crec(0x0043, c_scale, 100, 200);
+    w16(0 - 16384);
+    w16(8192);
+
+    # Siblings reusing one component (NOT a cycle), and a composite reusing that composite twice.
+    var c_sib = g_begin();
+    chdr();
+    crec(0x0023, t, 0, 0);
+    crec(0x0003, t, 200, 0);
+    var c_sib2 = g_begin();
+    chdr();
+    crec(0x0023, c_sib, 0, 0);
+    crec(0x0003, c_sib, 0, 500);
+
+    # Cycles: self, a 2-cycle, and a self-reference hidden behind a valid first component.
+    var c_self = g_begin();
+    chdr();
+    crec(0x0003, c_self, 0, 0);
+    var c_cyc_a = g_begin();
+    chdr();
+    crec(0x0003, c_cyc_a + 1, 0, 0);
+    var c_cyc_b = g_begin();
+    chdr();
+    crec(0x0003, c_cyc_a, 0, 0);
+    var c_self2 = g_begin();
+    chdr();
+    crec(0x0023, t, 0, 0);
+    crec(0x0003, c_self2, 0, 0);
+
+    # Truncated records. Control: one T record, no MORE.
+    var c_tr_ok = g_begin();
+    chdr();
+    crec(0x0003, t, 5, 5);
+    var c_tr_more = g_begin();             # the same record with MORE set, and nothing after it
+    chdr();
+    crec(0x0023, t, 5, 5);
+    var c_tr_scale = g_begin();            # WE_HAVE_A_SCALE with its 2 bytes missing
+    chdr();
+    crec(0x000B, t, 5, 5);
+    var c_tr_args = g_begin();             # word args with 2 of their 4 bytes
+    chdr();
+    w16(0x0003);
+    w16(t);
+    w16(5);
+    var c_tr_2x2 = g_begin();              # TWO_BY_TWO with 6 of its 8 bytes
+    chdr();
+    crec(0x0082, r, 0, 0);
+    w16(0);
+    w16(16384);
+    w16(0 - 16384);
+
+    # Component count vs REKHA_GLYPH_MAXLOADS (64, root included): 63 components load, 64 and 65 do
+    # not.
+    var c_63 = g_begin();
+    chdr();
+    i = 0;
+    while (i < 63) {
+        if (i < 62) { crec(0x0022, t, 0, 0); } else { crec(0x0002, t, 0, 0); }
+        i = i + 1;
+    }
+    var c_64 = g_begin();
+    chdr();
+    i = 0;
+    while (i < 64) {
+        if (i < 63) { crec(0x0022, t, 0, 0); } else { crec(0x0002, t, 0, 0); }
+        i = i + 1;
+    }
+    var c_65 = g_begin();
+    chdr();
+    i = 0;
+    while (i < 65) {
+        if (i < 64) { crec(0x0022, t, 0, 0); } else { crec(0x0002, t, 0, 0); }
+        i = i + 1;
+    }
+
+    # Nesting depth vs REKHA_COMPOSITE_MAXDEPTH (5; the root is depth 0): a chain of 5 composites
+    # puts T at depth 5 and loads; a chain of 6 puts T at depth 6 and aborts. Offset (1, 1) per level.
+    var chain = t;
+    var chain5 = 0;
+    i = 0;
+    while (i < 6) {
+        var link = g_begin();
+        chdr();
+        crec(0x0002, chain, 1, 1);
+        chain = link;
+        if (i == 4) { chain5 = link; }
+        i = i + 1;
+    }
+    var chain6 = chain;
+
+    # Empty children.
+    var c_echild = g_begin();              # the only child is empty: 0 contours -> empty
+    chdr();
+    crec(0x0003, e, 0, 0);
+    var c_echild2 = g_begin();             # T, then an empty child: T alone survives
+    chdr();
+    crec(0x0023, t, 0, 0);
+    crec(0x0003, e, 5, 5);
+
+    g_font = gb_font();
+    check(g_font != 0, 1);                                             # 1
+    check(rekha_glyph_count(g_font), g_ng);                            # 2
+
+    # ================= assertions =================
+    g_case = "byte args";
+    # T + (-100, 120): (10-100, 10+120) (90-100, 10+120) (50-100, 90+120)
+    shape(c_byte, 1, 3);
+    pt(0, 0 - 90, 130);
+    pt(1, 0 - 10, 130);
+    pt(2, 0 - 50, 210);
+
+    g_case = "word args";
+    # T + (-1000, 2000)
+    shape(c_word, 1, 3);
+    pt(0, 0 - 990, 2010);
+    pt(1, 0 - 910, 2010);
+    pt(2, 0 - 950, 2090);
+
+    g_case = "WE_HAVE_A_SCALE";
+    # T(12000 * 90)   = floor((1,080,000 + 8192) / 16384)  = floor(66.418)  = 66   (truncation: 65)
+    # T(12000 * -90)  = floor((-1,080,000 + 8192) / 16384) = floor(-65.418) = -66  (truncation: -65)
+    # T(12000 * 256)  = (3,072,000 + 8192) / 16384 = 188 exactly: 187.5 is a tie, rounds UP
+    # T(12000 * -256) = (-3,072,000 + 8192) / 16384 = -187 exactly: -187.5 rounds UP to -187
+    # then + (7, -3): (66+7, 188-3) (-66+7, -187-3) (188+7, 66-3) (-187+7, -66-3)
+    shape(c_scale, 1, 4);
+    pt(0, 73, 185);
+    pt(1, 0 - 59, 0 - 190);
+    pt(2, 195, 63);
+    pt(3, 0 - 180, 0 - 69);
+    check(oc(0) * 1000 + oc(1) * 100 + oc(2) * 10 + oc(3), 1010);     # on-curve flags carried
+
+    g_case = "WE_HAVE_AN_X_AND_Y_SCALE";
+    # x' as above (66, -66, 188, -187). y' = T(-8192 * y):
+    #   y 256: (-2,097,152 + 8192) / 16384 = -127.5 -> floor -128
+    #   y -256: (2,097,152 + 8192) / 16384 = 128.5 -> 128
+    #   y 90: (-737,280 + 8192) / 16384 = -44.5 -> -45
+    #   y -90: (737,280 + 8192) / 16384 = 45.5 -> 45
+    # then + (1000, -1000)
+    shape(c_xy, 1, 4);
+    pt(0, 1066, 0 - 1128);
+    pt(1, 934, 0 - 872);
+    pt(2, 1188, 0 - 1045);
+    pt(3, 813, 0 - 955);
+
+    g_case = "WE_HAVE_A_TWO_BY_TWO rotation";
+    # x' = T(-16384 * y), y' = T(16384 * x): exact products, so +8192 lands on k + 0.5 -> k.
+    #   (100, 0) -> (0, 100); (0, 50) -> T(-819,200) = floor(-49.5) = -50, 0; (30, -20) -> (20, 30)
+    # then + (5, 6)
+    shape(c_rot, 1, 3);
+    pt(0, 5, 106);
+    pt(1, 0 - 45, 6);
+    pt(2, 25, 36);
+
+    g_case = "SCALED_COMPONENT_OFFSET";
+    # T scaled 12000: 10 -> floor((120,000 + 8192) / 16384) = floor(7.82) = 7; 90 -> 66;
+    #   50 -> floor((600,000 + 8192) / 16384) = floor(37.12) = 37.  T' = (7,7) (66,7) (37,66)
+    # offset (90, -256) scaled: (T(12000*90), T(12000*-256)) = (66, -187)
+    shape(c_soff, 1, 3);
+    pt(0, 73, 0 - 180);
+    pt(1, 132, 0 - 180);
+    pt(2, 103, 0 - 121);
+    g_case = "SCALED + UNSCALED offset";
+    # the offset as written: T' + (90, -256) = (7+90, 7-256) (66+90, 7-256) (37+90, 66-256)
+    shape(c_soff_both, 1, 3);
+    pt(0, 97, 0 - 249);
+    pt(1, 156, 0 - 249);
+    pt(2, 127, 0 - 190);
+    g_case = "UNSCALED offset";
+    shape(c_uoff, 1, 3);
+    pt(0, 97, 0 - 249);
+    pt(1, 156, 0 - 249);
+    pt(2, 127, 0 - 190);
+    g_case = "SCALED offset under rotation";
+    # offset (5, 6) through the 2x2: dx = T(-16384 * 6) = floor(-5.5) = -6, dy = T(16384 * 5) =
+    # floor(5.5) = 5. R' = (0,100) (-50,0) (20,30), + (-6, 5)
+    shape(c_soff_rot, 1, 3);
+    pt(0, 0 - 6, 105);
+    pt(1, 0 - 56, 5);
+    pt(2, 14, 35);
+
+    g_case = "point matching, byte numbers";
+    # offset = merged[2] - T[0] = (50,90) - (10,10) = (40, 80)
+    shape(c_pm_byte, 2, 6);
+    check(ep(0), 2);
+    check(ep(1), 5);
+    pt(2, 50, 90);
+    pt(3, 50, 90);
+    pt(4, 130, 90);
+    pt(5, 90, 170);
+    g_case = "point matching, word numbers";
+    # offset = merged[1] - T[2] = (90,10) - (50,90) = (40, -80)
+    shape(c_pm_word, 2, 6);
+    pt(3, 50, 0 - 70);
+    pt(4, 130, 0 - 70);
+    pt(5, 90, 10);
+    g_case = "point matching, transformed child";
+    # R' = (0,100) (-50,0) (20,30); offset = merged[2] - R'[0] = (50,90) - (0,100) = (50, -10)
+    shape(c_pm_rot, 2, 6);
+    pt(3, 50, 90);
+    pt(4, 0, 0 - 10);
+    pt(5, 70, 20);
+    g_case = "point matching, unsigned byte 129";
+    # B[129] = (130, 260); offset = (130,260) - (10,10) = (120, 250)
+    shape(c_pm_u8, 2, 133);
+    check(ep(1), 132);
+    pt(129, 130, 260);
+    pt(130, 130, 260);
+    pt(131, 210, 260);
+    pt(132, 170, 340);
+    g_case = "point matching, out of range";
+    empty(c_pm_u16);
+    empty(c_pm_pa);
+    empty(c_pm_pb);
+    empty(c_pm_first);
+    empty(c_pm_echild);
+
+    g_case = "MORE_COMPONENTS x3";
+    # end_pts rebased: T [2]; Q [3, 6] + 3 = [6, 9]; T [2] + 10 = [12]
+    shape(c_three, 4, 13);
+    check(ep(0), 2);
+    check(ep(1), 6);
+    check(ep(2), 9);
+    check(ep(3), 12);
+    pt(3, 1000, 0);
+    pt(6, 1000, 100);                      # Q[3] (0,100) + (1000, 0)
+    pt(7, 1025, 25);
+    pt(9, 1050, 75);
+    pt(10, 10, 1010);
+    pt(12, 50, 1090);
+    # T: moveto 2xlineto close (4); Q[0]: moveto 3xlineto close (5); Q[1] (4); T (4) = 17
+    check(sd_path_verb_count(rekha_glyph_to_sdpath(g_font, c_three, SD_ONE, 0, 0)), 17);
+
+    g_case = "nested composite";
+    # inner c_scale = (73,185) (-59,-190) (195,63) (-180,-69), each rounded at ITS level.
+    # outer x' = T(-16384 * x): 73 -> floor(-72.5) = -73; -59 -> floor(59.5) = 59;
+    #   195 -> floor(-194.5) = -195; -180 -> floor(180.5) = 180
+    # outer y' = T(8192 * y) = floor(y/2 + 0.5): 185 -> 93; -190 -> floor(-94.5) = -95;
+    #   63 -> 32 (31.5 is a tie, UP); -69 -> -34 (-34.5 is a tie, UP — not -35)
+    # then + (100, 200)
+    shape(c_nest, 1, 4);
+    pt(0, 27, 293);
+    pt(1, 159, 105);
+    pt(2, 0 - 95, 232);
+    pt(3, 280, 166);
+    check(oc(0) * 1000 + oc(1) * 100 + oc(2) * 10 + oc(3), 1010);
+
+    g_case = "siblings reuse a component";
+    shape(c_sib, 2, 6);
+    pt(3, 210, 10);
+    pt(5, 250, 90);
+    shape(c_sib2, 4, 12);
+    check(ep(3), 11);
+    pt(9, 210, 510);
+    pt(11, 250, 590);
+
+    g_case = "exact cost of a 2-component composite";
+    # c_sib = T + T. Each child is one carved simple block: 48 + 8*1 + 17*3 = 107 -> 112 B (x2).
+    # The component pointer array: 2 * 8 = 16 B. The merged block: 48 + 8*2 + 17*6 = 166 -> 168 B.
+    # Total 112 + 112 + 16 + 168 = 408 B; the span and the load context live on the stack.
+    var t_block = (REKHA_OUTLINE_SIZE + 1 * 8 + 3 * 17 + 7) & (0 - 8);
+    var m_block = (REKHA_OUTLINE_SIZE + 2 * 8 + 6 * 17 + 7) & (0 - 8);
+    check(t_block, 112);
+    check(m_block, 168);
+    check(load(c_sib), 2 * t_block + 2 * 8 + m_block);
+    check(load(c_sib), 408);
+    # ...and the same under an arena hook: the arena pays those 408 B, the global heap 0.
+    var arena = arena_new(65536);
+    g_arena = arena;
+    sd_alloc_set(&hook_alloc);
+    var h0 = alloc_used();
+    var a0 = arena_used(arena);
+    var oh = rekha_load_glyph(g_font, c_sib);
+    var heap_d = alloc_used() - h0;
+    var arena_d = arena_used(arena) - a0;
+    sd_alloc_set(0);
+    check(heap_d, 0);
+    check(arena_d, 408);
+    check(rekha_outline_n_points(oh), 6);
+
+    g_case = "cycles";
+    empty(c_self);
+    empty(c_cyc_a);
+    empty(c_cyc_b);
+    empty(c_self2);                        # sticky abort: not a partial 3-point T
+    # ⛔ A CYCLE ABORTS AT ITS FIRST REPEAT, NOT AT THE DEPTH CAP, AND AN ABORT STOPS THE MERGE. Both
+    # read as "empty" either way, so the bytes pin them:
+    #   c_self:  root comps 1*8 = 8; child (the root's gid again) -> abort, one empty record 48;
+    #            the root sees the sticky abort -> empty record 48. 8 + 48 + 48 = 104 B.
+    #            (Caught only by the depth cap it would pay 6 * 8 + 48 + 6 * 48 = 384 B.)
+    #   c_cyc_a: A comps 8; B comps 8; A again -> 48; B -> 48; A -> 48. 160 B.
+    #   c_self2: comps 2*8 = 16; T's block 112; self -> 48; root -> 48. 224 B. (Merging past the
+    #            abort would carve a 112 B merged block instead of the last 48.)
+    check(load(c_self), 104);
+    check(load(c_cyc_a), 160);
+    check(load(c_self2), 224);
+
+    g_case = "truncated records";
+    shape(c_tr_ok, 1, 3);
+    pt(0, 15, 15);
+    empty(c_tr_more);
+    empty(c_tr_scale);
+    empty(c_tr_args);
+    empty(c_tr_2x2);
+
+    g_case = "component count vs REKHA_GLYPH_MAXLOADS";
+    check(REKHA_GLYPH_MAXLOADS, 64);
+    shape(c_63, 63, 189);
+    check(ep(62), 188);
+    empty(c_64);
+    empty(c_65);
+    # More components than loads left is refused in the COUNTING pass, before anything is allocated
+    # or loaded: exactly one 48 B empty record (loading 63 children first would cost ~7.6 KB).
+    check(load(c_64), REKHA_OUTLINE_SIZE);
+    check(load(c_65), REKHA_OUTLINE_SIZE);
+
+    g_case = "nesting depth vs REKHA_COMPOSITE_MAXDEPTH";
+    check(REKHA_COMPOSITE_MAXDEPTH, 5);
+    shape(chain5, 1, 3);
+    pt(0, 15, 15);                         # T[0] (10,10) + 5 * (1, 1)
+    pt(2, 55, 95);
+    empty(chain6);
+
+    g_case = "empty child";
+    empty(c_echild);
+    shape(c_echild2, 1, 3);
+    pt(0, 10, 10);
+    pt(2, 50, 90);
+
+    if (g_fails == 0) {
+        var ok = "composite_flags_test: PASS (";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        var ok2 = " checks; every component flag decodes to hand-computed coordinates)\n";
+        syscall(1, 1, ok2, strlen(ok2));
+    } else {
+        var bad = "composite_flags_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

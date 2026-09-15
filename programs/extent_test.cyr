@@ -1,0 +1,744 @@
+# programs/extent_test.cyr — RUN test for the 0.3.11 table EXTENTS and the RekhaFont table CACHE.
+#
+# ⭐ WHAT THIS PINS. sfnt.cyr states the bounds invariant as four enforced rules: the directory lies in
+# [0, len); a table is usable only inside [dir_end, len); a fixed field is read only when the table's
+# DECLARED length covers it (head >= 54, maxp >= 6, hhea >= 36); variable arrays are bounded by their
+# own table's declared length (hmtx, loca, glyf). Every rule gets a pass/fail PAIR here, one byte
+# apart, so a check that drifted by one in either direction fails one side of the pair.
+#
+# ⚠ THE CACHE IS A SNAPSHOT (sfnt.cyr, "THE BUFFER IS BORROWED"). Group I mutates the bytes after
+# open and asserts the cached scalars do NOT follow — that is the documented contract, not an
+# accident, and a lazy or re-reading cache fails it.
+#
+# Base font (8 tables, directory [12,140), FONT_LEN 480, bytes past 480 poisoned 0x5A):
+#   slot 0 head @140/54 · slot 1 maxp @196/32 · slot 2 hhea @228/36 · slot 3 hmtx @266/14
+#   slot 4 loca @280/10 (short) or /20 (long) · slot 5 glyf @300/78 · slot 6 cmap @436/44
+#   slot 7 'zzzz' @380/54 (a second head body, upem 2000, used by the first-entry-wins group)
+# Glyphs (numGlyphs 4): 0 = triangle x0 10 · 1 = empty · 2 = triangle x0 20 · 3 = triangle x0 30,
+# each 26 B, so gid 3 ends EXACTLY at glyf's declared end. hhea numberOfHMetrics 3: gid 3 lives in
+# the lsb tail, whose one lsb (900) is a plausible width a wrong reader would return. The two bytes
+# before hmtx (264..265, in no table) hold 0xA5A5, so a negative gid indexing backwards reads non-zero.
+# cmap (3,1) format 4: 'A'..'D' -> gid 0..3.
+# Exit code = failed checks; each failure prints its global check number, group, got and want.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+var FONT_LEN = 480;
+var BUF_LEN = 512;
+var TAG_ZZZZ = 0x7A7A7A7A;
+var TAG_POST = 0x706F7374;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "extent_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+# directory slot i (0..7) of the base font
+fn slot(buf, i, tag, off, tlen): i64 {
+    var ent = 12 + i * 16;
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# A 26-byte simple glyph at absolute offset g: one contour (x0,10) (x0+80,10) (x0+40,90), all on.
+fn tri(buf, g, x0): i64 {
+    put_u16(buf, g + 0, 1);
+    put_u16(buf, g + 2, x0);
+    put_u16(buf, g + 4, 10);
+    put_u16(buf, g + 6, x0 + 80);
+    put_u16(buf, g + 8, 90);
+    put_u16(buf, g + 10, 2);           # endPtsOfContours[0]
+    put_u16(buf, g + 12, 0);           # instructionLength
+    store8(buf + g + 14, 0x01);        # x i16, y i16
+    store8(buf + g + 15, 0x21);        # x i16, y same
+    store8(buf + g + 16, 0x03);        # x short negative, y i16
+    put_u16(buf, g + 17, x0);
+    put_u16(buf, g + 19, 80);
+    store8(buf + g + 21, 40);
+    put_u16(buf, g + 22, 10);
+    put_u16(buf, g + 24, 80);
+    return 0;
+}
+
+# Build the base font into buf (BUF_LEN bytes). lfmt 0 = short loca, 1 = long loca.
+fn build(buf, lfmt): i64 {
+    memset(buf, 0, BUF_LEN);
+    var t = FONT_LEN;
+    while (t < BUF_LEN) {
+        store8(buf + t, 0x5A);
+        t = t + 1;
+    }
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 8);
+    slot(buf, 0, REKHA_TAG_HEAD, 140, 54);
+    slot(buf, 1, REKHA_TAG_MAXP, 196, 32);
+    slot(buf, 2, REKHA_TAG_HHEA, 228, 36);
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 14);
+    if (lfmt == 0) {
+        slot(buf, 4, REKHA_TAG_LOCA, 280, 10);
+    } else {
+        slot(buf, 4, REKHA_TAG_LOCA, 280, 20);
+    }
+    slot(buf, 5, REKHA_TAG_GLYF, 300, 78);
+    slot(buf, 6, REKHA_TAG_CMAP, 436, 44);
+    slot(buf, 7, TAG_ZZZZ, 380, 54);
+
+    put_u32(buf, 140 + 12, 0x5F0F3CF5);   # head.magicNumber
+    put_u16(buf, 140 + 18, 1000);         # unitsPerEm
+    put_u16(buf, 140 + 50, lfmt);         # indexToLocFormat
+    put_u32(buf, 196, 0x00010000);        # maxp version 1.0
+    put_u16(buf, 196 + 4, 4);             # numGlyphs
+    put_u16(buf, 228 + 4, 800);           # ascender
+    put_u16(buf, 228 + 6, 0 - 200);       # descender
+    put_u16(buf, 228 + 8, 90);            # lineGap
+    put_u16(buf, 228 + 34, 3);            # numberOfHMetrics
+    put_u16(buf, 264, 0xA5A5);            # 2 B in no table, before hmtx: what a gid -1 read would find
+    put_u16(buf, 266 + 0, 500);           # gid 0 advance
+    put_u16(buf, 266 + 2, 5);
+    put_u16(buf, 266 + 4, 250);           # gid 1
+    put_u16(buf, 266 + 6, 6);
+    put_u16(buf, 266 + 8, 750);           # gid 2 — the last long metric
+    put_u16(buf, 266 + 10, 7);
+    put_u16(buf, 266 + 12, 900);          # lsb tail: gid 3's bearing, NOT a width
+
+    # loca: glyph byte offsets 0, 26, 26, 52, 78
+    if (lfmt == 0) {
+        put_u16(buf, 280 + 0, 0);
+        put_u16(buf, 280 + 2, 13);
+        put_u16(buf, 280 + 4, 13);
+        put_u16(buf, 280 + 6, 26);
+        put_u16(buf, 280 + 8, 39);
+    } else {
+        put_u32(buf, 280 + 0, 0);
+        put_u32(buf, 280 + 4, 26);
+        put_u32(buf, 280 + 8, 26);
+        put_u32(buf, 280 + 12, 52);
+        put_u32(buf, 280 + 16, 78);
+    }
+    tri(buf, 300, 10);
+    tri(buf, 326, 20);
+    tri(buf, 352, 30);
+
+    # the second head body behind slot 7
+    put_u32(buf, 380 + 12, 0x5F0F3CF5);
+    put_u16(buf, 380 + 18, 2000);
+
+    # cmap: one (3,1) record -> format 4 @448: 'A'..'D' -> 0..3, plus the 0xFFFF terminator
+    put_u16(buf, 436 + 2, 1);
+    put_u16(buf, 436 + 4, 3);
+    put_u16(buf, 436 + 6, 1);
+    put_u32(buf, 436 + 8, 12);
+    var s = 448;
+    put_u16(buf, s + 0, 4);
+    put_u16(buf, s + 2, 32);
+    put_u16(buf, s + 6, 4);
+    put_u16(buf, s + 14, 68);
+    put_u16(buf, s + 16, 0xFFFF);
+    put_u16(buf, s + 20, 65);
+    put_u16(buf, s + 22, 0xFFFF);
+    put_u16(buf, s + 24, 0 - 65);
+    put_u16(buf, s + 26, 1);
+    return 0;
+}
+
+fn span_off(f, gid): i64 {
+    var sp: i64[2];
+    if (rekha_glyf_span(f, gid, &sp) == 0) { return 0; }
+    return load64(&sp);
+}
+
+fn span_len(f, gid): i64 {
+    var sp: i64[2];
+    if (rekha_glyf_span(f, gid, &sp) == 0) { return 0; }
+    return load64(&sp + 8);
+}
+
+# the first x of glyph gid's decoded outline, or -1 when it loads empty
+fn glyph_x0(f, gid): i64 {
+    var o = rekha_load_glyph(f, gid);
+    if (o == 0) { return 0 - 2; }
+    if (rekha_outline_n_points(o) != 3) { return 0 - 1; }
+    return load64(rekha_outline_xs(o));
+}
+
+fn tlen(f, tag): i64 {
+    var c: i64[1];
+    store64(&c, 77);
+    rekha_find_table_len(f, tag, &c);
+    return load64(&c);
+}
+
+# ── A) OPEN PRECONDITIONS ───────────────────────
+fn t_open(buf): i64 {
+    g_group = "A open";
+    build(buf, 0);
+    check(rekha_font_open(0, 100), 0);
+    check(rekha_font_open(buf, 11), 0);                 # shorter than the offset table
+    check(rekha_font_open(buf, 12), 0);                 # 8 directory entries need 140 B
+    check(rekha_font_open(buf, 139), 0);                # one byte short of the directory
+    var fd = rekha_font_open(buf, 140);                 # directory fits, every table is past len
+    check(fd != 0, 1);
+    check(rekha_units_per_em(fd), 0);
+    check(rekha_glyph_count(fd), 0);
+    check(rekha_find_table(fd, REKHA_TAG_HEAD), 0);
+    check(rekha_char_to_glyph(fd, 65), 0);
+    check(rekha_advance_width(fd, 0), 0);
+
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(f != 0, 1);
+    check(rekha_units_per_em(f), 1000);
+    check(rekha_loca_format(f), 0);
+    check(rekha_glyph_count(f), 4);
+    check(rekha_num_h_metrics(f), 3);
+    check(rekha_ascender(f), 800);
+    check(rekha_descender(f), 0 - 200);
+    check(rekha_line_gap(f), 90);
+    check(rekha_char_to_glyph(f, 68), 3);
+
+    put_u32(buf, 0, 0x74727565);                        # 'true' (Apple TrueType)
+    var ft = rekha_font_open(buf, FONT_LEN);
+    check(ft != 0, 1);
+    check(rekha_units_per_em(ft), 1000);
+    check(glyph_x0(ft, 2), 20);
+    put_u32(buf, 0, 0x4F54544F);                        # 'OTTO' (CFF) — refused
+    check(rekha_font_open(buf, FONT_LEN), 0);
+    put_u32(buf, 0, 0x00020000);
+    check(rekha_font_open(buf, FONT_LEN), 0);
+
+    build(buf, 0);
+    put_u16(buf, 4, 0);                                 # numTables 0: opens, knows nothing
+    var fz = rekha_font_open(buf, 12);
+    check(fz != 0, 1);
+    check(rekha_units_per_em(fz), 0);
+    check(rekha_find_table(fz, REKHA_TAG_HEAD), 0);
+    check(span_len(fz, 0), 0);
+    return 0;
+}
+
+# ── B) rekha_find_table / rekha_find_table_len VALUES ─────────────
+fn t_find(buf): i64 {
+    g_group = "B find_table";
+    build(buf, 0);
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 140);    # starts exactly at dir_end: valid
+    check(tlen(f, REKHA_TAG_HEAD), 54);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 196);
+    check(tlen(f, REKHA_TAG_MAXP), 32);
+    check(rekha_find_table(f, REKHA_TAG_HHEA), 228);
+    check(tlen(f, REKHA_TAG_HHEA), 36);
+    check(rekha_find_table(f, REKHA_TAG_HMTX), 266);
+    check(tlen(f, REKHA_TAG_HMTX), 14);
+    check(rekha_find_table(f, REKHA_TAG_LOCA), 280);
+    check(tlen(f, REKHA_TAG_LOCA), 10);
+    check(rekha_find_table(f, REKHA_TAG_GLYF), 300);
+    check(tlen(f, REKHA_TAG_GLYF), 78);
+    check(rekha_find_table(f, REKHA_TAG_CMAP), 436);    # ends exactly at len: valid
+    check(tlen(f, REKHA_TAG_CMAP), 44);
+    check(rekha_find_table(f, TAG_ZZZZ), 380);          # any tag, not only the ones rekha reads
+    check(tlen(f, TAG_ZZZZ), 54);
+    var c: i64[1];
+    store64(&c, 77);
+    check(rekha_find_table_len(f, TAG_POST, &c), 0);    # absent tag
+    check(load64(&c), 0);                               # ...and len_out is reset, not left at 77
+    store64(&c, 77);
+    check(rekha_find_table_len(0, REKHA_TAG_HEAD, &c), 0);
+    check(load64(&c), 0);
+    return 0;
+}
+
+# ── C) THE EXTENT RULE: [dir_end, len), AND THE FIRST MATCHING ENTRY WINS ───────
+fn t_extent(buf): i64 {
+    g_group = "C extent";
+    build(buf, 0);
+    slot(buf, 0, REKHA_TAG_HEAD, 139, 54);              # overlaps the last directory byte
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(f != 0, 1);                                   # a bad table never fails the open
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 0);
+    check(tlen(f, REKHA_TAG_HEAD), 0);
+    check(rekha_units_per_em(f), 0);                    # cached as absent
+    check(rekha_loca_format(f), 0);
+    check(rekha_glyph_count(f), 4);                     # other tables unaffected
+    slot(buf, 0, REKHA_TAG_HEAD, 0, 54);                # over the offset table
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 0);
+    check(rekha_units_per_em(f), 0);
+    slot(buf, 0, REKHA_TAG_HEAD, 140, 54);
+    slot(buf, 1, REKHA_TAG_MAXP, 12, 32);               # maxp inside the directory
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 0);
+    check(rekha_glyph_count(f), 0);
+    check(span_len(f, 0), 0);
+
+    build(buf, 0);
+    slot(buf, 6, REKHA_TAG_CMAP, 436, 45);              # offset + length = len + 1
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_CMAP), 0);
+    check(tlen(f, REKHA_TAG_CMAP), 0);
+    check(rekha_char_to_glyph(f, 65 + 2), 0);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 140);
+    f = rekha_font_open(buf, FONT_LEN + 1);             # the same entry inside a longer len
+    check(rekha_find_table(f, REKHA_TAG_CMAP), 436);
+    check(rekha_char_to_glyph(f, 67), 2);
+    slot(buf, 6, REKHA_TAG_CMAP, 0xFFFFFFF0, 44);       # an offset far past len
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_CMAP), 0);
+    slot(buf, 6, REKHA_TAG_CMAP, 436, 0xFFFFFFFF);      # a length far past len
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_CMAP), 0);
+    check(rekha_char_to_glyph(f, 65), 0);
+    slot(buf, 7, TAG_ZZZZ, FONT_LEN, 0);                # a 0-byte table at offset == len fits the rule
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, TAG_ZZZZ), FONT_LEN);
+    check(tlen(f, TAG_ZZZZ), 0);
+    slot(buf, 7, TAG_ZZZZ, FONT_LEN + 1, 0);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, TAG_ZZZZ), 0);
+    slot(buf, 0, REKHA_TAG_HEAD, 140, 0);               # a 0-byte head: found, but too short to read
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 140);
+    check(rekha_units_per_em(f), 0);
+
+    # first matching entry wins — for the lookup AND for the cache
+    build(buf, 0);
+    slot(buf, 7, REKHA_TAG_HEAD, 380, 54);              # a second, valid duplicate head (upem 2000)
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 140);
+    check(rekha_units_per_em(f), 1000);
+    slot(buf, 0, REKHA_TAG_HEAD, 100, 54);              # first entry now INVALID
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 0);      # the second valid duplicate is not consulted
+    check(rekha_units_per_em(f), 0);
+    slot(buf, 0, TAG_ZZZZ, 140, 54);                    # the first entry no longer says head
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 380);
+    check(rekha_units_per_em(f), 2000);
+    check(rekha_find_table(f, TAG_ZZZZ), 140);          # 'zzzz' is now slot 0's
+    return 0;
+}
+
+# ── D) MINIMUM DECLARED LENGTHS: head 54, maxp 6, hhea 36 ────────────
+fn t_minlen(buf): i64 {
+    g_group = "D minlen";
+    build(buf, 1);
+    slot(buf, 0, REKHA_TAG_HEAD, 140, 53);
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(f != 0, 1);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 140);    # the directory still reports it
+    check(tlen(f, REKHA_TAG_HEAD), 53);
+    check(rekha_units_per_em(f), 0);
+    check(rekha_loca_format(f), 0);                     # the long-loca font reads as "short"
+    check(rekha_glyph_advance_px(f, 0, 16), 0);         # no upem -> no pixel advance
+    check(rekha_char_advance_px(f, 65, 16), 0);
+    check(rekha_advance_width(f, 0), 500);              # design-unit metrics do not need head
+    slot(buf, 0, REKHA_TAG_HEAD, 140, 54);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(f), 1000);
+    check(rekha_loca_format(f), 1);
+    check(rekha_glyph_advance_px(f, 0, 16), 8);
+
+    build(buf, 0);
+    slot(buf, 1, REKHA_TAG_MAXP, 196, 5);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 196);
+    check(rekha_glyph_count(f), 0);
+    check(span_len(f, 0), 0);                           # no numGlyphs -> no spans
+    check(glyph_x0(f, 0), 0 - 1);
+    check(rekha_char_to_glyph(f, 68), 3);               # no maxp bound on the mapped gid
+    slot(buf, 1, REKHA_TAG_MAXP, 196, 6);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_glyph_count(f), 4);
+    check(span_len(f, 0), 26);
+
+    build(buf, 0);
+    slot(buf, 2, REKHA_TAG_HHEA, 228, 35);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HHEA), 228);
+    check(tlen(f, REKHA_TAG_HHEA), 35);
+    check(rekha_num_h_metrics(f), 0);
+    check(rekha_ascender(f), 0);
+    check(rekha_descender(f), 0);
+    check(rekha_line_gap(f), 0);
+    check(rekha_advance_width(f, 0), 0);
+    check(rekha_char_advance(f, 65), 0);
+    slot(buf, 2, REKHA_TAG_HHEA, 228, 36);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_num_h_metrics(f), 3);
+    check(rekha_ascender(f), 800);
+    check(rekha_descender(f), 0 - 200);
+    check(rekha_line_gap(f), 90);
+    check(rekha_advance_width(f, 0), 500);
+    return 0;
+}
+
+# ── E) hmtx: THE LSB TAIL CLAMP AND hmtx's DECLARED LENGTH ────────────
+fn t_hmtx(buf): i64 {
+    g_group = "E hmtx";
+    build(buf, 0);
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_advance_width(f, 0), 500);
+    check(rekha_advance_width(f, 1), 250);
+    check(rekha_advance_width(f, 2), 750);
+    check(rekha_advance_width(f, 3), 750);              # lsb tail: the LAST long advance, never 900
+    check(rekha_advance_width(f, 99), 750);             # past numGlyphs clamps the same way
+    check(rekha_advance_width(f, 0 - 1), 0);
+
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 12);              # exactly the three long metrics
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_advance_width(f, 2), 750);
+    check(rekha_advance_width(f, 3), 750);
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 11);              # the last long metric one byte outside
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_advance_width(f, 0), 500);              # earlier gids still read
+    check(rekha_advance_width(f, 1), 250);
+    check(rekha_advance_width(f, 2), 0);
+    check(rekha_advance_width(f, 3), 0);                # clamps to idx 2, which is outside
+    check(rekha_advance_width(f, 99), 0);
+    check(rekha_glyph_advance_px(f, 2, 16), 0);
+    check(rekha_glyph_advance_fx(f, 3, 16), 0);
+    check(rekha_char_advance_px(f, 67, 16), 0);
+    check(rekha_glyph_advance_px(f, 1, 16), 4);
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 8);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_advance_width(f, 1), 250);
+    check(rekha_advance_width(f, 2), 0);
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 7);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_advance_width(f, 0), 500);
+    check(rekha_advance_width(f, 1), 0);
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 0);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_find_table(f, REKHA_TAG_HMTX), 266);
+    check(rekha_advance_width(f, 0), 0);
+
+    # hhea claims gid 3 has a long metric; hmtx (14 B) holds only 3.5 of them
+    build(buf, 0);
+    put_u16(buf, 228 + 34, 4);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_num_h_metrics(f), 4);
+    check(rekha_advance_width(f, 2), 750);
+    check(rekha_advance_width(f, 3), 0);                # not 900 from the lsb, not loca's bytes
+    check(rekha_advance_width(f, 50), 0);
+    put_u16(buf, 228 + 34, 0);                          # numberOfHMetrics 0
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_advance_width(f, 0), 0);
+    check(rekha_char_advance_fx(f, 65, 16), 0);
+    return 0;
+}
+
+# ── F) loca -> glyf SPANS, SHORT AND LONG ─────────────────
+fn t_loca_fmt(buf, lfmt): i64 {
+    var full = 10;
+    var ent = 2;
+    if (lfmt == 1) {
+        full = 20;
+        ent = 4;
+    }
+    build(buf, lfmt);
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_loca_format(f), lfmt);
+    check(span_off(f, 0), 300);
+    check(span_len(f, 0), 26);
+    check(glyph_x0(f, 0), 10);
+    var sp: i64[2];
+    store64(&sp, 77);
+    store64(&sp + 8, 77);
+    check(rekha_glyf_span(f, 1, &sp), 0);               # empty glyph: loca[1] == loca[2]
+    check(load64(&sp), 0);                              # out is cleared on every 0 return
+    check(load64(&sp + 8), 0);
+    check(rekha_outline_n_contours(rekha_load_glyph(f, 1)), 0);
+    check(span_off(f, 2), 326);                         # middle glyph
+    check(span_len(f, 2), 26);
+    check(glyph_x0(f, 2), 20);
+    check(span_off(f, 3), 352);                         # last glyph, ends exactly at glyf_len
+    check(span_len(f, 3), 26);
+    check(glyph_x0(f, 3), 30);
+    check(span_len(f, 4), 0);                           # gid == numGlyphs
+    check(span_len(f, 0 - 1), 0);
+    check(glyph_x0(f, 4), 0 - 1);
+
+    slot(buf, 4, REKHA_TAG_LOCA, 280, full - ent);      # loca one entry short
+    f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 3), 0);
+    check(glyph_x0(f, 3), 0 - 1);
+    check(span_len(f, 2), 26);                          # loca[3] is still inside
+    check(glyph_x0(f, 2), 20);
+    check(glyph_x0(f, 0), 10);
+    slot(buf, 4, REKHA_TAG_LOCA, 280, full - 1);        # loca one BYTE short
+    f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 3), 0);
+    check(span_len(f, 2), 26);
+    slot(buf, 4, REKHA_TAG_LOCA, 280, full);
+
+    slot(buf, 5, REKHA_TAG_GLYF, 300, 77);              # glyf one byte short of the last glyph
+    f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 3), 0);
+    check(glyph_x0(f, 3), 0 - 1);
+    check(span_len(f, 2), 26);
+    check(glyph_x0(f, 2), 20);
+    slot(buf, 5, REKHA_TAG_GLYF, 300, 78);
+
+    put_u16(buf, 140 + 50, 2);                          # indexToLocFormat 2
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_loca_format(f), 2);                     # reported as read...
+    check(span_len(f, 0), 0);                           # ...and refused: no outline at all
+    check(span_len(f, 2), 0);
+    check(glyph_x0(f, 0), 0 - 1);
+    check(sd_path_verb_count(rekha_char_to_sdpath(f, 65, 65536, 0, 0)), 0);
+    put_u16(buf, 140 + 50, lfmt);
+
+    put_u16(buf, 196 + 4, 0);                           # numGlyphs 0
+    f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 0), 0);
+    check(span_len(f, 2), 0);
+    check(span_len(f, 3), 0);
+    put_u16(buf, 196 + 4, 4);
+
+    if (lfmt == 0) {
+        put_u16(buf, 280 + 6, 12);                      # loca[3] = 24 B < loca[2] = 26 B
+    } else {
+        put_u32(buf, 280 + 12, 24);
+    }
+    f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 2), 0);                           # backwards: empty
+    check(span_len(f, 0), 26);
+    return 0;
+}
+
+fn t_loca(buf): i64 {
+    g_group = "F loca short";
+    t_loca_fmt(buf, 0);
+    g_group = "F loca long";
+    t_loca_fmt(buf, 1);
+    g_group = "F loca absent";
+    build(buf, 0);
+    slot(buf, 4, TAG_ZZZZ, 280, 10);
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 0), 0);
+    build(buf, 0);
+    slot(buf, 5, TAG_POST, 300, 78);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(span_len(f, 0), 0);
+    return 0;
+}
+
+# ── G) EVERY PUBLIC READER ON A 0 FONT RETURNS 0, AND ALLOCATES NOTHING ───────
+# Readers: rekha_find_table, rekha_find_table_len, rekha_units_per_em, rekha_loca_format,
+# rekha_glyph_count, rekha_num_h_metrics, rekha_ascender, rekha_descender, rekha_line_gap,
+# rekha_advance_width, rekha_glyph_advance_px, rekha_glyph_advance_fx, rekha_glyf_span,
+# rekha_char_to_glyph, rekha_char_advance, rekha_char_advance_px, rekha_char_advance_fx.
+# The loaders (rekha_load_glyph, rekha_glyph_to_sdpath, rekha_char_to_sdpath) are not readers: on a
+# 0 font they return an EMPTY outline / path, never 0 and never a fault.
+var g_mark = 0;
+
+# bytes allocated since the last mark; re-marks
+fn no_alloc(): i64 {
+    var d = alloc_used() - g_mark;
+    g_mark = alloc_used();
+    return d;
+}
+
+fn t_null(): i64 {
+    g_group = "G null font";
+    var c: i64[2];
+    g_mark = alloc_used();
+    check(rekha_find_table(0, REKHA_TAG_HEAD), 0);
+    check(no_alloc(), 0);
+    store64(&c, 77);
+    check(rekha_find_table_len(0, REKHA_TAG_CMAP, &c), 0);
+    check(load64(&c), 0);
+    check(no_alloc(), 0);
+    check(rekha_units_per_em(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_loca_format(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_glyph_count(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_num_h_metrics(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_ascender(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_descender(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_line_gap(0), 0);
+    check(no_alloc(), 0);
+    check(rekha_advance_width(0, 1), 0);
+    check(no_alloc(), 0);
+    check(rekha_glyph_advance_px(0, 1, 16), 0);
+    check(no_alloc(), 0);
+    check(rekha_glyph_advance_fx(0, 1, 16), 0);
+    check(no_alloc(), 0);
+    store64(&c, 77);
+    store64(&c + 8, 77);
+    check(rekha_glyf_span(0, 0, &c), 0);
+    check(load64(&c), 0);
+    check(load64(&c + 8), 0);
+    check(no_alloc(), 0);
+    check(rekha_char_to_glyph(0, 65), 0);
+    check(no_alloc(), 0);
+    check(rekha_char_advance(0, 65), 0);
+    check(no_alloc(), 0);
+    check(rekha_char_advance_px(0, 65, 16), 0);
+    check(no_alloc(), 0);
+    check(rekha_char_advance_fx(0, 65, 16), 0);
+    check(no_alloc(), 0);
+    # the loaders degrade to empty
+    var o = rekha_load_glyph(0, 1);
+    check(o != 0, 1);
+    check(rekha_outline_n_contours(o), 0);
+    check(rekha_outline_n_points(o), 0);
+    check(no_alloc(), REKHA_OUTLINE_SIZE);              # the empty record, nothing more
+    check(sd_path_verb_count(rekha_glyph_to_sdpath(0, 1, 65536, 0, 0)), 0);
+    check(sd_path_verb_count(rekha_char_to_sdpath(0, 65, 65536, 0, 0)), 0);
+    check(sd_path_verb_count(rekha_outline_to_sdpath(0, 65536, 0, 0)), 0);
+    return 0;
+}
+
+# ── H) ALLOCATION: open is REKHA_FONT_SIZE, every reader 0 B ───────────
+fn t_alloc(buf): i64 {
+    g_group = "H alloc";
+    build(buf, 1);
+    check(REKHA_FONT_SIZE, 160);
+    g_mark = alloc_used();
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(no_alloc(), REKHA_FONT_SIZE);
+    check(rekha_font_open(buf, 11), 0);                 # refused opens cost nothing
+    check(no_alloc(), 0);
+    check(rekha_font_open(buf, 139), 0);
+    check(no_alloc(), 0);
+    check(rekha_font_open(0, 100), 0);
+    check(no_alloc(), 0);
+    var ft = rekha_font_open(buf, 140);                 # an open that caches nothing still pays once
+    check(ft != 0, 1);
+    check(no_alloc(), REKHA_FONT_SIZE);
+
+    var c: i64[2];
+    check(rekha_find_table(f, REKHA_TAG_GLYF), 300);
+    check(no_alloc(), 0);
+    check(rekha_find_table_len(f, REKHA_TAG_LOCA, &c), 280);
+    check(load64(&c), 20);
+    check(no_alloc(), 0);
+    check(rekha_units_per_em(f), 1000);
+    check(no_alloc(), 0);
+    check(rekha_loca_format(f), 1);
+    check(no_alloc(), 0);
+    check(rekha_glyph_count(f), 4);
+    check(no_alloc(), 0);
+    check(rekha_num_h_metrics(f), 3);
+    check(no_alloc(), 0);
+    check(rekha_ascender(f), 800);
+    check(no_alloc(), 0);
+    check(rekha_descender(f), 0 - 200);
+    check(no_alloc(), 0);
+    check(rekha_line_gap(f), 90);
+    check(no_alloc(), 0);
+    check(rekha_advance_width(f, 3), 750);
+    check(no_alloc(), 0);
+    check(rekha_glyph_advance_px(f, 1, 16), 4);
+    check(no_alloc(), 0);
+    check(rekha_glyph_advance_fx(f, 1, 16), 262144);
+    check(no_alloc(), 0);
+    check(rekha_glyf_span(f, 3, &c), 1);
+    check(load64(&c), 352);
+    check(no_alloc(), 0);
+    check(rekha_char_to_glyph(f, 66), 1);
+    check(no_alloc(), 0);
+    check(rekha_char_advance(f, 67), 750);
+    check(no_alloc(), 0);
+    check(rekha_char_advance_px(f, 65, 16), 8);
+    check(no_alloc(), 0);
+    check(rekha_char_advance_fx(f, 65, 16), 524288);
+    check(no_alloc(), 0);
+    # the decode side is not a reader: one carved block per simple outline (48 + 8 + 3 * 17 -> 112)
+    check(glyph_x0(f, 2), 20);
+    check(no_alloc(), (REKHA_OUTLINE_SIZE + 8 + 3 * 17 + 7) & (0 - 8));
+    return 0;
+}
+
+# ── I) THE CACHE IS A SNAPSHOT OF THE BYTES AT OPEN ──────────────
+fn t_snapshot(buf): i64 {
+    g_group = "I snapshot";
+    build(buf, 0);
+    var f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(f), 1000);
+    put_u16(buf, 140 + 18, 2048);                       # mutate head.unitsPerEm AFTER open
+    put_u16(buf, 140 + 50, 1);                          # ...indexToLocFormat
+    put_u16(buf, 196 + 4, 2);                           # ...maxp.numGlyphs
+    put_u16(buf, 228 + 34, 1);                          # ...hhea.numberOfHMetrics
+    check(rekha_units_per_em(f), 1000);                 # the cache does not follow the bytes
+    check(rekha_loca_format(f), 0);
+    check(rekha_glyph_count(f), 4);
+    check(rekha_num_h_metrics(f), 3);
+    check(rekha_glyph_advance_px(f, 0, 16), 8);         # scaled by the cached upem 1000
+    check(span_len(f, 3), 26);                          # gid 3 < the cached numGlyphs 4
+    slot(buf, 0, REKHA_TAG_HEAD, 100, 54);              # an invalid head entry, after open
+    check(rekha_units_per_em(f), 1000);                 # still the snapshot
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 0);      # find_table walks the live directory
+    var g = rekha_font_open(buf, FONT_LEN);             # a re-open sees the new bytes
+    check(rekha_units_per_em(g), 0);
+    check(rekha_glyph_count(g), 2);
+    check(rekha_num_h_metrics(g), 1);
+    slot(buf, 0, REKHA_TAG_HEAD, 140, 54);
+    g = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(g), 2048);
+    check(rekha_loca_format(g), 1);
+    check(rekha_units_per_em(f), 1000);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var buf = alloc(BUF_LEN);
+    t_open(buf);
+    t_find(buf);
+    t_extent(buf);
+    t_minlen(buf);
+    t_hmtx(buf);
+    t_loca(buf);
+    t_null();
+    t_alloc(buf);
+    t_snapshot(buf);
+
+    if (g_fails == 0) {
+        var ok = "extent_test: PASS (table extents, minimum lengths, loca/hmtx bounds, cache snapshot; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int_fd(1, g_n);
+        syscall(1, 1, " checks)\n", 9);
+    } else {
+        var bad = "extent_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

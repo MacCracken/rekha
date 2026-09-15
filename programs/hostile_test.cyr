@@ -1,0 +1,1973 @@
+# programs/hostile_test.cyr — RUN test: the hostile-input regression gate (audit R-29).
+#
+# ⭐ WHAT THIS EXISTS TO PROVE. rekha parses untrusted font bytes, and a read past a table, a glyph
+# span or an allocated block does not fault on a bump allocator — it lands in mapped memory and
+# silently changes an outline, a metric or a glyph id. `cyrius fuzz --poison` cannot see it (its
+# redzones live in the freelist allocator; rekha draws from sd_alloc). So this suite makes every
+# such read OBSERVABLE, in process, with no fork and no extra syscalls:
+#
+#   SENTINEL DIFFERENTIAL. Every sd_alloc (rekha's AND sadish's) goes through hb_hook, a bump pool
+#   whose unallocated bytes and trailing redzone hold a sentinel; every font sits in a buffer whose
+#   256 bytes BEFORE and AFTER [0, len) hold the same sentinel. Each font is swept TWICE — sentinel
+#   A (0xA5 bytes), then sentinel B (0x5A bytes) — through every public entry point, and all the
+#   results (metrics, spans, glyph ids, outline arrays, path verbs and 16.16 coordinates) are folded
+#   into an FNV-1a digest. A code path that reads a byte it does not own folds a value that differs
+#   between A and B, so digest(A) != digest(B). The canary group proves the harness itself sees a
+#   one-byte overread of the font, of a block and of the pool frontier.
+#
+#   CORPUS. One crafted font per audit class, built in code, each asserting the EXACT safe outcome
+#   (an empty outline, a 0, an exact pool cost) AND passing the differential: R-01 endPts, C-01 point
+#   counts, R-03 merge caps, R-02 self-reference, C-02 acyclic fan-out, depth, R-04 head/maxp at EOF,
+#   R-21/R-22/R-23/R-05 table extents, R-20 directory overlap, R-19 null handles, truncated glyphs,
+#   point-matching indices, and a hook that refuses blocks.
+#
+#   MUTATION. A seeded LCG mutates the embedded LiberationSans face (biased to the directory, the
+#   fixed head/maxp/hhea fields, hmtx, loca, glyf headers and cmap); each mutant is swept under A and
+#   B and must digest equal, decode only valid outlines and stay inside the stated work bounds. The
+#   seeds are fixed, so the run is deterministic; mutations are undone byte by byte and the face's
+#   FNV-1a is re-verified at the end.
+#
+# ⚠ WHAT IT CANNOT SEE. A read that lands inside memory rekha itself wrote (the next table, the next
+# block) folds identical values under A and B; those cases are covered by the corpus's exact-outcome
+# assertions, not by the differential. Reads further than HB_REDZONE past the pool frontier or
+# HB_GUARD past the font are not sentinel-covered either.
+#
+# Exit code = failed checks (capped at 255 so a multiple of 256 cannot read as a pass); each failure
+# prints its check number, its section and got/want to fd 2.
+
+include "src/lib.cyr"
+include "fonts/face_data.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_sec = "start";
+
+fn hb_puts(fd, s): i64 {
+    syscall(1, fd, s, strlen(s));
+    return 0;
+}
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    hb_puts(2, "hostile_test: check failed at #");
+    fmt_int_fd(2, g_n);
+    hb_puts(2, " [");
+    hb_puts(2, g_sec);
+    hb_puts(2, "] got ");
+    fmt_int_fd(2, got);
+    hb_puts(2, " want ");
+    fmt_int_fd(2, want);
+    hb_puts(2, "\n");
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ================================================================
+# Work bounds, derived from glyf.cyr's caps (never read from the font).
+#
+# HB_LOAD_POOL_MAX — bytes ONE rekha_load_glyph may take from the hook. Points decoded across the
+#   load are capped at REKHA_GLYPH_MAXPOINTS_TOTAL (16,384), every block is 17 B per point plus 8 B
+#   per contour (contours <= points, since endPts strictly increase), and each of the <= 64 loads
+#   adds at most a 48 B record + 7 B alignment + component-pointer slots (<= 2 x 64 x 8 overall) +
+#   the <= 6 x 48 B empty records an abort cascades through: 16384 x 25 + 64 x 55 + 1024 + 288
+#   = 414,432 B, stated as 420,000.
+# HB_VERBS_MAX — verbs of one converted outline. One outline holds <= 4,096 points and a contour of
+#   n points emits <= n + 3 verbs (moveto, n segments, a closing quad, close): <= 4 x 4096 = 16,384.
+# HB_PATH_POOL_MAX — sadish bytes for that path: <= 20,480 points (2n + 3 per contour) x 16 B, plus
+#   verb/point arrays doubling from 256 to 32,768 slots (2 x 8 x 65,024 B) and the 48 B record +
+#   the first 4,096 B: 1,372,208 B, stated as 1,400,000.
+# ================================================================
+var HB_LOAD_POOL_MAX = 420000;
+var HB_PATH_POOL_MAX = 1400000;
+var HB_GLYPH_POOL_MAX = 1820000;
+var HB_VERBS_MAX = 16384;
+
+var HB_SCALE = 4096;                  # 16.16: 1/16 px per design unit
+var HB_OX = 196608;                   # 3 px
+var HB_OY = 13107200;                 # 200 px
+
+# ================================================================
+# The sentinel pool — the hook every sd_alloc goes through.
+#   [0, base)        the RekhaFont record of the current sweep (kept across per-glyph resets)
+#   [base, bump)     blocks handed out since the last reset
+#   [bump, touched)  ⭐ INVARIANT: holds the current sentinel, byte for byte
+# The hook fills [touched, bump + HB_REDZONE) lazily, so a block is sentinel until its owner writes
+# it and HB_REDZONE bytes past the newest block are sentinel too. A per-glyph reset refills
+# [base, bump); a sentinel switch sets touched = 0, so every byte handed out afterwards is filled
+# with the new sentinel first. A request that would not fit is served from `alloc` and counted
+# (g_st_over per sweep, asserted 0 by hb_clean; g_pool_over for the run, asserted 0 at the end).
+# ================================================================
+var HB_POOL_CAP = 8388608;
+var HB_REDZONE = 4096;
+var HB_GUARD = 256;
+var HB_FCAP = 420000;                 # font capacity of the guarded buffer (the face is 410,820 B)
+
+var g_pool = 0;
+var g_pool_base = 0;
+var g_pool_bump = 0;
+var g_pool_touched = 0;
+var g_pool_over = 0;                  # whole run
+var g_st_over = 0;                    # current sweep
+var g_pool_blocks = 0;
+var g_pool_refuse_at = 0 - 1;         # -1 = never; K = refuse every block from the K-th on
+var g_sent = 0;
+var g_which = 0;
+var g_fbuf = 0;                       # [guard][font, len][guard]
+
+fn hb_fill(p, n, pat): i64 {
+    var i = 0;
+    while (i + 8 <= n) {
+        store64(p + i, pat);
+        i = i + 8;
+    }
+    while (i < n) {
+        store8(p + i, pat & 255);
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn hb_hook(n): i64 {
+    if (g_pool_refuse_at >= 0) {
+        if (g_pool_blocks >= g_pool_refuse_at) { return 0; }
+    }
+    g_pool_blocks = g_pool_blocks + 1;
+    var sz = (n + 7) & (0 - 8);
+    if (sz <= 0) { sz = 8; }
+    if (g_pool_bump + sz + HB_REDZONE > HB_POOL_CAP) {
+        g_pool_over = g_pool_over + 1;
+        g_st_over = g_st_over + 1;
+        return alloc(sz);
+    }
+    var p = g_pool + g_pool_bump;
+    g_pool_bump = g_pool_bump + sz;
+    var want = g_pool_bump + HB_REDZONE;
+    if (want > g_pool_touched) {
+        hb_fill(g_pool + g_pool_touched, want - g_pool_touched, g_sent);
+        g_pool_touched = want;
+    }
+    return p;
+}
+
+# Per-glyph reset: give back [base, bump), restoring the sentinel over it.
+fn hb_reset(): i64 {
+    hb_fill(g_pool + g_pool_base, g_pool_bump - g_pool_base, g_sent);
+    g_pool_bump = g_pool_base;
+    g_pool_blocks = 0;
+    return 0;
+}
+
+# Switch the whole harness to sentinel A (0) or B (1) and empty the pool.
+fn hb_sentinel(which): i64 {
+    g_which = which;
+    g_sent = 0xA5A5A5A5A5A5A5A5;
+    if (which != 0) { g_sent = 0x5A5A5A5A5A5A5A5A; }
+    g_pool_base = 0;
+    g_pool_bump = 0;
+    g_pool_touched = 0;
+    g_pool_blocks = 0;
+    return 0;
+}
+
+fn hb_guards(len): i64 {
+    hb_fill(g_fbuf, HB_GUARD, g_sent);
+    hb_fill(g_fbuf + HB_GUARD + len, HB_GUARD, g_sent);
+    return 0;
+}
+
+# ================================================================
+# Digest — FNV-1a (64-bit offset basis and prime), folded one 32-bit limb at a time.
+# ================================================================
+var g_h = 0;
+
+fn hb_fold(v): i64 {
+    g_h = (g_h ^ (v & 0xFFFFFFFF)) * 1099511628211;
+    g_h = (g_h ^ ((v >> 32) & 0xFFFFFFFF)) * 1099511628211;
+    return 0;
+}
+
+# Per-sweep statistics (reset by hb_stats_reset; identical under A and B when the digests match).
+var g_st_opened = 0;
+var g_st_decoded = 0;
+var g_st_points = 0;
+var g_st_verbs = 0;
+var g_st_oom = 0;
+var g_st_viol = 0;
+var g_st_pool_max = 0;
+var g_st_verbs_max = 0;
+var g_st_comp = 0;
+var g_st_comp_multi = 0;
+
+fn hb_stats_reset(): i64 {
+    g_st_opened = 0;
+    g_st_decoded = 0;
+    g_st_points = 0;
+    g_st_verbs = 0;
+    g_st_oom = 0;
+    g_st_viol = 0;
+    g_st_pool_max = 0;
+    g_st_verbs_max = 0;
+    g_st_comp = 0;
+    g_st_comp_multi = 0;
+    g_st_over = 0;
+    return 0;
+}
+
+# Fold an outline and count every broken loader guarantee (glyf.cyr "WHAT THE LOADERS GUARANTEE"):
+# empty means all-zero counts; otherwise endPts strictly increase, all < n_points, the last is
+# n_points - 1, n_points <= REKHA_COMPOSITE_MAXP and on_curve is 0/1. Returns n_contours.
+fn hb_outline(o): i64 {
+    if (o == 0) {
+        hb_fold(0 - 7);
+        return 0;
+    }
+    var nc = rekha_outline_n_contours(o);
+    var np = rekha_outline_n_points(o);
+    hb_fold(nc);
+    hb_fold(np);
+    if (nc == 0) {
+        if (np != 0) { g_st_viol = g_st_viol + 1; }
+        return 0;
+    }
+    if (nc < 0) {
+        g_st_viol = g_st_viol + 1;
+        return 0;
+    }
+    if (np < nc) {
+        g_st_viol = g_st_viol + 1;
+        return 0;
+    }
+    if (np > REKHA_COMPOSITE_MAXP) {
+        g_st_viol = g_st_viol + 1;
+        return 0;
+    }
+    var eps = rekha_outline_end_pts(o);
+    var xs = rekha_outline_xs(o);
+    var ys = rekha_outline_ys(o);
+    var oc = rekha_outline_on_curve(o);
+    var prev = 0 - 1;
+    var i = 0;
+    while (i < nc) {
+        var e = load64(eps + i * 8);
+        hb_fold(e);
+        if (e <= prev) { g_st_viol = g_st_viol + 1; }
+        if (e >= np) { g_st_viol = g_st_viol + 1; }
+        prev = e;
+        i = i + 1;
+    }
+    if (prev != np - 1) { g_st_viol = g_st_viol + 1; }
+    # hb_fold inlined over a local (the same fold sequence): this loop is the sweep's hottest.
+    var h = g_h;
+    var j = 0;
+    while (j < np) {
+        var x = load64(xs + j * 8);
+        h = (h ^ (x & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((x >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        var y = load64(ys + j * 8);
+        h = (h ^ (y & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((y >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        var b = load8(oc + j);
+        h = (h ^ b) * 1099511628211;
+        h = h * 1099511628211;
+        if (b > 1) { g_st_viol = g_st_viol + 1; }
+        j = j + 1;
+    }
+    g_h = h;
+    return nc;
+}
+
+# Fold a path: counts, every verb tag, every point's 16.16 coordinates. Returns the verb count.
+fn hb_path(p): i64 {
+    if (p == 0) {
+        hb_fold(0 - 9);
+        g_st_oom = g_st_oom + 1;
+        return 0;
+    }
+    var nv = sd_path_verb_count(p);
+    var npt = sd_path_point_count(p);
+    hb_fold(nv);
+    hb_fold(npt);
+    var verbs = load64(p + SD_PATH_VERBS_OFFSET);
+    var pts = load64(p + SD_PATH_POINTS_OFFSET);
+    # hb_fold inlined over a local, as in hb_outline. Verb tags are 0..4: their high limb is 0.
+    var h = g_h;
+    var i = 0;
+    while (i < nv) {
+        var vb = load64(verbs + i * 8);
+        h = (h ^ (vb & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((vb >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < npt) {
+        var pt = load64(pts + i * 8);
+        var px = load64(pt + SD_POINT_X_OFFSET);
+        h = (h ^ (px & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((px >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        var py = load64(pt + SD_POINT_Y_OFFSET);
+        h = (h ^ (py & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((py >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    g_h = h;
+    g_st_verbs = g_st_verbs + nv;
+    if (nv > g_st_verbs_max) { g_st_verbs_max = nv; }
+    return nv;
+}
+
+fn hb_odigest(o): i64 {
+    g_h = 0xcbf29ce484222325;
+    hb_outline(o);
+    return g_h;
+}
+
+# ================================================================
+# The sweep — every public entry point, folded into g_h.
+# ================================================================
+var g_tags = 0;
+var HB_NTAGS = 9;
+
+fn hb_gid(f, gid): i64 {
+    hb_fold(rekha_advance_width(f, gid));
+    hb_fold(rekha_glyph_advance_px(f, gid, 16));
+    hb_fold(rekha_glyph_advance_fx(f, gid, 37));
+    var sp: i64[2];
+    var has = rekha_glyf_span(f, gid, &sp);
+    hb_fold(has);
+    hb_fold(load64(&sp));
+    hb_fold(load64(&sp + 8));
+    hb_reset();
+    var o = rekha_load_glyph(f, gid);
+    if (o == 0) { g_st_oom = g_st_oom + 1; }
+    var nc = hb_outline(o);
+    hb_path(rekha_outline_to_sdpath(o, HB_SCALE, HB_OX, HB_OY));
+    var used = g_pool_bump - g_pool_base;
+    if (used > g_st_pool_max) { g_st_pool_max = used; }
+    if (nc > 0) {
+        g_st_decoded = g_st_decoded + 1;
+        g_st_points = g_st_points + rekha_outline_n_points(o);
+    }
+    if (has == 1) {
+        if (load64(&sp + 8) >= 10) {
+            if (rekha_rd_i16(rekha_font_data(f), load64(&sp)) < 0) {
+                g_st_comp = g_st_comp + 1;
+                if (nc > 1) { g_st_comp_multi = g_st_comp_multi + 1; }
+            }
+        }
+    }
+    return 0;
+}
+
+fn hb_cp(f, cp): i64 {
+    hb_fold(rekha_char_to_glyph(f, cp));
+    hb_fold(rekha_char_advance(f, cp));
+    hb_fold(rekha_char_advance_px(f, cp, 16));
+    hb_fold(rekha_char_advance_fx(f, cp, 37));
+    return 0;
+}
+
+fn hb_cpath(f, cp): i64 {
+    hb_reset();
+    hb_path(rekha_char_to_sdpath(f, cp, HB_SCALE, 0, HB_OY));
+    var used = g_pool_bump - g_pool_base;
+    if (used > g_st_pool_max) { g_st_pool_max = used; }
+    return 0;
+}
+
+# Sweep the font at (buf, len): gids -2 .. min(max(numGlyphs, 8) + 2, gid_cap), codepoints every
+# one below cp_dense and every cp_step-th above it, the BMP / non-BMP edges, four char -> path runs.
+fn hb_sweep(buf, len, gid_cap, cp_dense, cp_step): i64 {
+    g_h = 0xcbf29ce484222325;
+    var f = rekha_font_open(buf, len);
+    g_pool_base = g_pool_bump;
+    hb_fold(f != 0);
+    if (f != 0) { g_st_opened = g_st_opened + 1; }
+    var cell: i64[1];
+    var t = 0;
+    while (t < HB_NTAGS) {
+        var tag = load64(g_tags + t * 8);
+        hb_fold(rekha_find_table(f, tag));
+        hb_fold(rekha_find_table_len(f, tag, &cell));
+        hb_fold(load64(&cell));
+        t = t + 1;
+    }
+    hb_fold(rekha_units_per_em(f));
+    hb_fold(rekha_loca_format(f));
+    var ng = rekha_glyph_count(f);
+    hb_fold(ng);
+    hb_fold(rekha_num_h_metrics(f));
+    hb_fold(rekha_ascender(f));
+    hb_fold(rekha_descender(f));
+    hb_fold(rekha_line_gap(f));
+    var lim = ng;
+    if (lim < 8) { lim = 8; }
+    lim = lim + 2;
+    if (lim > gid_cap) { lim = gid_cap; }
+    var gid = 0 - 2;
+    while (gid < lim) {
+        hb_gid(f, gid);
+        gid = gid + 1;
+    }
+    hb_fold(rekha_advance_width(f, 65535));
+    hb_fold(rekha_advance_width(f, 70000));
+    hb_fold(rekha_glyph_advance_fx(f, 70000, 12));
+    var sp: i64[2];
+    hb_fold(rekha_glyf_span(f, 65535, &sp));
+    var cp = 0;
+    while (cp < 65536) {
+        hb_cp(f, cp);
+        if (cp < cp_dense) {
+            cp = cp + 1;
+        } else {
+            cp = cp + cp_step;
+        }
+    }
+    hb_cp(f, 0 - 1);
+    hb_cp(f, 65534);
+    hb_cp(f, 65535);
+    hb_cp(f, 65536);
+    hb_cpath(f, 65);
+    hb_cpath(f, 66);
+    hb_cpath(f, 37);
+    hb_cpath(f, 233);
+    return g_h;
+}
+
+var g_diff_a = 0;
+var g_diff_b = 0;
+
+# The differential over the font at g_fbuf + HB_GUARD: 1 when digest(A) == digest(B). The stats
+# left behind are sentinel B's.
+fn hb_diff(len, gid_cap, cp_dense, cp_step): i64 {
+    var buf = g_fbuf + HB_GUARD;
+    hb_sentinel(0);
+    hb_guards(len);
+    hb_stats_reset();
+    g_diff_a = hb_sweep(buf, len, gid_cap, cp_dense, cp_step);
+    hb_sentinel(1);
+    hb_guards(len);
+    hb_stats_reset();
+    g_diff_b = hb_sweep(buf, len, gid_cap, cp_dense, cp_step);
+    if (g_diff_a == g_diff_b) { return 1; }
+    return 0;
+}
+
+# 1 when the last sweep broke no loader guarantee, never saw a 0 outline/path (OOM), never spilled
+# out of the pool and stayed inside the stated bounds.
+fn hb_clean(): i64 {
+    if (g_st_viol != 0) { return 0; }
+    if (g_st_oom != 0) { return 0; }
+    if (g_st_over != 0) { return 0; }
+    if (g_st_pool_max > HB_GLYPH_POOL_MAX) { return 0; }
+    if (g_st_verbs_max > HB_VERBS_MAX) { return 0; }
+    return 1;
+}
+
+# Open the font now in the guarded buffer for targeted checks: the record comes from the global
+# allocator so the pool can be reset freely; the pool restarts on the current sentinel.
+fn hb_font(len): i64 {
+    sd_alloc_set(0);
+    var f = rekha_font_open(g_fbuf + HB_GUARD, len);
+    sd_alloc_set(&hb_hook);
+    hb_sentinel(g_which);
+    return f;
+}
+
+# Install a built font in the guarded buffer, run the differential + cleanliness checks (2 checks)
+# and return a handle for targeted assertions.
+fn hb_corpus(src, len): i64 {
+    memcpy(g_fbuf + HB_GUARD, src, len);
+    var same = hb_diff(len, 64, 384, 97);
+    if (same == 0) {
+        hb_puts(2, "hostile_test: [");
+        hb_puts(2, g_sec);
+        hb_puts(2, "] corpus font: digest A != digest B (a read outside what rekha owns)\n");
+    }
+    check(same, 1);
+    var clean = hb_clean();
+    if (clean == 0) {
+        hb_puts(2, "hostile_test: [");
+        hb_puts(2, g_sec);
+        hb_puts(2, "] corpus font: broken outline guarantees ");
+        fmt_int_fd(2, g_st_viol);
+        hb_puts(2, ", OOM ");
+        fmt_int_fd(2, g_st_oom);
+        hb_puts(2, ", pool spills ");
+        fmt_int_fd(2, g_st_over);
+        hb_puts(2, ", max pool/glyph ");
+        fmt_int_fd(2, g_st_pool_max);
+        hb_puts(2, ", max verbs/glyph ");
+        fmt_int_fd(2, g_st_verbs_max);
+        hb_puts(2, "\n");
+    }
+    check(clean, 1);
+    return hb_font(len);
+}
+
+# Load `gid` on a fresh pool; the outline lands in g_o. Returns the pool bytes the load took.
+var g_o = 0;
+
+fn hb_cost(f, gid): i64 {
+    hb_reset();
+    g_o = rekha_load_glyph(f, gid);
+    return g_pool_bump - g_pool_base;
+}
+
+fn hb_verbs(o): i64 {
+    return sd_path_verb_count(rekha_outline_to_sdpath(o, HB_SCALE, HB_OX, HB_OY));
+}
+
+# ================================================================
+# Font builder. Glyph bodies are appended to a glyf staging area (fb_glyph records each start);
+# fb_build lays out 7 tables in directory order head maxp hhea hmtx cmap loca glyf — glyf LAST, so
+# the file ends where the last glyph ends. head: unitsPerEm 1000, long loca (short when g_short).
+# maxp: numGlyphs = ng.
+# hhea: ascender 800, descender -200, numberOfHMetrics = ng. hmtx: gid i advances 500 + 10 i.
+# cmap: one (3,1) format-4 subtable, 'A' + i -> gid i, plus the 0xFFFF terminator (44 B).
+# ================================================================
+var HB_E_HEAD = 0;
+var HB_E_MAXP = 1;
+var HB_E_HHEA = 2;
+var HB_E_HMTX = 3;
+var HB_E_CMAP = 4;
+var HB_E_LOCA = 5;
+var HB_E_GLYF = 6;
+
+var HB_ARGW = 1;
+var HB_XY = 2;
+var HB_SCALE1 = 8;
+var HB_MORE = 32;
+var HB_XYSCALE = 64;
+var HB_TWO = 128;
+
+var HB_GLCAP = 131072;
+var HB_MAXG = 256;
+var g_gl = 0;
+var g_gl_len = 0;
+var g_loca = 0;
+var g_ng = 0;
+var g_short = 0;                      # 1 = short loca (u16 offsets / 2); glyph offsets must be even
+var g_fb = 0;
+var g_t_glyf = 0;
+var g_t_loca = 0;
+var g_t_cmap = 0;
+
+fn gl_u8(v): i64 {
+    store8(g_gl + g_gl_len, v & 255);
+    g_gl_len = g_gl_len + 1;
+    return 0;
+}
+
+fn gl_u16(v): i64 {
+    gl_u8((v >> 8) & 255);
+    gl_u8(v & 255);
+    return 0;
+}
+
+fn fb_reset(): i64 {
+    g_gl_len = 0;
+    g_ng = 0;
+    g_short = 0;
+    return 0;
+}
+
+fn fb_glyph(): i64 {
+    store64(g_loca + g_ng * 8, g_gl_len);
+    g_ng = g_ng + 1;
+    return g_ng - 1;
+}
+
+# (10,10) (90,10) (50,90), all on-curve: 26 B.
+fn fb_triangle(): i64 {
+    var gid = fb_glyph();
+    gl_u16(1);
+    gl_u16(10);
+    gl_u16(10);
+    gl_u16(90);
+    gl_u16(90);
+    gl_u16(2);
+    gl_u16(0);
+    gl_u8(0x01);
+    gl_u8(0x21);
+    gl_u8(0x03);
+    gl_u16(10);
+    gl_u16(80);
+    gl_u8(40);
+    gl_u16(10);
+    gl_u16(80);
+    return gid;
+}
+
+# Flag bytes for `npts` points at (0,0), on-curve: pairs of 0x39 (ON | REPEAT | X_SAME | Y_SAME) +
+# a repeat count, no coordinate bytes. Two bytes per <= 256 points.
+fn fb_flags(npts): i64 {
+    var left = npts;
+    while (left > 0) {
+        var r = left - 1;
+        if (r > 255) { r = 255; }
+        gl_u8(0x39);
+        gl_u8(r);
+        left = left - r - 1;
+    }
+    return 0;
+}
+
+# Simple glyph: nc contours ending at 0, 1, .., nc-2 and last_ep; flag bytes for npts points.
+fn fb_simple_seq(nc, last_ep, npts): i64 {
+    var gid = fb_glyph();
+    gl_u16(nc);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0);
+    var i = 0;
+    while (i < nc - 1) {
+        gl_u16(i);
+        i = i + 1;
+    }
+    gl_u16(last_ep);
+    gl_u16(0);
+    fb_flags(npts);
+    return gid;
+}
+
+# Simple glyph with two contours ending at e0, e1 (in that order); flag bytes for npts points.
+fn fb_simple2(e0, e1, npts): i64 {
+    var gid = fb_glyph();
+    gl_u16(2);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(e0);
+    gl_u16(e1);
+    gl_u16(0);
+    fb_flags(npts);
+    return gid;
+}
+
+fn fb_comp_begin(): i64 {
+    var gid = fb_glyph();
+    gl_u16(0xFFFF);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0);
+    return gid;
+}
+
+# One component record with word args.
+fn fb_comp(flags, child, a1, a2): i64 {
+    gl_u16(flags | HB_ARGW);
+    gl_u16(child);
+    gl_u16(a1 & 65535);
+    gl_u16(a2 & 65535);
+    return 0;
+}
+
+# Composite of n components all referencing `child`, offset (10 i, 0).
+fn fb_comp_rep(child, n): i64 {
+    var gid = fb_comp_begin();
+    var i = 0;
+    while (i < n) {
+        var fl = HB_XY;
+        if (i < n - 1) { fl = fl | HB_MORE; }
+        fb_comp(fl, child, i * 10, 0);
+        i = i + 1;
+    }
+    return gid;
+}
+
+fn fb_build(dst): i64 {
+    var ng = g_ng;
+    var head = 124;
+    var maxp = head + 54;
+    var hhea = maxp + 32;
+    var hmtx = hhea + 36;
+    var cmap = hmtx + ng * 4;
+    var loca = cmap + 44;
+    var loca_len = (ng + 1) * 4;
+    if (g_short != 0) { loca_len = (ng + 1) * 2; }
+    var glyf = loca + loca_len;
+    var len = glyf + g_gl_len;
+    g_t_cmap = cmap;
+    g_t_loca = loca;
+    g_t_glyf = glyf;
+    hb_fill(dst, len, 0);
+    put_u32(dst, 0, 0x00010000);
+    put_u16(dst, 4, 7);
+    dir_entry(dst, 12, REKHA_TAG_HEAD, head, 54);
+    dir_entry(dst, 28, REKHA_TAG_MAXP, maxp, 32);
+    dir_entry(dst, 44, REKHA_TAG_HHEA, hhea, 36);
+    dir_entry(dst, 60, REKHA_TAG_HMTX, hmtx, ng * 4);
+    dir_entry(dst, 76, REKHA_TAG_CMAP, cmap, 44);
+    dir_entry(dst, 92, REKHA_TAG_LOCA, loca, loca_len);
+    dir_entry(dst, 108, REKHA_TAG_GLYF, glyf, g_gl_len);
+    put_u16(dst, head + 18, 1000);
+    put_u16(dst, head + 50, 1 - g_short);
+    put_u16(dst, maxp + 4, ng);
+    put_u16(dst, hhea + 4, 800);
+    put_u16(dst, hhea + 6, 65536 - 200);
+    put_u16(dst, hhea + 34, ng);
+    var i = 0;
+    while (i < ng) {
+        put_u16(dst, hmtx + i * 4, 500 + i * 10);
+        i = i + 1;
+    }
+    put_u16(dst, cmap + 2, 1);
+    put_u16(dst, cmap + 4, 3);
+    put_u16(dst, cmap + 6, 1);
+    put_u32(dst, cmap + 8, 12);
+    var sub = cmap + 12;
+    put_u16(dst, sub + 0, 4);
+    put_u16(dst, sub + 2, 32);
+    put_u16(dst, sub + 6, 4);
+    put_u16(dst, sub + 14, 64 + ng);
+    put_u16(dst, sub + 16, 65535);
+    put_u16(dst, sub + 20, 65);
+    put_u16(dst, sub + 22, 65535);
+    put_u16(dst, sub + 24, 65536 - 65);
+    put_u16(dst, sub + 26, 1);
+    store64(g_loca + ng * 8, g_gl_len);
+    i = 0;
+    while (i <= ng) {
+        if (g_short != 0) {
+            put_u16(dst, loca + i * 2, load64(g_loca + i * 8) / 2);
+        } else {
+            put_u32(dst, loca + i * 4, load64(g_loca + i * 8));
+        }
+        i = i + 1;
+    }
+    memcpy(dst + glyf, g_gl, g_gl_len);
+    return len;
+}
+
+fn fb_entry(dst, idx, off, tlen): i64 {
+    put_u32(dst, 12 + idx * 16 + 8, off);
+    put_u32(dst, 12 + idx * 16 + 12, tlen);
+    return 0;
+}
+
+fn fb_kill(dst, idx): i64 {
+    put_u32(dst, 12 + idx * 16, 0x7A7A7A7A);
+    return 0;
+}
+
+# Move table `idx` to the end of the file with declared length newlen (its bytes copied, zero-padded
+# past its old length). Returns the new file length; the table then ends exactly at EOF.
+fn fb_to_eof(dst, len, idx, newlen): i64 {
+    var ent = 12 + idx * 16;
+    var off = rekha_rd_u32(dst, ent + 8);
+    var ol = rekha_rd_u32(dst, ent + 12);
+    var i = 0;
+    while (i < newlen) {
+        var b = 0;
+        if (i < ol) { b = load8(dst + off + i); }
+        store8(dst + len + i, b);
+        i = i + 1;
+    }
+    fb_entry(dst, idx, len, newlen);
+    return len + newlen;
+}
+
+# ================================================================
+# Groups
+# ================================================================
+
+# The harness must SEE an overread, or every equal digest below is vacuous.
+fn t_canary(): i64 {
+    g_sec = "canary";
+    fb_reset();
+    fb_triangle();
+    var len = fb_build(g_fb);
+    memcpy(g_fbuf + HB_GUARD, g_fb, len);
+    var h: i64[2];
+    var w = 0;
+    while (w < 2) {
+        hb_sentinel(w);
+        hb_guards(len);
+        g_h = 0xcbf29ce484222325;
+        hb_fold(load8(g_fbuf + HB_GUARD + len));
+        store64(&h + w * 8, g_h);
+        w = w + 1;
+    }
+    check(load64(&h) != load64(&h + 8), 1);            # a 1-byte read past the font
+    w = 0;
+    while (w < 2) {
+        hb_sentinel(w);
+        hb_guards(len);
+        g_h = 0xcbf29ce484222325;
+        hb_fold(load8(g_fbuf + HB_GUARD - 1));
+        store64(&h + w * 8, g_h);
+        w = w + 1;
+    }
+    check(load64(&h) != load64(&h + 8), 1);            # a 1-byte read before it
+    w = 0;
+    while (w < 2) {
+        hb_sentinel(w);
+        var blk = sd_alloc(24);
+        store64(blk, 1);
+        store64(blk + 8, 2);
+        g_h = 0xcbf29ce484222325;
+        hb_fold(load8(blk + 16));
+        store64(&h + w * 8, g_h);
+        w = w + 1;
+    }
+    check(load64(&h) != load64(&h + 8), 1);            # an unwritten byte of a block
+    w = 0;
+    while (w < 2) {
+        hb_sentinel(w);
+        var b2 = sd_alloc(24);
+        store64(b2, 0);
+        store64(b2 + 8, 0);
+        store64(b2 + 16, 0);
+        g_h = 0xcbf29ce484222325;
+        hb_fold(load8(b2 + 24 + 3000));
+        store64(&h + w * 8, g_h);
+        w = w + 1;
+    }
+    check(load64(&h) != load64(&h + 8), 1);            # 3,000 B past the newest block
+    hb_sentinel(0);
+    hb_reset();
+    return 0;
+}
+
+# R-19: a 0 handle is what rekha_font_open hands back for malformed bytes; every reader takes it.
+fn t_null(): i64 {
+    g_sec = "R-19 null handle";
+    check(rekha_font_open(0, 100), 0);
+    check(rekha_units_per_em(0), 0);
+    check(rekha_loca_format(0), 0);
+    check(rekha_glyph_count(0), 0);
+    check(rekha_num_h_metrics(0), 0);
+    check(rekha_ascender(0), 0);
+    check(rekha_descender(0), 0);
+    check(rekha_line_gap(0), 0);
+    check(rekha_advance_width(0, 1), 0);
+    check(rekha_glyph_advance_px(0, 1, 16), 0);
+    check(rekha_glyph_advance_fx(0, 1, 16), 0);
+    check(rekha_char_to_glyph(0, 65), 0);
+    check(rekha_char_advance(0, 65), 0);
+    check(rekha_char_advance_px(0, 65, 16), 0);
+    check(rekha_char_advance_fx(0, 65, 16), 0);
+    check(rekha_find_table(0, REKHA_TAG_HEAD), 0);
+    var cell: i64[2];
+    store64(&cell, 77);
+    store64(&cell + 8, 77);
+    check(rekha_find_table_len(0, REKHA_TAG_HEAD, &cell), 0);
+    check(load64(&cell), 0);
+    store64(&cell, 77);
+    check(rekha_glyf_span(0, 0, &cell), 0);
+    check(load64(&cell), 0);
+    check(load64(&cell + 8), 0);
+    hb_sentinel(0);
+    var o = rekha_load_glyph(0, 1);
+    check(o != 0, 1);
+    check(rekha_outline_n_contours(o), 0);
+    check(rekha_outline_n_points(o), 0);
+    check(sd_path_verb_count(rekha_outline_to_sdpath(0, HB_SCALE, 0, 0)), 0);
+    check(sd_path_verb_count(rekha_glyph_to_sdpath(0, 1, HB_SCALE, 0, 0)), 0);
+    check(sd_path_verb_count(rekha_char_to_sdpath(0, 65, HB_SCALE, 0, 0)), 0);
+
+    # rekha_font_open's own refusals
+    fb_reset();
+    fb_triangle();
+    var len = fb_build(g_fb);
+    check(rekha_font_open(g_fb, 11), 0);
+    check(rekha_font_open(g_fb, 124) != 0, 1);         # the directory exactly fills the file
+    check(rekha_font_open(g_fb, 123), 0);              # ... and one byte short of it
+    put_u16(g_fb, 4, 1000);
+    check(rekha_font_open(g_fb, len), 0);              # numTables past EOF
+    put_u16(g_fb, 4, 7);
+    put_u32(g_fb, 0, 0x4F54544F);
+    check(rekha_font_open(g_fb, len), 0);              # 'OTTO'
+    # The null font through the whole sweep: every entry point, identically under A and B.
+    g_sec = "R-19 null handle sweep";
+    memcpy(g_fbuf + HB_GUARD, g_fb, len);
+    check(hb_diff(len, 64, 384, 97), 1);
+    check(hb_clean(), 1);
+    check(g_st_opened, 0);
+    check(g_st_decoded, 0);
+    return 0;
+}
+
+fn t_baseline(): i64 {
+    g_sec = "baseline";
+    fb_reset();
+    fb_triangle();
+    var c = fb_comp_begin();
+    fb_comp(HB_XY, 0, 100, 200);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    check(f != 0, 1);
+    check(g_st_decoded, 2);
+    check(hb_cost(f, 0), 112);                         # 48 + 8 + 3 x 17, aligned
+    check(rekha_outline_n_points(g_o), 3);
+    check(hb_verbs(g_o), 4);
+    check(hb_cost(f, c), 232);                         # child 112 + 8 slot + merged 112
+    check(load64(rekha_outline_xs(g_o)), 110);
+    check(load64(rekha_outline_ys(g_o)), 210);
+    check(rekha_char_to_glyph(f, 66), 1);
+    check(rekha_advance_width(f, 1), 510);
+    return 0;
+}
+
+# R-01: endPtsOfContours that do not strictly increase — an early endPt past n_points walked emit
+# off the point arrays. Each is EMPTY, for the 48 B of an empty record.
+fn t_r01(): i64 {
+    g_sec = "R-01 endPts";
+    fb_reset();
+    fb_triangle();
+    var a = fb_simple2(300, 2, 3);
+    var b = fb_simple2(65533, 1, 2);
+    var e = fb_simple2(2, 2, 3);
+    var ok = fb_simple2(1, 2, 3);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    check(hb_cost(f, a), 48);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_verbs(g_o), 0);
+    check(hb_cost(f, b), 48);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(hb_verbs(g_o), 0);
+    check(hb_cost(f, e), 48);
+    check(rekha_outline_n_contours(g_o), 0);
+    # control: [1, 2] is valid — two contours, 3 points, 3 + 2 verbs
+    check(hb_cost(f, ok), 120);                        # 48 + 16 + 51 = 115, aligned
+    check(rekha_outline_n_contours(g_o), 2);
+    check(rekha_outline_n_points(g_o), 3);
+    check(hb_verbs(g_o), 5);
+    return 0;
+}
+
+# C-01: the point count. endPt 65535 declares 65,536 points with two flag bytes; before 0.3.11 that
+# allocated ~1.18 MB. Refused before any allocation: np > REKHA_COMPOSITE_MAXP, or more points than
+# the remaining bytes could carry as flags (bytes x 128 + 1).
+fn t_c01(): i64 {
+    g_sec = "C-01 point count";
+    fb_reset();
+    fb_triangle();
+    var huge = fb_simple_seq(1, 65535, 256);
+    var thin = fb_simple_seq(1, 4095, 256);
+    var full = fb_simple_seq(1, 4095, 4096);
+    var over = fb_simple_seq(1, 4096, 4097);
+    var two = fb_simple_seq(1, 65535, 2);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    check(hb_cost(f, huge), 48);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, thin), 48);                       # 4,096 points in 2 flag bytes: 2 x 128 + 1
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, two), 48);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, over), 48);                       # 4,097 points, honestly encoded: over the cap
+    check(rekha_outline_n_points(g_o), 0);
+    # the cap itself decodes: one block of 48 + 8 + 4096 x 17 = 69,688 B, 4,097 verbs
+    check(hb_cost(f, full), 69688);
+    check(rekha_outline_n_points(g_o), 4096);
+    check(rekha_outline_n_contours(g_o), 1);
+    check(hb_verbs(g_o), 4097);
+    return 0;
+}
+
+# R-03: a composite's merged outline past REKHA_COMPOSITE_MAXP used to store contour ends >= n_points.
+# Rejected (empty), never clamped.
+fn t_r03(): i64 {
+    g_sec = "R-03 merge points";
+    fb_reset();
+    fb_triangle();
+    var big = fb_simple_seq(1, 4095, 4096);
+    var over = fb_simple_seq(1, 4096, 4097);
+    var c_big = fb_comp_begin();
+    fb_comp(HB_XY, big, 0, 0);
+    var c_over = fb_comp_begin();
+    fb_comp(HB_XY, over, 0, 0);
+    var c_sum = fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE, big, 0, 0);
+    fb_comp(HB_XY, 0, 0, 0);
+    var c_sum2 = fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE, 0, 0, 0);
+    fb_comp(HB_XY, big, 0, 0);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    check(hb_cost(f, c_big), 139384);                  # 4,096 merged points: child + 8 + merged
+    check(rekha_outline_n_points(g_o), 4096);
+    check(hb_cost(f, c_over), 104);                    # the child is refused: 48 + 8 + 48
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, c_sum), 69864);                   # 4,096 + 3: 69,688 + 112 + 16 + 48
+    check(rekha_outline_n_points(g_o), 0);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(hb_cost(f, c_sum2), 69864);
+    check(rekha_outline_n_points(g_o), 0);
+    return 0;
+}
+
+# R-03 (contours): past REKHA_COMPOSITE_MAXC (128) a composite is rejected. A SIMPLE glyph is not
+# bound by it.
+fn t_maxc(): i64 {
+    g_sec = "R-03 merge contours";
+    fb_reset();
+    var c100 = fb_simple_seq(100, 99, 100);
+    var c64 = fb_simple_seq(64, 63, 64);
+    var c129 = fb_simple_seq(129, 128, 129);
+    var m200 = fb_comp_rep(c100, 2);
+    var m128 = fb_comp_rep(c64, 2);
+    var m129 = fb_comp_rep(c129, 1);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    hb_cost(f, m200);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    hb_cost(f, m128);
+    check(rekha_outline_n_contours(g_o), 128);
+    check(rekha_outline_n_points(g_o), 128);
+    check(hb_verbs(g_o), 256);                         # 128 one-point contours: moveto + close
+    hb_cost(f, c129);
+    check(rekha_outline_n_contours(g_o), 129);
+    hb_cost(f, m129);
+    check(rekha_outline_n_contours(g_o), 0);
+    return 0;
+}
+
+# R-02: a composite whose N components reference ITSELF. Before 0.3.11 N = 8 decoded 8^5 bodies and
+# faulted on exhaustion. Now the first child is a gid already on its component path: the load
+# ABORTS, and the abort is sticky — even a triangle merged before the self-reference is dropped.
+fn t_r02(): i64 {
+    g_sec = "R-02 self reference";
+    fb_reset();
+    fb_triangle();
+    var n = 1;
+    while (n <= 8) {
+        var gid = fb_comp_begin();
+        var i = 0;
+        while (i < n) {
+            var fl = HB_XY;
+            if (i < n - 1) { fl = fl | HB_MORE; }
+            fb_comp(fl, gid, 0, 0);
+            i = i + 1;
+        }
+        n = n + 1;
+    }
+    var tri_self = fb_comp_begin();                   # gid 9: [triangle, itself]
+    fb_comp(HB_XY | HB_MORE, 0, 0, 0);
+    fb_comp(HB_XY, tri_self, 0, 0);
+    var outer = fb_comp_begin();                      # gid 10: [gid 9]
+    fb_comp(HB_XY, tri_self, 0, 0);
+    var cyc_a = fb_comp_begin();                      # gids 11 <-> 12
+    fb_comp(HB_XY, cyc_a + 1, 0, 0);
+    var cyc_b = fb_comp_begin();
+    fb_comp(HB_XY, cyc_a, 0, 0);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    n = 1;
+    while (n <= 8) {
+        # n x 8 B of component slots + the abort's empty record + the composite's empty record
+        check(hb_cost(f, n), n * 8 + 96);
+        check(rekha_outline_n_contours(g_o), 0);
+        n = n + 1;
+    }
+    check(hb_cost(f, tri_self), 16 + 112 + 96);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, outer), 8 + 16 + 112 + 144);
+    check(rekha_outline_n_points(g_o), 0);
+    hb_cost(f, cyc_a);
+    check(rekha_outline_n_points(g_o), 0);
+    hb_cost(f, cyc_b);
+    check(rekha_outline_n_points(g_o), 0);
+    return 0;
+}
+
+# C-02: ACYCLIC fan-out — glyph 4 -> 30 x glyph 2 -> 30 x glyph 1. No gid repeats on any path, so
+# cycle detection never fires; before 0.3.11 glyph 4 decoded 900 leaves. The shared load budget
+# (REKHA_GLYPH_MAXLOADS = 64) trips on the THIRD glyph-2 child: the whole load is empty.
+# MEASURED 11,184 B: root slots 240 + 2 x (240 + 30 x 112 + merged 1,824) + 2 empty records.
+# ⚠ 900 contours would also break REKHA_COMPOSITE_MAXC, so that outline is empty either way and its
+# EXACT pool cost is what pins the budget (163,008 B with the load cap lifted). glyph 8 -> 8 x
+# glyph 7 -> 8 x triangle fits every merge cap (64 contours, 192 points) and still needs 73 loads:
+# only the budget empties it. MEASURED 10,520 B: 64 + 7 x (64 + 8 x 112 + merged 520) + 2 empty
+# records. The heavy variant trips REKHA_GLYPH_MAXPOINTS_TOTAL instead: 4 x 4,096 points fit, the
+# 5th child aborts. MEASURED 279,088 B: 240 + 4 x 69,688 + 2 empty records.
+fn t_c02(): i64 {
+    g_sec = "C-02 acyclic fan-out";
+    fb_reset();
+    fb_triangle();
+    var leaf = fb_triangle();
+    var mid = fb_comp_rep(leaf, 30);
+    fb_glyph();
+    var top = fb_comp_rep(mid, 30);
+    var heavy = fb_simple_seq(1, 4095, 4096);
+    var hmid = fb_comp_rep(heavy, 30);
+    var mid8 = fb_comp_rep(leaf, 8);
+    var top8 = fb_comp_rep(mid8, 8);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    check(top, 4);
+    check(hb_cost(f, mid), 5424);
+    check(rekha_outline_n_contours(g_o), 30);
+    check(rekha_outline_n_points(g_o), 90);
+    check(load64(rekha_outline_xs(g_o) + 87 * 8), 300);   # 30th triangle: (10,10) + (290, 0)
+    check(hb_cost(f, top), 11184);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_verbs(g_o), 0);
+    check(hb_cost(f, hmid), 279088);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, mid8), 1480);                     # 64 + 8 x 112 + merged 520
+    check(rekha_outline_n_contours(g_o), 8);
+    check(hb_cost(f, top8), 10520);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, top) <= HB_LOAD_POOL_MAX, 1);
+    return 0;
+}
+
+# Depth: a chain of single-component composites. Leaf at depth 5 (REKHA_COMPOSITE_MAXDEPTH) decodes;
+# at depth 6 the load aborts.
+fn t_depth(): i64 {
+    g_sec = "depth";
+    fb_reset();
+    fb_triangle();
+    var k = 1;
+    while (k <= 6) {
+        fb_comp_begin();
+        fb_comp(HB_XY, k + 1, 1, 0);
+        k = k + 1;
+    }
+    fb_triangle();
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    check(hb_cost(f, 2), 112 + 5 * 120);               # depth 5: leaf + 5 x (slot + merged)
+    check(rekha_outline_n_points(g_o), 3);
+    check(load64(rekha_outline_xs(g_o)), 15);          # five offsets of (1, 0)
+    check(hb_cost(f, 1), 6 * 8 + 7 * 48);              # depth 6: slots + abort + 6 empty records
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, 6), 232);
+    check(rekha_outline_n_points(g_o), 3);
+    return 0;
+}
+
+# R-04: head / maxp whose DECLARED length does not cover the fixed field, placed at EOF so the field
+# itself lies in the guard. Cached as absent: unitsPerEm 0, loca format 0, numGlyphs 0.
+fn t_r04(): i64 {
+    g_sec = "R-04 head/maxp at EOF";
+    fb_reset();
+    fb_triangle();
+    fb_comp_begin();
+    fb_comp(HB_XY, 0, 100, 200);
+    var len0 = fb_build(g_fb);
+    fb_entry(g_fb, HB_E_HEAD, len0, 0);
+    var f = hb_corpus(g_fb, len0);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), len0);
+    check(rekha_units_per_em(f), 0);
+    check(rekha_loca_format(f), 0);
+    check(rekha_glyph_advance_px(f, 1, 16), 0);
+    check(rekha_char_advance_fx(f, 66, 16), 0);
+    fb_build(g_fb);
+    fb_entry(g_fb, HB_E_HEAD, len0 - 2, 2);
+    f = hb_corpus(g_fb, len0);
+    check(rekha_units_per_em(f), 0);
+    fb_build(g_fb);
+    var len = fb_to_eof(g_fb, len0, HB_E_HEAD, 53);
+    f = hb_corpus(g_fb, len);
+    check(rekha_units_per_em(f), 0);
+    check(rekha_loca_format(f), 0);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_HEAD, 54);        # control: exactly long enough, at EOF
+    f = hb_corpus(g_fb, len);
+    check(rekha_units_per_em(f), 1000);
+    check(rekha_loca_format(f), 1);
+    check(g_st_decoded, 2);
+
+    fb_build(g_fb);
+    fb_entry(g_fb, HB_E_MAXP, len0, 0);
+    f = hb_corpus(g_fb, len0);
+    check(rekha_glyph_count(f), 0);
+    check(hb_cost(f, 0), 48);
+    check(rekha_outline_n_points(g_o), 0);
+    check(rekha_char_to_glyph(f, 66), 1);              # no maxp: the numGlyphs cap is off
+    check(g_st_decoded, 0);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_MAXP, 5);
+    f = hb_corpus(g_fb, len);
+    check(rekha_glyph_count(f), 0);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_MAXP, 6);
+    f = hb_corpus(g_fb, len);
+    check(rekha_glyph_count(f), 2);
+    return 0;
+}
+
+# R-21: hhea shorter than its 36-byte fixed part, ending at EOF.
+fn t_hhea(): i64 {
+    g_sec = "R-21 hhea extent";
+    fb_reset();
+    fb_triangle();
+    fb_triangle();
+    var len0 = fb_build(g_fb);
+    var len = fb_to_eof(g_fb, len0, HB_E_HHEA, 35);
+    var f = hb_corpus(g_fb, len);
+    check(rekha_num_h_metrics(f), 0);
+    check(rekha_ascender(f), 0);
+    check(rekha_descender(f), 0);
+    check(rekha_line_gap(f), 0);
+    check(rekha_advance_width(f, 1), 0);
+    check(rekha_char_advance_px(f, 65, 16), 0);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_HHEA, 36);
+    f = hb_corpus(g_fb, len);
+    check(rekha_num_h_metrics(f), 2);
+    check(rekha_ascender(f), 800);
+    check(rekha_descender(f), 0 - 200);
+    check(rekha_advance_width(f, 1), 510);
+    return 0;
+}
+
+# R-22: hmtx shorter than numberOfHMetrics x 4, ending at EOF.
+fn t_hmtx(): i64 {
+    g_sec = "R-22 hmtx extent";
+    fb_reset();
+    fb_triangle();
+    fb_triangle();
+    fb_triangle();
+    var len0 = fb_build(g_fb);
+    var len = fb_to_eof(g_fb, len0, HB_E_HMTX, 7);
+    var f = hb_corpus(g_fb, len);
+    check(rekha_advance_width(f, 0), 500);
+    check(rekha_advance_width(f, 1), 0);
+    check(rekha_advance_width(f, 2), 0);
+    check(rekha_advance_width(f, 99), 0);
+    check(rekha_glyph_advance_fx(f, 2, 16), 0);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_HMTX, 8);
+    f = hb_corpus(g_fb, len);
+    check(rekha_advance_width(f, 1), 510);
+    check(rekha_advance_width(f, 2), 0);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_HMTX, 12);
+    f = hb_corpus(g_fb, len);
+    check(rekha_advance_width(f, 2), 520);
+    check(rekha_advance_width(f, 99), 520);            # past numberOfHMetrics: the last metric
+    check(rekha_glyph_advance_fx(f, 2, 16), 545260);   # (520 x 16 x 65536 + 500) / 1000
+    return 0;
+}
+
+# R-23: loca shorter than (gid + 2) x 4, glyph spans past glyf, loca formats other than 0/1.
+fn t_loca_glyf(): i64 {
+    g_sec = "R-23 loca/glyf extent";
+    fb_reset();
+    fb_triangle();
+    fb_triangle();
+    fb_triangle();
+    var len0 = fb_build(g_fb);
+    var sp: i64[2];
+    var len = fb_to_eof(g_fb, len0, HB_E_LOCA, 12);
+    var f = hb_corpus(g_fb, len);
+    check(rekha_glyf_span(f, 1, &sp), 1);
+    check(load64(&sp + 8), 26);
+    check(rekha_glyf_span(f, 2, &sp), 0);
+    check(hb_cost(f, 2), 48);
+    check(rekha_outline_n_points(g_o), 0);
+    check(g_st_decoded, 2);
+    fb_build(g_fb);
+    len = fb_to_eof(g_fb, len0, HB_E_LOCA, 16);
+    f = hb_corpus(g_fb, len);
+    check(rekha_glyf_span(f, 2, &sp), 1);
+    check(g_st_decoded, 3);
+
+    # glyf declared 10 B short, and the file cut there: glyph 2's span ends past glyf
+    fb_build(g_fb);
+    fb_entry(g_fb, HB_E_GLYF, g_t_glyf, g_gl_len - 10);
+    f = hb_corpus(g_fb, len0 - 10);
+    check(rekha_glyf_span(f, 2, &sp), 0);
+    check(load64(&sp), 0);
+    check(hb_cost(f, 2), 48);
+    check(rekha_outline_n_points(g_o), 0);
+    check(hb_cost(f, 1), 112);
+    check(rekha_outline_n_points(g_o), 3);
+    # loca pointing glyph 2's start past glyf: offsets run backwards
+    fb_build(g_fb);
+    put_u32(g_fb, g_t_loca + 8, 1000);
+    f = hb_corpus(g_fb, len0);
+    check(rekha_glyf_span(f, 2, &sp), 0);
+    check(rekha_glyf_span(f, 1, &sp), 0);              # glyph 1 now ends at 1,000 > glyf length
+    # loca cut at EOF inside glyph 2's END entry, loca[3]. The long loca's 4 B above the long test are
+    # the case the sentinel cannot see: 0xA5A5A5A5 / 0x5A5A5A5A both fail the glyf-length test. So
+    # here glyf is 90,104 B (a 90,000 B padded 4th glyph) and the cut is placed where a guard value
+    # stays below it: SHORT loca cut after loca[2] reads 0xA5A5 x 2 = 84,810 / 0x5A5A x 2 = 46,260;
+    # LONG loca cut 2 B into loca[3] reads 0x0000A5A5 = 42,405 / 0x00005A5A = 23,130. Only the
+    # loca-extent test refuses glyph 2 — without it the span length is the sentinel.
+    var short = 1;
+    while (short >= 0) {
+        fb_reset();
+        g_short = short;
+        fb_triangle();
+        fb_triangle();
+        fb_triangle();
+        fb_triangle();
+        var pad = 0;
+        while (pad < 90000) {
+            gl_u8(0);
+            pad = pad + 1;
+        }
+        var slen0 = fb_build(g_fb);
+        check(slen0, g_t_glyf + 90104);
+        var cut = 14;
+        var whole = 20;
+        if (short != 0) {
+            cut = 6;
+            whole = 10;
+        }
+        len = fb_to_eof(g_fb, slen0, HB_E_LOCA, cut);
+        f = hb_corpus(g_fb, len);
+        check(rekha_loca_format(f), 1 - short);
+        check(rekha_glyf_span(f, 1, &sp), 1);
+        check(load64(&sp + 8), 26);
+        check(rekha_glyf_span(f, 2, &sp), 0);
+        check(load64(&sp + 8), 0);
+        check(rekha_glyf_span(f, 3, &sp), 0);
+        fb_build(g_fb);
+        len = fb_to_eof(g_fb, slen0, HB_E_LOCA, whole);  # control: the whole loca, at EOF
+        f = hb_corpus(g_fb, len);
+        check(rekha_glyf_span(f, 2, &sp), 1);
+        check(load64(&sp + 8), 26);
+        check(rekha_glyf_span(f, 3, &sp), 1);
+        check(load64(&sp + 8), 90026);
+        check(g_st_decoded, 4);
+        short = short - 1;
+    }
+    # indexToLocFormat 2
+    fb_reset();
+    fb_triangle();
+    fb_triangle();
+    fb_triangle();
+    fb_build(g_fb);
+    put_u16(g_fb, 124 + 50, 2);
+    f = hb_corpus(g_fb, len0);
+    check(rekha_loca_format(f), 2);
+    check(rekha_glyf_span(f, 0, &sp), 0);
+    check(g_st_decoded, 0);
+    return 0;
+}
+
+# R-05: cmap bounded by its own extent. maxp is removed so the numGlyphs cap cannot mask a glyph id
+# read from the guard.
+fn t_cmap(): i64 {
+    g_sec = "R-05 cmap extent";
+    fb_reset();
+    fb_triangle();
+    fb_triangle();
+    fb_triangle();
+    var len0 = fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    var len = fb_to_eof(g_fb, len0, HB_E_CMAP, 44);
+    var f = hb_corpus(g_fb, len);
+    check(rekha_glyph_count(f), 0);
+    check(rekha_char_to_glyph(f, 66), 1);              # control: at EOF, exactly long enough
+    check(rekha_char_to_glyph(f, 67), 2);
+    check(rekha_char_to_glyph(f, 68), 0);
+    fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    len = fb_to_eof(g_fb, len0, HB_E_CMAP, 43);        # idRangeOffset[1] ends 1 B past cmap
+    f = hb_corpus(g_fb, len);
+    check(rekha_char_to_glyph(f, 66), 0);
+    fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    put_u16(g_fb, g_t_cmap + 12 + 6, 400);             # segCountX2 400: arrays far past cmap
+    len = fb_to_eof(g_fb, len0, HB_E_CMAP, 44);
+    f = hb_corpus(g_fb, len);
+    check(rekha_char_to_glyph(f, 66), 0);
+    check(rekha_char_to_glyph(f, 65535), 0);
+    fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    put_u16(g_fb, g_t_cmap + 2, 65535);                # 65,535 encoding records in 44 B
+    len = fb_to_eof(g_fb, len0, HB_E_CMAP, 44);
+    f = hb_corpus(g_fb, len);
+    check(rekha_char_to_glyph(f, 66), 1);
+    fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    put_u32(g_fb, g_t_cmap + 8, 0xFFFFFF00);           # subtable offset past cmap
+    len = fb_to_eof(g_fb, len0, HB_E_CMAP, 44);
+    f = hb_corpus(g_fb, len);
+    check(rekha_char_to_glyph(f, 66), 0);
+    fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    put_u32(g_fb, g_t_cmap + 8, 42);                   # subtable header straddling the end
+    len = fb_to_eof(g_fb, len0, HB_E_CMAP, 44);
+    f = hb_corpus(g_fb, len);
+    check(rekha_char_to_glyph(f, 66), 0);
+    # glyphIdArray: segment 0 idDelta 0, idRangeOffset 2 -> cp 65 reads idRangeOffset[1] (0),
+    # cp 66 the one glyphIdArray entry (1) at cmap+44, cp 67 cmap+46 = past the 46 B cmap = EOF.
+    fb_build(g_fb);
+    fb_kill(g_fb, HB_E_MAXP);
+    put_u16(g_fb, g_t_cmap + 12 + 24, 0);
+    put_u16(g_fb, g_t_cmap + 12 + 28, 2);
+    len = fb_to_eof(g_fb, len0, HB_E_CMAP, 46);
+    put_u16(g_fb, len - 2, 1);
+    f = hb_corpus(g_fb, len);
+    check(rekha_char_to_glyph(f, 65), 0);
+    check(rekha_char_to_glyph(f, 66), 1);
+    check(rekha_char_to_glyph(f, 67), 0);
+    return 0;
+}
+
+# R-20: a table overlapping the offset table / directory is invalid; offset == dir_end is allowed.
+fn t_r20(): i64 {
+    g_sec = "R-20 directory overlap";
+    fb_reset();
+    fb_triangle();
+    var len = fb_build(g_fb);
+    fb_entry(g_fb, HB_E_MAXP, 60, 32);
+    var f = hb_corpus(g_fb, len);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 0);
+    check(rekha_glyph_count(f), 0);
+    fb_build(g_fb);
+    fb_entry(g_fb, HB_E_HEAD, 0, 54);
+    f = hb_corpus(g_fb, len);
+    check(rekha_find_table(f, REKHA_TAG_HEAD), 0);
+    check(rekha_units_per_em(f), 0);
+    fb_build(g_fb);
+    fb_entry(g_fb, HB_E_MAXP, 123, 6);
+    f = hb_corpus(g_fb, len);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 0);
+    fb_build(g_fb);
+    fb_entry(g_fb, HB_E_MAXP, 124, 6);
+    f = hb_corpus(g_fb, len);
+    check(rekha_find_table(f, REKHA_TAG_MAXP), 124);
+    return 0;
+}
+
+# Every proper prefix of a glyph, cut at EOF, loads EMPTY; the whole glyph decodes. Target glyph 1
+# follows a triangle and is glyf's last glyph.
+fn t_prefix_run(full, want_np): i64 {
+    var len0 = fb_build(g_fb);
+    var start = load64(g_loca + 8);
+    var bad = 0;
+    var l = 0;
+    while (l <= full) {
+        fb_build(g_fb);
+        fb_entry(g_fb, HB_E_GLYF, g_t_glyf, start + l);
+        put_u32(g_fb, g_t_loca + 8, start + l);
+        var len = g_t_glyf + start + l;
+        var f = hb_corpus(g_fb, len);
+        hb_cost(f, 1);
+        var np = rekha_outline_n_points(g_o);
+        if (l < full) {
+            if (np != 0) { bad = bad + 1; }
+        } else {
+            if (np != want_np) { bad = bad + 1; }
+        }
+        l = l + 1;
+    }
+    check(len0, g_t_glyf + start + full);
+    check(bad, 0);
+    return 0;
+}
+
+fn t_prefix(): i64 {
+    g_sec = "truncated simple glyph";
+    fb_reset();
+    fb_triangle();
+    fb_triangle();
+    t_prefix_run(26, 3);
+    g_sec = "truncated composite glyph";
+    fb_reset();
+    fb_triangle();
+    fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE | HB_SCALE1, 0, 5, 6);     # words + scale: 10 B
+    gl_u16(0x4000);
+    gl_u16(HB_XY | HB_MORE | HB_XYSCALE);              # byte args + x/y scale: 10 B
+    gl_u16(0);
+    gl_u8(7);
+    gl_u8(8);
+    gl_u16(0x4000);
+    gl_u16(0x4000);
+    fb_comp(HB_XY | HB_TWO, 0, 0, 0);                  # words + 2x2: 16 B
+    gl_u16(0x4000);
+    gl_u16(0);
+    gl_u16(0);
+    gl_u16(0x4000);
+    t_prefix_run(46, 9);
+    return 0;
+}
+
+# Point matching (ARGS_ARE_XY_VALUES clear): arg1 indexes the points merged SO FAR, arg2 the child's
+# points, both unsigned. Out of range -> empty.
+fn t_pointmatch(): i64 {
+    g_sec = "point matching";
+    fb_reset();
+    fb_triangle();
+    var good = fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE, 0, 0, 0);
+    fb_comp(0, 0, 2, 0);
+    var pa = fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE, 0, 0, 0);
+    fb_comp(0, 0, 3, 0);
+    var pb = fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE, 0, 0, 0);
+    fb_comp(0, 0, 0, 3);
+    var first = fb_comp_begin();
+    fb_comp(0, 0, 0, 0);
+    var wide = fb_comp_begin();
+    fb_comp(HB_XY | HB_MORE, 0, 0, 0);
+    fb_comp(0, 0, 65535, 65535);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    hb_cost(f, good);
+    check(rekha_outline_n_points(g_o), 6);
+    check(load64(rekha_outline_xs(g_o) + 24), 50);     # child point 0 moved onto merged point 2
+    check(load64(rekha_outline_ys(g_o) + 24), 90);
+    hb_cost(f, pa);
+    check(rekha_outline_n_points(g_o), 0);
+    hb_cost(f, pb);
+    check(rekha_outline_n_points(g_o), 0);
+    hb_cost(f, first);
+    check(rekha_outline_n_points(g_o), 0);
+    hb_cost(f, wide);
+    check(rekha_outline_n_points(g_o), 0);
+    return 0;
+}
+
+# A hook that refuses every block from the K-th on. rekha_load_glyph must return 0 or EXACTLY the
+# unrefused outline — never a partial one, never a fault. rekha_font_open under refusal returns 0.
+# Exactly the K below the load's block count return 0: 1 block for the triangle, 32 for glyph 2
+# (30 components), 67 for glyph 4 (the budget abort). sadish is not exercised under refusal:
+# sd_point_new stores through its block unchecked (glyf.cyr header).
+fn t_refuse_glyph(f, gid, kmax, want_zeros): i64 {
+    hb_sentinel(g_which);
+    var ref = hb_odigest(rekha_load_glyph(f, gid));
+    var zeros = 0;
+    var bad = 0;
+    var k = 0;
+    while (k <= kmax) {
+        hb_reset();
+        g_pool_refuse_at = k;
+        var o = rekha_load_glyph(f, gid);
+        g_pool_refuse_at = 0 - 1;
+        if (o == 0) {
+            zeros = zeros + 1;
+        } else {
+            if (hb_odigest(o) != ref) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    check(bad, 0);
+    check(zeros, want_zeros);
+    return 0;
+}
+
+fn t_refuse(): i64 {
+    g_sec = "refusing hook";
+    fb_reset();
+    fb_triangle();
+    var leaf = fb_triangle();
+    var mid = fb_comp_rep(leaf, 30);
+    fb_glyph();
+    var top = fb_comp_rep(mid, 30);
+    var len = fb_build(g_fb);
+    var f = hb_corpus(g_fb, len);
+    g_st_viol = 0;
+    t_refuse_glyph(f, 0, 4, 1);
+    t_refuse_glyph(f, mid, 40, 32);
+    t_refuse_glyph(f, top, 72, 67);
+    check(g_st_viol, 0);
+    hb_reset();
+    g_pool_refuse_at = 0;
+    check(rekha_font_open(g_fbuf + HB_GUARD, len), 0);
+    g_pool_refuse_at = 0 - 1;
+    return 0;
+}
+
+# The pristine face under the full sweep. MEASURED on LiberationSans 2.1.5: 2,620 glyphs, 2,327
+# nonzero cmap mappings over U+0000..U+FFFF, 71,785 points over all gids, 1,076 composites of which
+# 946 have more than one contour.
+fn t_face(): i64 {
+    g_sec = "face";
+    var n = rekha_face_default_len();
+    var buf = g_fbuf + HB_GUARD;
+    check(rekha_face_default_copy(buf, HB_FCAP), n);
+    check(rekha_face_default_verify(buf, n), 1);
+    check(hb_diff(n, 4000, 1024, 7), 1);
+    check(hb_clean(), 1);
+    check(g_st_opened, 1);
+    check(g_st_decoded, HB_FACE_DECODED);
+    check(g_st_points, 71785);
+    check(g_st_comp, 1076);
+    check(g_st_comp_multi, 946);
+    g_face_pool_max = g_st_pool_max;
+    g_face_verbs_max = g_st_verbs_max;
+    var f = hb_font(n);
+    check(rekha_glyph_count(f), 2620);
+    var mapped = 0;
+    var cp = 0;
+    while (cp < 65536) {
+        if (rekha_char_to_glyph(f, cp) != 0) { mapped = mapped + 1; }
+        cp = cp + 1;
+    }
+    check(mapped, 2327);
+    return 0;
+}
+
+var HB_FACE_DECODED = 2603;
+var g_face_pool_max = 0;
+var g_face_verbs_max = 0;
+
+# ================================================================
+# Mutation loop over the face.
+# ================================================================
+var HB_SEED0 = 1;
+var HB_MUTANTS = 120;
+var HB_UNDO_CAP = 256;
+
+var g_rng = 1;
+var g_mb = 0;
+var g_mlen = 0;
+var g_undo = 0;
+var g_undo_n = 0;
+var g_reg = 0;                        # i64[2 x 7]: pristine (offset, length) per HB_E_* table
+var g_spans = 0;                      # i64[2 x ng]: pristine non-empty glyph spans
+var g_nspans = 0;
+var g_ntables = 0;
+
+fn hb_srand(s): i64 {
+    g_rng = s * 2862933555777941757 + 3037000493;
+    hb_rand();
+    hb_rand();
+    return 0;
+}
+
+fn hb_rand(): i64 {
+    g_rng = g_rng * 6364136223846793005 + 1442695040888963407;
+    return (g_rng >> 33) & 0x7FFFFFFF;
+}
+
+fn hb_below(n): i64 {
+    if (n <= 0) { return 0; }
+    return hb_rand() % n;
+}
+
+fn mu_set8(off, v): i64 {
+    if (off < 0) { return 0; }
+    if (off >= g_mlen) { return 0; }
+    if (g_undo_n >= HB_UNDO_CAP) { return 0; }
+    store64(g_undo + g_undo_n * 16, off);
+    store64(g_undo + g_undo_n * 16 + 8, load8(g_mb + off));
+    g_undo_n = g_undo_n + 1;
+    store8(g_mb + off, v & 255);
+    return 0;
+}
+
+fn mu_set16(off, v): i64 {
+    mu_set8(off, (v >> 8) & 255);
+    mu_set8(off + 1, v & 255);
+    return 0;
+}
+
+fn mu_set32(off, v): i64 {
+    mu_set16(off, (v >> 16) & 65535);
+    mu_set16(off + 2, v & 65535);
+    return 0;
+}
+
+fn mu_undo(): i64 {
+    while (g_undo_n > 0) {
+        g_undo_n = g_undo_n - 1;
+        store8(g_mb + load64(g_undo + g_undo_n * 16), load64(g_undo + g_undo_n * 16 + 8));
+    }
+    return 0;
+}
+
+fn mu_int8(): i64 {
+    var r = hb_below(6);
+    if (r == 0) { return 0; }
+    if (r == 1) { return 0xFF; }
+    if (r == 2) { return 0x7F; }
+    if (r == 3) { return 0x80; }
+    if (r == 4) { return 1; }
+    return hb_below(256);
+}
+
+fn mu_int16(): i64 {
+    var r = hb_below(8);
+    if (r == 0) { return 0; }
+    if (r == 1) { return 0xFFFF; }
+    if (r == 2) { return 0x7FFF; }
+    if (r == 3) { return 0x8000; }
+    if (r == 4) { return 1; }
+    if (r == 5) { return 0xFFFE; }
+    if (r == 6) { return hb_below(64); }
+    return hb_below(65536);
+}
+
+fn mu_at(off): i64 {
+    var kind = hb_below(5);
+    if (kind == 0) {
+        mu_set8(off, load8(g_mb + off) ^ (1 << hb_below(8)));
+    } elif (kind == 1) {
+        mu_set8(off, mu_int8());
+    } elif (kind == 2) {
+        mu_set16(off, mu_int16());
+    } elif (kind == 3) {
+        mu_set16(off, mu_int16());
+        mu_set16(off + 2, mu_int16());
+    } else {
+        var n = 1 + hb_below(8);
+        var i = 0;
+        while (i < n) {
+            mu_set8(off + i, hb_below(256));
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+fn mu_in(idx): i64 {
+    return load64(g_reg + idx * 16) + hb_below(load64(g_reg + idx * 16 + 8));
+}
+
+fn mu_mutant(seed): i64 {
+    hb_srand(seed);
+    var nm = 1 + hb_below(6);
+    var m = 0;
+    while (m < nm) {
+        var r = hb_below(100);
+        var off = 0;
+        if (r < 12) {
+            var ent = 12 + hb_below(g_ntables) * 16;
+            off = ent + hb_below(16);
+            if (hb_below(2) == 0) { off = ent + 8 + hb_below(2) * 4; }
+            if (hb_below(8) == 0) { off = hb_below(12); }
+            if (hb_below(4) == 0) {
+                # a table flush against EOF with a short (or zero) declared length
+                var nl = g_mlen - hb_below(64);
+                var tl = g_mlen - nl;
+                if (hb_below(2) == 0) { tl = 0; }
+                mu_set32(ent + 8, nl);
+                mu_set32(ent + 12, tl);
+                off = 0 - 1;
+            }
+        } elif (r < 20) {
+            var which = hb_below(3);
+            if (which == 0) {
+                off = mu_in(HB_E_HEAD);
+                if (hb_below(2) == 0) { off = load64(g_reg + HB_E_HEAD * 16) + 18; }
+                if (hb_below(3) == 0) { off = load64(g_reg + HB_E_HEAD * 16) + 50; }
+            } elif (which == 1) {
+                off = mu_in(HB_E_MAXP);
+                if (hb_below(2) == 0) { off = load64(g_reg + HB_E_MAXP * 16) + 4; }
+            } else {
+                off = mu_in(HB_E_HHEA);
+                if (hb_below(2) == 0) { off = load64(g_reg + HB_E_HHEA * 16) + 34; }
+            }
+        } elif (r < 28) {
+            off = mu_in(HB_E_HMTX);
+        } elif (r < 42) {
+            off = mu_in(HB_E_LOCA);
+        } elif (r < 85) {
+            var s = hb_below(g_nspans);
+            var st = load64(g_spans + s * 16);
+            var gl = load64(g_spans + s * 16 + 8);
+            if (hb_below(3) != 0) {
+                if (gl > 48) { gl = 48; }
+            }
+            off = st + hb_below(gl);
+        } else {
+            off = load64(g_reg + HB_E_CMAP * 16) + hb_below(64);
+            if (hb_below(2) == 0) { off = mu_in(HB_E_CMAP); }
+        }
+        if (off >= 0) { mu_at(off); }
+        m = m + 1;
+    }
+    return 0;
+}
+
+fn mu_region(f, idx, tag): i64 {
+    var cell: i64[1];
+    store64(g_reg + idx * 16, rekha_find_table_len(f, tag, &cell));
+    store64(g_reg + idx * 16 + 8, load64(&cell));
+    return 0;
+}
+
+fn t_mutate(): i64 {
+    g_sec = "face mutation";
+    var n = rekha_face_default_len();
+    g_mb = g_fbuf + HB_GUARD;
+    g_mlen = n;
+    check(rekha_face_default_copy(g_mb, HB_FCAP), n);
+    var f = hb_font(n);
+    g_ntables = rekha_font_num_tables(f);
+    mu_region(f, HB_E_HEAD, REKHA_TAG_HEAD);
+    mu_region(f, HB_E_MAXP, REKHA_TAG_MAXP);
+    mu_region(f, HB_E_HHEA, REKHA_TAG_HHEA);
+    mu_region(f, HB_E_HMTX, REKHA_TAG_HMTX);
+    mu_region(f, HB_E_CMAP, REKHA_TAG_CMAP);
+    mu_region(f, HB_E_LOCA, REKHA_TAG_LOCA);
+    mu_region(f, HB_E_GLYF, REKHA_TAG_GLYF);
+    var ng = rekha_glyph_count(f);
+    g_spans = alloc(ng * 16);
+    g_nspans = 0;
+    var sp: i64[2];
+    var gid = 0;
+    while (gid < ng) {
+        if (rekha_glyf_span(f, gid, &sp) == 1) {
+            store64(g_spans + g_nspans * 16, load64(&sp));
+            store64(g_spans + g_nspans * 16 + 8, load64(&sp + 8));
+            g_nspans = g_nspans + 1;
+        }
+        gid = gid + 1;
+    }
+    check(g_nspans > 0, 1);
+
+    var diffs = 0;
+    var dirty = 0;
+    var opened = 0;
+    var decoded = 0;
+    var points = 0;
+    var verbs = 0;
+    var pool_max = 0;
+    var verbs_max = 0;
+    var changed = 0;
+    var seed = HB_SEED0;
+    while (seed < HB_SEED0 + HB_MUTANTS) {
+        mu_mutant(seed);
+        if (g_undo_n > 0) { changed = changed + 1; }
+        if (hb_diff(n, 3000, 256, 251) == 0) {
+            diffs = diffs + 1;
+            hb_puts(2, "hostile_test: mutant seed ");
+            fmt_int_fd(2, seed);
+            hb_puts(2, " digest A != digest B (a read outside what rekha owns)\n");
+        }
+        if (hb_clean() == 0) {
+            dirty = dirty + 1;
+            hb_puts(2, "hostile_test: mutant seed ");
+            fmt_int_fd(2, seed);
+            hb_puts(2, " broke an outline guarantee, hit OOM or a work bound\n");
+        }
+        opened = opened + g_st_opened;
+        decoded = decoded + g_st_decoded;
+        points = points + g_st_points;
+        verbs = verbs + g_st_verbs;
+        if (g_st_pool_max > pool_max) { pool_max = g_st_pool_max; }
+        if (g_st_verbs_max > verbs_max) { verbs_max = g_st_verbs_max; }
+        mu_undo();
+        seed = seed + 1;
+    }
+    check(diffs, 0);
+    check(dirty, 0);
+    check(g_pool_over, 0);
+    check(pool_max <= HB_GLYPH_POOL_MAX, 1);
+    check(verbs_max <= HB_VERBS_MAX, 1);
+    check(changed, HB_MUTANTS);
+    check(opened > HB_MUTANTS / 2, 1);                 # most mutants still open: the sweep is real
+    check(decoded > 0, 1);
+    check(rekha_face_default_verify(g_mb, n), 1);      # every mutation was undone
+
+    hb_puts(1, "hostile_test: mutants ");
+    fmt_int_fd(1, HB_MUTANTS);
+    hb_puts(1, " (seeds ");
+    fmt_int_fd(1, HB_SEED0);
+    hb_puts(1, "..");
+    fmt_int_fd(1, HB_SEED0 + HB_MUTANTS - 1);
+    hb_puts(1, ") opened ");
+    fmt_int_fd(1, opened);
+    hb_puts(1, " outlines-decoded ");
+    fmt_int_fd(1, decoded);
+    hb_puts(1, " points ");
+    fmt_int_fd(1, points);
+    hb_puts(1, " verbs ");
+    fmt_int_fd(1, verbs);
+    hb_puts(1, " max-pool/glyph ");
+    fmt_int_fd(1, pool_max);
+    hb_puts(1, " max-verbs/glyph ");
+    fmt_int_fd(1, verbs_max);
+    hb_puts(1, " A/B-diffs ");
+    fmt_int_fd(1, diffs);
+    hb_puts(1, "\n");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_pool = alloc(HB_POOL_CAP);
+    g_fbuf = alloc(HB_GUARD + HB_FCAP + HB_GUARD);
+    g_fb = alloc(HB_FCAP);
+    g_gl = alloc(HB_GLCAP);
+    g_loca = alloc((HB_MAXG + 1) * 8);
+    g_undo = alloc(HB_UNDO_CAP * 16);
+    g_reg = alloc(7 * 16);
+    g_tags = alloc(HB_NTAGS * 8);
+    store64(g_tags, REKHA_TAG_HEAD);
+    store64(g_tags + 8, REKHA_TAG_MAXP);
+    store64(g_tags + 16, REKHA_TAG_HHEA);
+    store64(g_tags + 24, REKHA_TAG_HMTX);
+    store64(g_tags + 32, REKHA_TAG_CMAP);
+    store64(g_tags + 40, REKHA_TAG_LOCA);
+    store64(g_tags + 48, REKHA_TAG_GLYF);
+    store64(g_tags + 56, 0x4F532F32);                  # 'OS/2' (present in the face, unread)
+    store64(g_tags + 64, 0x7A7A7A7A);                  # absent
+    sd_alloc_set(&hb_hook);
+    hb_sentinel(0);
+
+    t_canary();
+    t_null();
+    t_baseline();
+    t_r01();
+    t_c01();
+    t_r03();
+    t_maxc();
+    t_r02();
+    t_c02();
+    t_depth();
+    t_r04();
+    t_hhea();
+    t_hmtx();
+    t_loca_glyf();
+    t_cmap();
+    t_r20();
+    t_prefix();
+    t_pointmatch();
+    t_refuse();
+    t_face();
+    t_mutate();
+    g_sec = "pool";
+    check(g_pool_over, 0);
+    sd_alloc_set(0);
+
+    hb_puts(1, "hostile_test: face max-pool/glyph ");
+    fmt_int_fd(1, g_face_pool_max);
+    hb_puts(1, " max-verbs/glyph ");
+    fmt_int_fd(1, g_face_verbs_max);
+    hb_puts(1, "; ");
+    fmt_int_fd(1, g_n);
+    hb_puts(1, " checks\n");
+    if (g_fails == 0) {
+        hb_puts(1, "hostile_test: PASS (sentinel differential + hostile corpus + face mutation)\n");
+    } else {
+        hb_puts(2, "hostile_test: FAIL\n");
+    }
+    if (g_fails > 255) { return 255; }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

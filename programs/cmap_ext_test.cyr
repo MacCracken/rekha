@@ -1,0 +1,709 @@
+# programs/cmap_ext_test.cyr — RUN test for the 0.3.11 cmap resolver, the format-4 lookup and the
+# gid-level / 16.16 advance API.
+#
+# ⭐ WHAT THIS PINS. cmap.cyr picks ONE subtable at open — the LAST (3,1) or (0,*) encoding record
+# whose subtable is format 4 — and validates its header and all four segment arrays against the cmap
+# table's DECLARED extent; a lookup then re-checks only the glyphIdArray index. Each of those rules
+# gets a pass/fail pair here: the record walk cut by the cmap length, the arrays one byte past it,
+# the glyphIdArray entry one byte past it, the selection order, and the mapped-gid >= numGlyphs rule
+# with and without maxp.
+# ⭐ THE HYBRID SEARCH IS PROVEN BY EXHAUSTION, NOT BY SAMPLES. Group I builds a 300-segment subtable
+# in code (ascending endCode, gaps, adjacent segments, random deltas, one segment in seven on the
+# glyphIdArray path with zero entries) and requires every codepoint 0..65535 to equal a plain
+# linear-scan reference written from the spec over the test's OWN segment arrays — not over the
+# bytes rekha reads. Twice: with the 0xFFFF terminator and maxp, and without either.
+# ⛔ (3,0)-ONLY FONTS MAP NOTHING. That is the coverage gap cmap.cyr documents; group D asserts it so
+# a silent fix (or a silent regression of the documented gap into a crash) shows up here.
+#
+# Base font (5 tables, directory [12,92)): head @92/54 (upem 1000) · maxp @148/6 · hhea @154/36
+# (numberOfHMetrics 8) · hmtx @192/32 · cmap @592/<per case>. The file length handed to
+# rekha_font_open is the whole 32 KB buffer, so every cmap bound below is the cmap extent's, not len's.
+# hmtx advances gid 0..7: 600 500 333 499 250 0 1000 777; bytes 190..191 (in no table) hold 0xA5A5.
+# Exit code = failed checks; each failure prints its global check number, group, got and want.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+var BUF_LEN = 32768;
+var CM = 592;
+var TAG_ZZZZ = 0x7A7A7A7A;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "cmap_ext_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# The base font with numGlyphs `ng` and a cmap of declared length `clen` (cmap bytes left zero).
+fn base(buf, ng, clen): i64 {
+    memset(buf, 0, BUF_LEN);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 5);
+    dir_entry(buf, 12, REKHA_TAG_HEAD, 92, 54);
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 148, 6);
+    dir_entry(buf, 44, REKHA_TAG_HHEA, 154, 36);
+    dir_entry(buf, 60, REKHA_TAG_HMTX, 192, 32);
+    dir_entry(buf, 76, REKHA_TAG_CMAP, CM, clen);
+    put_u16(buf, 92 + 18, 1000);
+    put_u32(buf, 148, 0x00005000);
+    put_u16(buf, 148 + 4, ng);
+    put_u16(buf, 154 + 34, 8);
+    put_u16(buf, 190, 0xA5A5);                      # 2 B in no table, before hmtx (a gid -1 read's target)
+    put_u16(buf, 192 + 0, 600);
+    put_u16(buf, 192 + 4, 500);
+    put_u16(buf, 192 + 8, 333);
+    put_u16(buf, 192 + 12, 499);
+    put_u16(buf, 192 + 16, 250);
+    put_u16(buf, 192 + 20, 0);
+    put_u16(buf, 192 + 24, 1000);
+    put_u16(buf, 192 + 28, 777);
+    return 0;
+}
+
+fn set_clen(buf, clen): i64 {
+    put_u32(buf, 76 + 12, clen);
+    return 0;
+}
+
+fn hdr(buf, ntab): i64 {
+    put_u16(buf, CM + 0, 0);
+    put_u16(buf, CM + 2, ntab);
+    return 0;
+}
+
+# encoding record i -> subtable at cmap-relative offset `off`
+fn rec(buf, i, plat, enc, off): i64 {
+    var r = CM + 4 + i * 8;
+    put_u16(buf, r, plat);
+    put_u16(buf, r + 2, enc);
+    put_u32(buf, r + 4, off);
+    return 0;
+}
+
+# format-4 header at absolute s for segc segments (searchRange / entrySelector / rangeShift per spec)
+fn f4_hdr(buf, s, segc): i64 {
+    var sr = 2;
+    var es = 0;
+    while (sr * 2 <= segc * 2) {
+        sr = sr * 2;
+        es = es + 1;
+    }
+    put_u16(buf, s + 0, 4);
+    put_u16(buf, s + 2, 16 + segc * 8);
+    put_u16(buf, s + 4, 0);
+    put_u16(buf, s + 6, segc * 2);
+    put_u16(buf, s + 8, sr);
+    put_u16(buf, s + 10, es);
+    put_u16(buf, s + 12, segc * 2 - sr);
+    return 0;
+}
+
+fn f4_seg(buf, s, segc, i, start, end, delta, ro): i64 {
+    var sc2 = segc * 2;
+    put_u16(buf, s + 14 + i * 2, end);
+    put_u16(buf, s + 16 + sc2 + i * 2, start);
+    put_u16(buf, s + 16 + sc2 * 2 + i * 2, delta);
+    put_u16(buf, s + 16 + sc2 * 3 + i * 2, ro);
+    return 0;
+}
+
+# absolute offsets inside a format-4 subtable at s with segc segments
+fn f4_range(s, segc): i64 { return s + 16 + segc * 6; }
+fn f4_gia(s, segc): i64 { return s + 16 + segc * 8; }
+
+# a 32-byte subtable: [start, end] with delta, then the 0xFFFF terminator (delta 1)
+fn one_seg(buf, s, start, end, delta): i64 {
+    f4_hdr(buf, s, 2);
+    f4_seg(buf, s, 2, 0, start, end, delta, 0);
+    f4_seg(buf, s, 2, 1, 0xFFFF, 0xFFFF, 1, 0);
+    return 32;
+}
+
+fn opn(buf): i64 {
+    return rekha_font_open(buf, BUF_LEN);
+}
+
+# ── A) THE glyphIdArray PATH (idRangeOffset != 0) ─────────────────
+fn t_range(buf): i64 {
+    g_group = "A idRangeOffset";
+    # seg0 'A'..'E' delta 5 -> gia[0..4]; seg1 'a'..'b' delta -1 -> gia[5..6]; seg2 terminator
+    base(buf, 100, 12 + 40 + 14);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    var s = CM + 12;
+    f4_hdr(buf, s, 3);
+    var ra = f4_range(s, 3);
+    var gia = f4_gia(s, 3);
+    f4_seg(buf, s, 3, 0, 65, 69, 5, gia - ra);                  # self-relative from slot 0
+    f4_seg(buf, s, 3, 1, 97, 98, 0 - 1, (gia + 10) - (ra + 2)); # ...and from slot 1
+    f4_seg(buf, s, 3, 2, 0xFFFF, 0xFFFF, 1, 0);
+    put_u16(buf, gia + 0, 10);
+    put_u16(buf, gia + 2, 0);
+    put_u16(buf, gia + 4, 20);
+    put_u16(buf, gia + 6, 7);
+    put_u16(buf, gia + 8, 65535);
+    put_u16(buf, gia + 10, 30);
+    put_u16(buf, gia + 12, 31);
+    var f = opn(buf);
+    check(f != 0, 1);
+    check(rekha_char_to_glyph(f, 65), 15);          # 10 + delta 5
+    check(rekha_char_to_glyph(f, 66), 0);           # a 0 entry is .notdef — delta NOT applied
+    check(rekha_char_to_glyph(f, 67), 25);
+    check(rekha_char_to_glyph(f, 68), 12);
+    check(rekha_char_to_glyph(f, 69), 4);           # (65535 + 5) & 0xFFFF
+    check(rekha_char_to_glyph(f, 97), 29);          # 30 - 1
+    check(rekha_char_to_glyph(f, 98), 30);
+    check(rekha_char_to_glyph(f, 64), 0);           # boundaries: one below / above each segment
+    check(rekha_char_to_glyph(f, 70), 0);
+    check(rekha_char_to_glyph(f, 96), 0);
+    check(rekha_char_to_glyph(f, 99), 0);
+    check(rekha_char_to_glyph(f, 0xFFFF), 0);
+    check(rekha_char_to_glyph(f, 0x10000), 0);
+    check(rekha_char_to_glyph(f, 0 - 1), 0);
+    put_u16(buf, 148 + 4, 25);                      # numGlyphs 25: the bound applies on this path too
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 67), 0);           # 25 >= 25
+    check(rekha_char_to_glyph(f, 65), 15);
+    check(rekha_char_to_glyph(f, 69), 4);
+    return 0;
+}
+
+# ── B) THE glyphIdArray INDEX IS BOUNDED BY THE cmap EXTENT ─────────────
+fn t_gia_extent(buf): i64 {
+    g_group = "B glyphIdArray extent";
+    # seg0 'A'..'F' -> gia[0..5], but the cmap declares only 5 entries; gia[5] holds a poison 42
+    base(buf, 100, 12 + 40 + 10);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    var s = CM + 12;
+    f4_hdr(buf, s, 3);
+    var ra = f4_range(s, 3);
+    var gia = f4_gia(s, 3);
+    f4_seg(buf, s, 3, 0, 65, 70, 0, gia - ra);
+    f4_seg(buf, s, 3, 1, 80, 80, 0, 0xFFFF);        # 'P': an idRangeOffset far past the cmap
+    f4_seg(buf, s, 3, 2, 0xFFFF, 0xFFFF, 1, 0);
+    put_u16(buf, gia + 0, 11);
+    put_u16(buf, gia + 2, 12);
+    put_u16(buf, gia + 4, 13);
+    put_u16(buf, gia + 6, 14);
+    put_u16(buf, gia + 8, 15);
+    put_u16(buf, gia + 10, 42);
+    put_u16(buf, ra + 2 + 0xFFFF, 43);              # the bytes the far offset points at: poison too
+    var f = opn(buf);
+    check(rekha_char_to_glyph(f, 68), 14);
+    check(rekha_char_to_glyph(f, 69), 15);          # entry ends exactly at the cmap end
+    check(rekha_char_to_glyph(f, 70), 0);           # entry wholly past it: 0, never the 42
+    check(rekha_char_to_glyph(f, 80), 0);           # never the 43
+    set_clen(buf, 12 + 40 + 9);                     # the 5th entry one byte short
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 69), 0);
+    check(rekha_char_to_glyph(f, 68), 14);
+    set_clen(buf, 12 + 40 + 12);                    # covering gia[5]: the same bytes now map
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 70), 42);
+    return 0;
+}
+
+# ── C) SUBTABLE SELECTION: platform 0, and the LAST matching record wins ───────
+fn t_select(buf): i64 {
+    g_group = "C selection";
+    base(buf, 100, 12 + 32);                        # a single (0,3) record
+    hdr(buf, 1);
+    rec(buf, 0, 0, 3, 12);
+    one_seg(buf, CM + 12, 65, 65, 5 - 65);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(rekha_char_to_glyph(f, 65), 5);
+    rec(buf, 0, 0, 4, 12);                          # (0,*): any Unicode encoding
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
+
+    base(buf, 100, 20 + 32 + 32);                   # (0,3) -> 'A' 5, then (3,1) -> 'A' 6
+    hdr(buf, 2);
+    rec(buf, 0, 0, 3, 20);
+    rec(buf, 1, 3, 1, 52);
+    one_seg(buf, CM + 20, 65, 65, 5 - 65);
+    one_seg(buf, CM + 52, 65, 65, 6 - 65);
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 52);
+    check(rekha_char_to_glyph(f, 65), 6);           # the last record, (3,1)
+    rec(buf, 0, 3, 1, 52);                          # reversed: (3,1) -> 6, then (0,3) -> 5
+    rec(buf, 1, 0, 3, 20);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);           # still the LAST record, now (0,3)
+
+    # a last Unicode record whose subtable is not format 4 is skipped
+    rec(buf, 0, 3, 1, 20);
+    rec(buf, 1, 0, 3, 52);
+    put_u16(buf, CM + 52, 6);                       # format 6
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 20);
+    check(rekha_char_to_glyph(f, 65), 5);
+    put_u16(buf, CM + 52, 12);                      # format 12
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
+    put_u16(buf, CM + 52, 4);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 6);           # control: format 4 there does win
+    rec(buf, 1, 0, 3, 20 + 32 + 32 - 1);            # subtable's format word straddles the cmap end
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
+    rec(buf, 1, 1, 0, 52);                          # Macintosh (1,0): not a Unicode record
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
+
+    # the only Unicode map is format 12: nothing
+    base(buf, 100, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    one_seg(buf, CM + 12, 65, 65, 5 - 65);
+    put_u16(buf, CM + 12, 12);
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    check(rekha_char_to_glyph(f, 65), 0);
+
+    # the choice is cached at open (the snapshot sfnt.cyr documents)
+    put_u16(buf, CM + 12, 4);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
+    put_u16(buf, CM + 12, 12);                      # un-format the chosen subtable AFTER open
+    check(rekha_char_to_glyph(f, 65), 5);
+    check(rekha_char_to_glyph(opn(buf), 65), 0);    # a re-open sees it
+    return 0;
+}
+
+# ── D) THE (3,0) SYMBOL GAP, STATED IN cmap.cyr ─────────────────
+fn t_symbol(buf): i64 {
+    g_group = "D (3,0) gap";
+    base(buf, 100, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 0, 12);
+    one_seg(buf, CM + 12, 0xF041, 0xF041, 5 - 0xF041);
+    var f = opn(buf);
+    check(f != 0, 1);
+    check(rekha_cmap_subtable(f), 0);
+    check(rekha_char_to_glyph(f, 0xF041), 0);       # the subtable maps it; rekha does not read (3,0)
+    check(rekha_char_to_glyph(f, 65), 0);           # and no U+00xx -> U+F0xx remap
+    rec(buf, 0, 3, 1, 12);                          # control: the same subtable under (3,1)
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0xF041), 5);
+    return 0;
+}
+
+# ── E) HEADER / ARRAY EXTENTS AND segCountX2 ──────────────────────
+fn t_arrays(buf): i64 {
+    g_group = "E arrays";
+    base(buf, 100, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    one_seg(buf, CM + 12, 65, 66, 1 - 65);
+    var f = opn(buf);
+    check(rekha_char_to_glyph(f, 66), 2);           # idRangeOffset[1] ends exactly at the cmap end
+    set_clen(buf, 12 + 31);                         # ...one byte past it
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    check(rekha_char_to_glyph(f, 65), 0);
+    set_clen(buf, 12 + 13);                         # the 14-byte header itself cut
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 0);
+    set_clen(buf, 11);                              # the one encoding record cut
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 0);
+    set_clen(buf, 3);                               # not even version + numTables
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 0);
+    set_clen(buf, 12 + 32);
+
+    put_u16(buf, CM + 12 + 6, 0);                   # segCountX2 0
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    check(rekha_char_to_glyph(f, 65), 0);
+    put_u16(buf, CM + 12 + 6, 1);                   # segCountX2 1
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 0);
+
+    # segCountX2 2: ONE segment and no terminator — cp past its end takes the "no segment" exit
+    base(buf, 100, 12 + 24);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    f4_hdr(buf, CM + 12, 1);
+    f4_seg(buf, CM + 12, 1, 0, 65, 90, 1 - 65, 0);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 1);
+    check(rekha_char_to_glyph(f, 90), 26);
+    check(rekha_char_to_glyph(f, 91), 0);
+    check(rekha_char_to_glyph(f, 64), 0);
+    check(rekha_char_to_glyph(f, 0xFFFF), 0);
+
+    # a last segment that really maps 0xFFFF
+    base(buf, 100, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    f4_hdr(buf, CM + 12, 2);
+    f4_seg(buf, CM + 12, 2, 0, 65, 65, 3 - 65, 0);
+    f4_seg(buf, CM + 12, 2, 1, 0xFFF0, 0xFFFF, 8, 0);   # 0xFFFF + 8 wraps to 7
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0xFFFF), 7);
+    check(rekha_char_to_glyph(f, 0xFFFE), 6);
+    check(rekha_char_to_glyph(f, 0xFFF8), 0);       # wraps to 0
+    check(rekha_char_to_glyph(f, 0xFFF7), 0);       # 0xFFFF: >= numGlyphs
+    check(rekha_char_to_glyph(f, 0x10000), 0);
+    check(rekha_char_to_glyph(f, 65), 3);
+    return 0;
+}
+
+# ── F) A cmap LENGTH THAT CUTS THE ENCODING RECORDS ─────────────────
+# numTables says 10. Records sit at cmap+4+8i, so records 1..8 overlap the two subtables; each lands on
+# a field that is not platform 0 or 3 (format 4, searchRange 4, endCode 0xFFFF, idDelta 0xFFC4/5).
+# Record 9 (cmap+76) is a genuine (3,1) -> subtable B. The cmap length alone decides whether it exists.
+fn t_records_cut(buf): i64 {
+    g_group = "F records cut";
+    base(buf, 100, 84);
+    hdr(buf, 10);
+    rec(buf, 0, 3, 1, 12);
+    one_seg(buf, CM + 12, 65, 65, 5 - 65);          # A: 'A' -> 5
+    one_seg(buf, CM + 44, 65, 65, 6 - 65);          # B: 'A' -> 6
+    rec(buf, 9, 3, 1, 44);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 44);
+    check(rekha_char_to_glyph(f, 65), 6);           # record 9 inside the extent: B wins
+    set_clen(buf, 83);
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(rekha_char_to_glyph(f, 65), 5);           # one byte short: record 9 does not exist
+    set_clen(buf, 76);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
+    return 0;
+}
+
+# ── G) MAPPED gid >= numGlyphs IS .notdef — WHEN maxp SAYS SO ─────────────
+fn t_numglyphs(buf): i64 {
+    g_group = "G numGlyphs";
+    base(buf, 11, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    one_seg(buf, CM + 12, 65, 66, 10 - 65);         # 'A' -> 10, 'B' -> 11
+    var f = opn(buf);
+    check(rekha_glyph_count(f), 11);
+    check(rekha_char_to_glyph(f, 65), 10);          # numGlyphs - 1: kept
+    check(rekha_char_to_glyph(f, 66), 0);           # numGlyphs: .notdef
+    check(rekha_char_advance(f, 66), 600);          # ...so it advances by .notdef's metric
+    check(rekha_advance_width(f, 11), 777);         # the gid-level clamp is unchanged
+    dir_entry(buf, 28, TAG_ZZZZ, 148, 6);           # the same font without maxp
+    f = opn(buf);
+    check(rekha_glyph_count(f), 0);
+    check(rekha_char_to_glyph(f, 66), 11);          # the raw gid
+    check(rekha_char_advance(f, 66), 777);          # clamped to the last long metric
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 148, 5);     # maxp too short to hold numGlyphs
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 66), 11);
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 148, 6);
+    put_u16(buf, 148 + 4, 12);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 66), 11);
+    return 0;
+}
+
+# ── H) ADVANCES: gid-level px / fx, char fx, rounding, 0 = unknown, drift ─────────
+fn t_advance(buf): i64 {
+    g_group = "H advances";
+    base(buf, 8, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    one_seg(buf, CM + 12, 65, 72, 1 - 65);          # 'A'..'H' -> gid 1..8 (8 is past numGlyphs)
+    var f = opn(buf);
+    check(rekha_glyph_advance_px(f, 1, 15), 8);     # 500 * 15 / 1000 = 7.5 -> 8 (half-up)
+    check(rekha_glyph_advance_px(f, 3, 15), 7);     # 7.485 -> 7
+    check(rekha_glyph_advance_px(f, 2, 16), 5);     # 5.328 -> 5
+    check(rekha_glyph_advance_px(f, 7, 13), 10);    # 10.101 -> 10
+    check(rekha_glyph_advance_px(f, 6, 16), 16);
+    check(rekha_glyph_advance_fx(f, 1, 15), 491520);        # 7.5 px exactly
+    check(rekha_glyph_advance_fx(f, 2, 16), 349176);        # 349175.808 -> 349176
+    check(rekha_glyph_advance_fx(f, 3, 15), 490537);        # 490536.96 -> 490537
+    check(rekha_glyph_advance_fx(f, 7, 13), 661979);        # 661979.136 -> 661979
+    check(rekha_glyph_advance_fx(f, 0, 16), 629146);        # 629145.6 -> 629146
+    check(rekha_char_advance_fx(f, 66, 16), 349176);        # 'B' -> gid 2
+    check(rekha_char_advance_fx(f, 65, 15), 491520);
+    check(rekha_char_advance_px(f, 65, 15), 8);
+    check(rekha_char_advance_fx(f, 90, 16), 629146);        # unmapped 'Z' -> .notdef's advance
+    check(rekha_char_advance_fx(f, 72, 16), 629146);        # 'H' -> gid 8 >= numGlyphs -> .notdef
+    # 0 = unknown
+    check(rekha_glyph_advance_px(f, 5, 16), 0);     # a 0 advance in hmtx
+    check(rekha_glyph_advance_fx(f, 5, 16), 0);
+    check(rekha_char_advance_fx(f, 69, 16), 0);     # 'E' -> gid 5
+    check(rekha_char_advance_px(f, 69, 16), 0);
+    check(rekha_glyph_advance_px(f, 0 - 1, 16), 0);
+    check(rekha_glyph_advance_fx(f, 0 - 1, 16), 0);
+    dir_entry(buf, 60, TAG_ZZZZ, 192, 32);          # no hmtx
+    var fnh = opn(buf);
+    check(rekha_glyph_advance_px(fnh, 1, 16), 0);
+    check(rekha_glyph_advance_fx(fnh, 1, 16), 0);
+    check(rekha_char_advance_fx(fnh, 65, 16), 0);
+    dir_entry(buf, 60, REKHA_TAG_HMTX, 192, 32);
+    put_u16(buf, 92 + 18, 2048);                    # upem 2048 (LiberationSans' em), adv 1000
+    var fl = opn(buf);
+    check(rekha_glyph_advance_px(fl, 6, 32), 16);   # 15.625 -> 16
+    check(rekha_glyph_advance_fx(fl, 6, 32), 1024000);      # 15.625 * 65536, exact
+    check(rekha_glyph_advance_fx(fl, 2, 32), 340992);       # 333 * 32 * 65536 / 2048, exact
+    check(rekha_glyph_advance_px(fl, 2, 32), 5);    # 5.203125 -> 5
+
+    # ⛔ THE DRIFT cmap.cyr DESCRIBES, MEASURED: "ABABABABABAB" at 15 px. A = 500 (7.5 px), B = 333
+    # (4.995 px). Per-glyph-rounded pixels sum to 78; the 16.16 advances sum to 4,913,232 (74.97 px)
+    # and the pen, rounded ONCE, lands on 75 — three pixels left of where the integer run ends.
+    var sum_px = 0;
+    var sum_fx = 0;
+    var i = 0;
+    while (i < 12) {
+        var cp = 65 + (i & 1);
+        sum_px = sum_px + rekha_char_advance_px(f, cp, 15);
+        sum_fx = sum_fx + rekha_char_advance_fx(f, cp, 15);
+        i = i + 1;
+    }
+    check(sum_px, 78);
+    check(sum_fx, 4913232);
+    check((sum_fx + 32768) >> 16, 75);
+    return 0;
+}
+
+# ── I) BINARY-SEARCH PARITY: 300 SEGMENTS, EVERY CODEPOINT, LINEAR REFERENCE ────────
+var NSEG = 300;
+var K_NG = 40000;
+var K_GV_WANT = 1394;
+var K_MAPPED_A = 12398;
+var K_MAPPED_B = 20933;
+var g_seed = 20260915;
+var g_start = 0;
+var g_end = 0;
+var g_delta = 0;
+var g_base = 0;
+var g_gv = 0;
+
+fn rnd(n): i64 {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (g_seed >> 8) % n;
+}
+
+# Generate NSEG segments into the g_* arrays: the last is the 0xFFFF terminator (delta 1). One in
+# seven (i % 7 == 3) uses the glyphIdArray; one entry in five there is 0. Returns the entry count.
+fn k_generate(): i64 {
+    g_start = alloc(NSEG * 8);
+    g_end = alloc(NSEG * 8);
+    g_delta = alloc(NSEG * 8);
+    g_base = alloc(NSEG * 8);
+    g_gv = alloc(8 * 8192);
+    var next = 0x20;
+    var ngv = 0;
+    var i = 0;
+    while (i < NSEG - 1) {
+        var start = next;
+        if (i > 0) { start = next + rnd(40); }
+        var span = rnd(150);
+        if ((i % 7) == 3) { span = rnd(60); }
+        store64(g_start + i * 8, start);
+        store64(g_end + i * 8, start + span);
+        store64(g_delta + i * 8, rnd(65536) - 32768);
+        store64(g_base + i * 8, 0 - 1);
+        if ((i % 7) == 3) {
+            store64(g_base + i * 8, ngv);
+            var k = 0;
+            while (k <= span) {
+                var v = rnd(65536);
+                if (rnd(5) == 0) { v = 0; }
+                store64(g_gv + ngv * 8, v);
+                ngv = ngv + 1;
+                k = k + 1;
+            }
+        }
+        next = start + span + 1;
+        i = i + 1;
+    }
+    store64(g_start + i * 8, 0xFFFF);
+    store64(g_end + i * 8, 0xFFFF);
+    store64(g_delta + i * 8, 1);
+    store64(g_base + i * 8, 0 - 1);
+    return ngv;
+}
+
+# Write the first `segc` generated segments as the font's only (3,1) format-4 subtable.
+fn k_write(buf, segc, ngv, ng): i64 {
+    base(buf, ng, 12 + 16 + segc * 8 + ngv * 2);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    var s = CM + 12;
+    f4_hdr(buf, s, segc);
+    var ra = f4_range(s, segc);
+    var gia = f4_gia(s, segc);
+    var i = 0;
+    while (i < segc) {
+        var ro = 0;
+        var b = load64(g_base + i * 8);
+        if (b >= 0) { ro = (gia + b * 2) - (ra + i * 2); }
+        f4_seg(buf, s, segc, i, load64(g_start + i * 8), load64(g_end + i * 8), load64(g_delta + i * 8), ro);
+        i = i + 1;
+    }
+    var k = 0;
+    while (k < ngv) {
+        put_u16(buf, gia + k * 2, load64(g_gv + k * 8));
+        k = k + 1;
+    }
+    return 0;
+}
+
+# The spec, as a straightforward linear scan over the test's own arrays.
+fn k_ref(cp, segc, ng): i64 {
+    if (cp < 0) { return 0; }
+    if (cp > 65535) { return 0; }
+    var i = 0;
+    while (i < segc) {
+        if (load64(g_end + i * 8) >= cp) { break; }
+        i = i + 1;
+    }
+    if (i >= segc) { return 0; }
+    var start = load64(g_start + i * 8);
+    if (start > cp) { return 0; }
+    var delta = load64(g_delta + i * 8);
+    var b = load64(g_base + i * 8);
+    var g = 0;
+    if (b < 0) {
+        g = (cp + delta) & 65535;
+    } else {
+        var v = load64(g_gv + (b + cp - start) * 8);
+        if (v == 0) { return 0; }
+        g = (v + delta) & 65535;
+    }
+    if (ng > 0) {
+        if (g >= ng) { return 0; }
+    }
+    return g;
+}
+
+# returns the number of codepoints mapped to a nonzero gid; counts mismatches into g_mism
+var g_mism = 0;
+
+fn k_sweep(f, segc, ng): i64 {
+    g_mism = 0;
+    var mapped = 0;
+    var cp = 0;
+    while (cp < 65536) {
+        var got = rekha_char_to_glyph(f, cp);
+        if (got != k_ref(cp, segc, ng)) { g_mism = g_mism + 1; }
+        if (got != 0) { mapped = mapped + 1; }
+        cp = cp + 1;
+    }
+    return mapped;
+}
+
+# every segment's start-1, start, end, end+1; returns mismatches, adds the probes to g_probes
+var g_probes = 0;
+
+fn k_bounds(f, segc, ng): i64 {
+    var bad = 0;
+    var i = 0;
+    while (i < segc) {
+        var d = 0 - 1;
+        while (d <= 1) {
+            var a = load64(g_start + i * 8) + d;
+            var z = load64(g_end + i * 8) - d;
+            if (rekha_char_to_glyph(f, a) != k_ref(a, segc, ng)) { bad = bad + 1; }
+            if (rekha_char_to_glyph(f, z) != k_ref(z, segc, ng)) { bad = bad + 1; }
+            g_probes = g_probes + 2;
+            d = d + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+
+fn t_parity(buf): i64 {
+    g_group = "I parity";
+    var ngv = k_generate();
+    check(ngv, K_GV_WANT);                          # the generator is deterministic
+    check(load64(g_end + (NSEG - 2) * 8) < 0xFFFF, 1);
+    # (a) 300 segments with the terminator, numGlyphs 40000
+    k_write(buf, NSEG, ngv, K_NG);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(k_sweep(f, NSEG, K_NG), K_MAPPED_A);
+    check(g_mism, 0);
+    g_probes = 0;
+    check(k_bounds(f, NSEG, K_NG), 0);
+    check(g_probes, NSEG * 6);
+    check(rekha_char_to_glyph(f, 0xFFFF), 0);       # terminator: (0xFFFF + 1) & 0xFFFF
+    check(rekha_char_to_glyph(f, 0x10000), 0);
+    check(rekha_char_to_glyph(f, 0 - 1), 0);
+    check(rekha_char_to_glyph(f, 0x1F), 0);         # below segment 0: the seg-0 fast path's gap
+    # (b) 299 segments — no terminator — and no maxp, so no numGlyphs bound either
+    k_write(buf, NSEG - 1, ngv, K_NG);
+    dir_entry(buf, 28, TAG_ZZZZ, 148, 6);
+    f = opn(buf);
+    check(rekha_glyph_count(f), 0);
+    check(k_sweep(f, NSEG - 1, 0), K_MAPPED_B);
+    check(g_mism, 0);
+    g_probes = 0;
+    check(k_bounds(f, NSEG - 1, 0), 0);
+    check(rekha_char_to_glyph(f, load64(g_end + (NSEG - 2) * 8) + 1), 0);   # past the last endCode
+    check(rekha_char_to_glyph(f, 0xFFFF), 0);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var buf = alloc(BUF_LEN);
+    t_range(buf);
+    t_gia_extent(buf);
+    t_select(buf);
+    t_symbol(buf);
+    t_arrays(buf);
+    t_records_cut(buf);
+    t_numglyphs(buf);
+    t_advance(buf);
+    t_parity(buf);
+
+    if (g_fails == 0) {
+        var ok = "cmap_ext_test: PASS (cmap selection + extents, glyphIdArray path, search parity, advances; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int_fd(1, g_n);
+        syscall(1, 1, " checks)\n", 9);
+    } else {
+        var bad = "cmap_ext_test: FAIL\n";
+        syscall(1, 2, bad, strlen(bad));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

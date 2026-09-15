@@ -14,7 +14,7 @@
 # rekha_char_to_sdpath calls under an arena hook cost the global heap EXACTLY 0 bytes, and the
 # arena converges on its high-water mark after a reset. Group C: the outline record and all four
 # of its buffers lie INSIDE the arena — glyf.cyr's own allocations moved, not just sadish's paths
-# — and so do the composite merge buffers and the RekhaFont record. A site left on `alloc` leaks
+# — and so do the composite's merged outline and the RekhaFont record. A site left on `alloc` leaks
 # 8 bytes or more per call and satisfies a "smaller" check.
 #
 # Font: glyph 0 = a simple triangle, glyph 1 = a composite of glyph 0 offset (100, 200); cmap
@@ -72,7 +72,7 @@ fn in_arena(p): i64 {
 }
 
 # Build the font. 7 tables: head@124/54 maxp@178/32 hhea@210/36 hmtx@246/8 loca@254/6
-# glyf@260/44 cmap@304/40.
+# glyf@260/44 cmap@304/44.
 fn build_font(buf): i64 {
     put_u32(buf, 0, 0x00010000);
     put_u16(buf, 4, 7);
@@ -82,7 +82,7 @@ fn build_font(buf): i64 {
     dir_entry(buf, 60,  0x686D7478, 246, 8);
     dir_entry(buf, 76,  0x6C6F6361, 254, 6);
     dir_entry(buf, 92,  0x676C7966, 260, 44);
-    dir_entry(buf, 108, 0x636D6170, 304, 40);
+    dir_entry(buf, 108, 0x636D6170, 304, 44);
 
     put_u16(buf, 124 + 18, 1000);      # unitsPerEm
     put_u16(buf, 124 + 50, 0);         # short loca
@@ -131,7 +131,7 @@ fn build_font(buf): i64 {
     put_u32(buf, cm + 8, 12);
     var sub = cm + 12;
     put_u16(buf, sub + 0, 4);          # format
-    put_u16(buf, sub + 2, 28);         # length
+    put_u16(buf, sub + 2, 32);         # length
     put_u16(buf, sub + 6, 4);          # segCountX2 -> 2 segments
     put_u16(buf, sub + 14, 66);        # endCode[0] = 'B'
     put_u16(buf, sub + 16, 65535);
@@ -161,8 +161,8 @@ fn main(): i64 {
     var p = rekha_char_to_sdpath(f, 65, scale, 0, oy);
     var glyph_cost = alloc_used() - g0;
     # ⛔ THE BASELINE, ASSERTED RATHER THAN ASSUMED. If this ever reads 0 the zeros below are
-    # measured against nothing. MEASURED 4,328 B: 136 B of rekha outline scratch + 4,192 B of
-    # sadish path (sd_path_new 4,144 + 3 points x 16).
+    # measured against nothing. MEASURED 4,304 B: 112 B of rekha outline (one carved block) +
+    # 4,192 B of sadish path (sd_path_new 4,144 + 3 points x 16).
     check(glyph_cost > 0, 1);                                          # 5
     check(sd_path_verb_count(p), 4);                                   # 6 — moveto, 2 lineto, close
     g0 = alloc_used();
@@ -171,7 +171,7 @@ fn main(): i64 {
     g0 = alloc_used();
     var o = rekha_load_glyph(f, 0);
     var outline_cost = alloc_used() - g0;
-    check(outline_cost >= REKHA_OUTLINE_SIZE, 1);                      # 8 — MEASURED 136 B
+    check(outline_cost >= REKHA_OUTLINE_SIZE, 1);                      # 8 — MEASURED 112 B
     check(rekha_outline_n_points(o), 3);                               # 9
     # Reading a font allocates nothing: a consumer that only measures text pays 0 under any hook.
     g0 = alloc_used();
@@ -198,7 +198,7 @@ fn main(): i64 {
     }
     var hw1 = arena_used(g_arena) - ab;
     # ⭐ THE HEADLINE. Twenty character -> path conversions: not one byte on the global heap.
-    # MEASURED: the twenty calls put 86,560 B on the arena (4,328 B per call — the same bytes group
+    # MEASURED: the twenty calls put 86,080 B on the arena (4,304 B per call — the same bytes group
     # A saw on the global heap, moved). Before 0.3.10 the same loop leaked 2,720 B (136 x 20) on the
     # global heap under this very hook. The arena is 4 MiB so it never chains a chunk — a chunk would
     # come from the global allocator and fail this, which is the correct answer for an arena sized
@@ -222,7 +222,7 @@ fn main(): i64 {
     ab = arena_used(g_arena);
     var oa = rekha_load_glyph(f, 0);
     check(alloc_used() - gb, 0);                                       # 41
-    check(arena_used(g_arena) - ab, outline_cost);                     # 42 — the 136 B, on the arena
+    check(arena_used(g_arena) - ab, outline_cost);                     # 42 — the 112 B, on the arena
     check(rekha_outline_n_points(oa), 3);                              # 43
     check(in_arena(oa), 1);                                            # 44 — the record
     check(in_arena(rekha_outline_end_pts(oa)), 1);                     # 45
@@ -230,15 +230,21 @@ fn main(): i64 {
     check(in_arena(rekha_outline_ys(oa)), 1);                          # 47
     check(in_arena(rekha_outline_on_curve(oa)), 1);                    # 48
     check(load64(rekha_outline_xs(oa) + 16), 50);                      # 49 — and it decoded (apex x)
-    # The composite merge buffers (REKHA_COMPOSITE_MAXP x 2 x 8 + MAXP + MAXC x 8 = 70,656 B) are
-    # the largest thing rekha allocates and the one a per-label leak would show first. MEASURED
-    # 70,856 B per composite load (buffers + the component's 136 + two spans + the record).
+    # The composite is the load a per-label leak would show first. ⛔ ITS COST IS EXACT, NOT A FLOOR:
+    # 0.3.10 paid fixed merge buffers (MAXP x 2 x 8 + MAXP + MAXC x 8 = 70,656 B) on every composite
+    # load, MEASURED 70,856 B here; 0.3.11 sizes the merge to the children. A simple outline is ONE
+    # carved block — record 48 + end_pts 8 per contour + 17 per point (xs 8, ys 8, on_curve 1) —
+    # which for the triangle is 48 + 8 + 51 = 107 B, aligned to 112. The composite pays the
+    # component's block, its 1-slot component pointer array (8 B), and a merged block of the same
+    # shape: MEASURED 232 B. A return to fixed buffers fails this by ~70 KB.
+    var tri_block = (REKHA_OUTLINE_SIZE + 1 * 8 + 3 * 17 + 7) & (0 - 8);
+    var comp_want = tri_block + 1 * 8 + tri_block;
     gb = alloc_used();
     ab = arena_used(g_arena);
     var oc = rekha_load_glyph(f, 1);
     var comp_cost = arena_used(g_arena) - ab;
     check(alloc_used() - gb, 0);                                       # 50
-    check(comp_cost >= REKHA_COMPOSITE_MAXP * 17 + REKHA_COMPOSITE_MAXC * 8, 1);   # 51
+    check(comp_cost, comp_want);                                       # 51 — 232 B
     check(in_arena(oc), 1);                                            # 52
     check(in_arena(rekha_outline_xs(oc)), 1);                          # 53
     check(in_arena(rekha_outline_end_pts(oc)), 1);                     # 54
@@ -251,7 +257,7 @@ fn main(): i64 {
     var fh = rekha_font_open(buf, len);
     check(fh != 0, 1);                                                 # 57
     check(alloc_used() - gb, 0);                                       # 58
-    check(arena_used(g_arena) - ab, REKHA_FONT_SIZE);                  # 59 — 40 B, on the arena
+    check(arena_used(g_arena) - ab, REKHA_FONT_SIZE);                  # 59 — 160 B, on the arena
     check(in_arena(fh), 1);                                            # 60
     # ...and reading a font under the hook costs the arena nothing either.
     ab = arena_used(g_arena);
