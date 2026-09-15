@@ -29,7 +29,8 @@
 #   +16  end_pts      (ptr — i64[n_contours] last-point index per contour, or 0)
 #   +24  xs           (ptr — i64[n_points] x coords in design units, or 0)
 #   +32  ys           (ptr — i64[n_points] y coords in design units, or 0)
-#   +40  on_curve     (ptr — u8[n_points] 1 = on-curve, 0 = off-curve, or 0)
+#   +40  on_curve     (ptr — u8[n_points] 1 = on-curve, 0 = quadratic control (glyf),
+#                     2 = cubic control (CFF, cff.cyr), or 0)
 #
 # ⭐ WHAT THE LOADERS GUARANTEE: end_pts STRICTLY increase and every one is < n_points, and the four
 # arrays are carved from the SAME allocation as the record (record first, then end_pts, xs, ys,
@@ -506,7 +507,12 @@ fn rekha_load_glyph(font, gid): i64 {
     store64(&ctx, REKHA_GLYPH_MAXLOADS);
     store64(&ctx + 8, REKHA_GLYPH_MAXPOINTS_TOTAL);
     store64(&ctx + 16, 0);
-    var o = rekha_load_glyph_d(font, gid, 0, &ctx);
+    var o = 0;
+    if (font != 0 && load64(font + 176) != 0) {
+        o = rekha_cff_load(font, gid);              # an 'OTTO' font whose CFF resolved
+    } else {
+        o = rekha_load_glyph_d(font, gid, 0, &ctx);
+    }
     if (o == 0) { return 0; }
     if (load64(&ctx + 16) != 0) { return rekha_outline_clear(o); }
     return o;
@@ -520,13 +526,17 @@ fn rekha_load_glyph(font, gid): i64 {
 #   sd_y = oy - design_y * scale        (y-flip: fonts are y-up, sadish y-down)
 # ================================================================
 
-# Emit one closed contour (absolute point range [cstart, cend]) into `path`,
-# converting TrueType quadratic runs to sadish verbs. On-curve points end a
-# segment (line, or quad if a control is pending); off-curve points are
-# quadratic controls, with an implied on-curve MIDPOINT synthesized between
-# two consecutive off-curve points. The start point is the first on-curve
-# point, or — if the contour opens off-curve — the last on-curve point, or a
-# synthesized midpoint if BOTH ends are off-curve (all TrueType-legal).
+# Emit one closed contour (absolute point range [cstart, cend]) into `path`. Point flags: 1 on-curve,
+# 0 quadratic control (glyf), 2 cubic control (CFF).
+# Quadratic: on-curve points end a segment (line, or quad if a control is pending); consecutive
+# quadratic controls get an implied on-curve MIDPOINT between them. The start point is the first
+# on-curve point, or — if the contour opens off-curve — the last on-curve point, or a synthesized
+# midpoint if BOTH ends are quadratic controls (all TrueType-legal).
+# Cubic: control, control, on-curve -> one sd_path_cubicto; a pair of controls at the END of the
+# contour curves back to the start. CFF contours always open on-curve (their moveto).
+# ⚠ A HAND-BUILT outline that breaks the pattern (a lone cubic control, or cubic controls mixed with a
+# pending quadratic one) is still emitted safely — the stray control becomes a line to it — and no
+# loader produces one.
 fn rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy): i64 {
     var n = cend - cstart + 1;
     var sx = 0;
@@ -565,27 +575,42 @@ fn rekha_emit_contour(path, xs, ys, oc, cstart, cend, scale, ox, oy): i64 {
         var idx = startidx + k;
         var px = ox + load64(xs + idx * 8) * scale;
         var py = oy - load64(ys + idx * 8) * scale;
-        if (load8(oc + idx) != 0) {
-            if (have_ctrl != 0) {
-                sd_path_quadto(path, cx, cy, px, py);
-                have_ctrl = 0;
+        var fl = load8(oc + idx);
+        if (fl == 2 && have_ctrl == 0 && k + 1 < count && load8(oc + idx + 1) == 2) {
+            # cubic: this control, the next, and the on-curve point after them (or the start)
+            var qx = ox + load64(xs + (idx + 1) * 8) * scale;
+            var qy = oy - load64(ys + (idx + 1) * 8) * scale;
+            if (k + 2 < count) {
+                sd_path_cubicto(path, px, py, qx, qy, ox + load64(xs + (idx + 2) * 8) * scale,
+                    oy - load64(ys + (idx + 2) * 8) * scale);
+                k = k + 3;
             } else {
-                sd_path_lineto(path, px, py);
+                sd_path_cubicto(path, px, py, qx, qy, sx, sy);
+                k = k + 2;
             }
         } else {
-            if (have_ctrl != 0) {
-                var mx = sd_asr(cx + px, 1);
-                var my = sd_asr(cy + py, 1);
-                sd_path_quadto(path, cx, cy, mx, my);
-                cx = px;
-                cy = py;
+            if (fl != 0) {
+                if (have_ctrl != 0) {
+                    sd_path_quadto(path, cx, cy, px, py);
+                    have_ctrl = 0;
+                } else {
+                    sd_path_lineto(path, px, py);
+                }
             } else {
-                cx = px;
-                cy = py;
-                have_ctrl = 1;
+                if (have_ctrl != 0) {
+                    var mx = sd_asr(cx + px, 1);
+                    var my = sd_asr(cy + py, 1);
+                    sd_path_quadto(path, cx, cy, mx, my);
+                    cx = px;
+                    cy = py;
+                } else {
+                    cx = px;
+                    cy = py;
+                    have_ctrl = 1;
+                }
             }
+            k = k + 1;
         }
-        k = k + 1;
     }
     if (have_ctrl != 0) {
         sd_path_quadto(path, cx, cy, sx, sy);   # close the last curve to start

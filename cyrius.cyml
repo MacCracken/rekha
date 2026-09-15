@@ -25,6 +25,7 @@ modules = [
     "src/sfnt.cyr",
     "src/glyf.cyr",
     "src/cmap.cyr",
+    "src/cff.cyr",
 ]
 
 # `[lib.woff]` (`cyrius distlib woff` -> dist/rekha-woff.cyr) is rekha PLUS src/woff.cyr, the WOFF 1.0
@@ -38,6 +39,7 @@ modules = [
     "src/sfnt.cyr",
     "src/glyf.cyr",
     "src/cmap.cyr",
+    "src/cff.cyr",
     "src/woff.cyr",
 ]
 

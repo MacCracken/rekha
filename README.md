@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.1
+Version: 0.4.2
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -80,11 +80,19 @@ shim, no external binaries.
   pairs with sankoch (the stdlib `sankoch` leaf + `sync`); the base bundle never requires sankoch.
   MEASURED: all 29 real `.woff` files on the dev host (Lato, Roboto Slab, KaTeX, FontAwesome, Qt
   icons) rebuild byte-identical to an independent Python/zlib decoder and open.
+- **v0.4.2 — CFF outlines: OpenType `OTTO` faces (shipped).** `rekha_font_open` accepts the `OTTO`
+  sfntVersion and resolves the `CFF ` table; `rekha_load_glyph` runs the glyph's **Type 2 charstring**
+  (all the drawing, hint, subroutine and flex operators, name-keyed and **CID-keyed** fonts) into the
+  same `RekhaOutline` glyf produces, with **cubic** control points flagged 2 — so
+  `rekha_char_to_sdpath` draws an OTTO face through `sd_path_cubicto` with no consumer change. One
+  decode is bounded: 65,536 operators, nesting 10, a 48-argument stack, 4,096 points. MEASURED against
+  an independent reference on **all 405 CFF faces of the dev host — 5,093,070 glyphs, 415,584,832
+  points, identical**. ⚠ Accented glyphs built with `seac`, CFF2 and TrueType Collections are on the
+  list below; a WOFF wrapping an OTTO face now works end to end.
 - **v0.4.x line — next, in order:**
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
   2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
-  3. **OpenType/CFF (`OTTO`) outlines** — Type 2 charstrings (subroutines, CID-keyed FDSelect) emitted
-     as cubic Béziers through `sd_path_cubicto`, under the same load budget as glyf.
+  3. ~~OpenType/CFF (`OTTO`) outlines~~ — shipped in 0.4.2, above.
   4. **WOFF2** — the container, the glyf/loca and hmtx transforms, tested on
      transformed-but-uncompressed tables; the Brotli stream decodes through sankoch's requested
      `[lib.brotli]` (`sankoch/docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md`).
@@ -92,6 +100,11 @@ shim, no external binaries.
      `dist/rekha.deps` sidecar consumers resolve.
   6. **Adopt the sadish filings as they ship** — bounded flatten, checked path allocation,
      `sd_path_new_cap` sized from the outline (5.5× less path arena on ASCII, MEASURED).
+  7. **CFF `seac`** — the accented glyphs old CFF faces build from a base + an accent (none of the 405
+     surveyed faces use it; they are EMPTY today), which needs the charset and standard-encoding
+     lookup.
+  8. **TrueType Collections (`ttcf`)** and **CFF2** — a `.ttc` carries several faces in one file
+     (CJK faces ship this way) and CFF2 is the variable-font charstring format.
 - **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
   sizes.
 

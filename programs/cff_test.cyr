@@ -1,0 +1,1118 @@
+# programs/cff_test.cyr — RUN test for CFF outlines (src/cff.cyr): 'OTTO' faces, Type 2 charstrings.
+#
+# ⭐ EVERY FONT HERE IS BUILT IN CODE — a CFF table (Header, Name / Top DICT / String / Global Subr
+# INDEXes, CharStrings, Private DICT, Subrs) inside an OTTO SFNT with head / maxp / hhea / hmtx.
+# Group A decodes one glyph per operator shape and asserts every point, flag (1 on-curve, 2 cubic
+# control) and contour end BY HAND; group B the refusals (each an EMPTY glyph, never a partial one);
+# group C a CID-keyed font (FDArray + FDSelect formats 0 and 3, per-FD local Subrs); group D the resolve
+# refusals; group E cubic emission to sadish verbs + a fill; group F exact allocation; group G an A/B
+# guard differential over every cut of the CFF table and a seeded mutation loop over its bytes.
+# The same decoder was checked against an independent Python reference on all 405 CFF faces of the dev
+# host (CHANGELOG 0.4.2); this suite is what CI can run.
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "cff_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+# ================================================================
+# Byte writers.
+# ================================================================
+var BLOB_CAP = 262144;
+
+# Charstring scratch: one glyph / subroutine at a time is written to g_cs, then appended to an object
+# table (tab_new / tab_add) that index_write lays out as a CFF INDEX.
+var g_cs = 0;
+var g_csn = 0;
+
+fn cs_reset(): i64 {
+    g_csn = 0;
+    return 0;
+}
+
+fn cs_b(v): i64 {
+    store8(g_cs + g_csn, v & 255);
+    g_csn = g_csn + 1;
+    return 0;
+}
+
+# Encode an integer in the shortest Type 2 form (-107..107, +-108..1131, else 28 int16).
+fn cs_n(v): i64 {
+    if (v >= 0 - 107 && v <= 107) { return cs_b(v + 139); }
+    if (v >= 108 && v <= 1131) {
+        var w = v - 108;
+        cs_b(247 + w / 256);
+        return cs_b(w % 256);
+    }
+    if (v <= 0 - 108 && v >= 0 - 1131) {
+        var u = 0 - v - 108;
+        cs_b(251 + u / 256);
+        return cs_b(u % 256);
+    }
+    cs_b(28);
+    cs_b((v >> 8) & 255);
+    return cs_b(v & 255);
+}
+
+# A 16.16 number (operator 255).
+fn cs_fixed(v): i64 {
+    cs_b(255);
+    cs_b((v >> 24) & 255);
+    cs_b((v >> 16) & 255);
+    cs_b((v >> 8) & 255);
+    return cs_b(v & 255);
+}
+
+fn cs_op(op): i64 { return cs_b(op); }
+
+fn cs_op12(op): i64 {
+    cs_b(12);
+    return cs_b(op);
+}
+
+# An object table of up to `cap` entries (bytes concatenated in one blob).
+fn tab_new_cap(cap): i64 {
+    var t = alloc(16 + (cap + 1) * 8);
+    store64(t, alloc(BLOB_CAP * 4));
+    store64(t + 8, 0);                  # count
+    store64(t + 16, 0);                 # starts[0]
+    return t;
+}
+
+fn tab_add(t): i64 {
+    var n = load64(t + 8);
+    var start = load64(t + 16 + n * 8);
+    memcpy(load64(t) + start, g_cs, g_csn);
+    store64(t + 16 + (n + 1) * 8, start + g_csn);
+    store64(t + 8, n + 1);
+    g_csn = 0;
+    return n;
+}
+
+fn tab_new(): i64 { return tab_new_cap(2048); }
+
+fn tab_count(t): i64 { return load64(t + 8); }
+
+# Write table `t` as a CFF INDEX at dst + at with `osz`-byte offsets (1..5 — 5 is not legal CFF, and is
+# written only to prove the reader refuses it). Returns the bytes written.
+fn index_write_osz(dst, at, t, osz): i64 {
+    var n = load64(t + 8);
+    put_u16(dst, at, n);
+    if (n == 0) { return 2; }
+    store8(dst + at + 2, osz);
+    var i = 0;
+    while (i <= n) {
+        var v = load64(t + 16 + i * 8) + 1;
+        var k = 0;
+        while (k < osz) {
+            store8(dst + at + 3 + i * osz + k, (v >> ((osz - 1 - k) * 8)) & 255);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    var data = at + 3 + (n + 1) * osz;
+    var dlen = load64(t + 16 + n * 8);
+    memcpy(dst + data, load64(t), dlen);
+    return 3 + (n + 1) * osz + dlen;
+}
+
+fn index_write(dst, at, t): i64 { return index_write_osz(dst, at, t, 4); }
+
+# DICT bytes: every integer as the 5-byte form (29), so sizes are known before offsets are.
+fn d_int(dst, at, v): i64 {
+    store8(dst + at, 29);
+    put_u32(dst, at + 1, v);
+    return 5;
+}
+
+# ================================================================
+# Font assembly. Tables: head @76/54 · maxp @130/6 · hhea @136/36 · hmtx @172/(ng*4) · CFF last.
+# ================================================================
+var FB = 0;
+var FB_CAP = 1048576;
+var g_cff_at = 0;
+var g_cff_len = 0;
+var g_font_len = 0;
+var g_gs_at = 0;        # absolute offsets of the last build's Global Subr INDEX, CharStrings INDEX,
+var g_cs_at = 0;        # Private DICT and local Subrs INDEX
+var g_priv0 = 0;
+var g_ls_at = 0;
+
+# Options for the next build.
+var o_cstype = 2;       # CharstringType operand, or 0 to omit the operator
+var o_major = 1;
+var o_offsize = 4;      # the CharStrings INDEX offSize (5 is written genuinely, and must be refused)
+var o_cid = 0;          # 0 = name-keyed; 3 = CID with FDSelect format 3; 10 = format 0
+var o_nocs = 0;         # omit CharStrings from the Top DICT
+
+# Build an OTTO font from charstrings `cs`, global subrs `gs`, local subrs `ls` (name-keyed), or for a
+# CID font: FD local subrs `ls` (FD 0) and `ls1` (FD 1). Returns the font length.
+fn build(cs, gs, ls, ls1): i64 {
+    memset(FB, 0, FB_CAP);
+    var ng = tab_count(cs);
+    put_u32(FB, 0, 0x4F54544F);
+    put_u16(FB, 4, 5);
+    put_u32(FB, 12, REKHA_TAG_HEAD); put_u32(FB, 20, 76);  put_u32(FB, 24, 54);
+    put_u32(FB, 28, REKHA_TAG_MAXP); put_u32(FB, 36, 130); put_u32(FB, 40, 6);
+    put_u32(FB, 44, REKHA_TAG_HHEA); put_u32(FB, 52, 136); put_u32(FB, 56, 36);
+    put_u32(FB, 60, REKHA_TAG_HMTX); put_u32(FB, 68, 172); put_u32(FB, 72, ng * 4);
+    put_u16(FB, 76 + 18, 1000);
+    put_u16(FB, 130 + 4, ng);
+    put_u16(FB, 136 + 34, ng);
+    var i = 0;
+    while (i < ng) {
+        put_u16(FB, 172 + i * 4, 500 + i);
+        i = i + 1;
+    }
+    var cff = 172 + ng * 4;
+
+    # CFF: header
+    var p = cff;
+    store8(FB + p, o_major);
+    store8(FB + p + 1, 0);
+    store8(FB + p + 2, 4);
+    store8(FB + p + 3, 4);
+    p = p + 4;
+    # Name INDEX: one object "T"
+    put_u16(FB, p, 1);
+    store8(FB + p + 2, 1);
+    store8(FB + p + 3, 1);
+    store8(FB + p + 4, 2);
+    store8(FB + p + 5, 84);
+    p = p + 6;
+    # Top DICT INDEX: one object of known size
+    var tsz = 0;
+    if (o_nocs == 0) { tsz = tsz + 6; }                 # int + 17
+    tsz = tsz + 11;                                     # int int + 18 (Private)
+    if (o_cstype != 0) { tsz = tsz + 7; }               # int + 12 6
+    if (o_cid != 0) { tsz = tsz + 17 + 7 + 7; }         # ROS (3 ints + 12 30), FDArray, FDSelect
+    put_u16(FB, p, 1);
+    store8(FB + p + 2, 1);
+    store8(FB + p + 3, 1);
+    store8(FB + p + 4, 1 + tsz);
+    var top = p + 5;
+    p = top + tsz;
+    # String INDEX (empty), Global Subr INDEX
+    put_u16(FB, p, 0);
+    p = p + 2;
+    g_gs_at = p;
+    p = p + index_write(FB, p, gs);
+    # CharStrings
+    var cs_at = p;
+    g_cs_at = p;
+    p = p + index_write_osz(FB, p, cs, o_offsize);
+
+    # Private DICT(s) + Subrs, and for CID the FDArray + FDSelect
+    var priv0 = p;
+    var psz = 11 + 6;                                   # (dummy defaultWidthX int + 20) + Subrs int + 19
+    var subrs0 = priv0 + psz;
+    g_priv0 = priv0;
+    g_ls_at = subrs0;
+    p = subrs0 + index_write(FB, subrs0, ls);
+    d_int(FB, priv0, 0);
+    store8(FB + priv0 + 5, 20);
+    d_int(FB, priv0 + 6, 0);
+    store8(FB + priv0 + 11, 20);
+    d_int(FB, priv0 + 11, psz);
+    store8(FB + priv0 + 16, 19);
+
+    var fdarray = 0;
+    var fdselect = 0;
+    if (o_cid != 0) {
+        var priv1 = p;
+        var subrs1 = priv1 + psz;
+        p = subrs1 + index_write(FB, subrs1, ls1);
+        d_int(FB, priv1, 0);
+        store8(FB + priv1 + 5, 20);
+        d_int(FB, priv1 + 6, 0);
+        store8(FB + priv1 + 11, 20);
+        d_int(FB, priv1 + 11, psz);
+        store8(FB + priv1 + 16, 19);
+        # FDArray: two Font DICTs, each Private (size, offset)
+        fdarray = p;
+        put_u16(FB, p, 2);
+        store8(FB + p + 2, 1);
+        store8(FB + p + 3, 1);
+        store8(FB + p + 4, 12);
+        store8(FB + p + 5, 23);
+        var fd0 = p + 6;
+        d_int(FB, fd0, psz);
+        d_int(FB, fd0 + 5, priv0 - cff);
+        store8(FB + fd0 + 10, 18);
+        d_int(FB, fd0 + 11, psz);
+        d_int(FB, fd0 + 16, priv1 - cff);
+        store8(FB + fd0 + 21, 18);
+        p = fd0 + 22;
+        fdselect = p;
+        if (o_cid == 3) {                               # gid 0..1 -> FD 0, gid 2.. -> FD 1
+            store8(FB + p, 3);
+            put_u16(FB, p + 1, 2);
+            put_u16(FB, p + 3, 0);
+            store8(FB + p + 5, 0);
+            put_u16(FB, p + 6, 2);
+            store8(FB + p + 8, 1);
+            put_u16(FB, p + 9, ng);
+            p = p + 11;
+        } else {
+            store8(FB + p, 0);
+            i = 0;
+            while (i < ng) {
+                if (i < 2) { store8(FB + p + 1 + i, 0); } else { store8(FB + p + 1 + i, 1); }
+                i = i + 1;
+            }
+            p = p + 1 + ng;
+        }
+    }
+
+    # Top DICT contents
+    var q = top;
+    if (o_nocs == 0) {
+        q = q + d_int(FB, q, cs_at - cff);
+        store8(FB + q, 17);
+        q = q + 1;
+    }
+    q = q + d_int(FB, q, psz);
+    q = q + d_int(FB, q, priv0 - cff);
+    store8(FB + q, 18);
+    q = q + 1;
+    if (o_cstype != 0) {
+        q = q + d_int(FB, q, o_cstype);
+        store8(FB + q, 12);
+        store8(FB + q + 1, 6);
+        q = q + 2;
+    }
+    if (o_cid != 0) {
+        q = q + d_int(FB, q, 391);
+        q = q + d_int(FB, q, 392);
+        q = q + d_int(FB, q, 0);
+        store8(FB + q, 12);
+        store8(FB + q + 1, 30);
+        q = q + 2;
+        q = q + d_int(FB, q, fdarray - cff);
+        store8(FB + q, 12);
+        store8(FB + q + 1, 36);
+        q = q + 2;
+        q = q + d_int(FB, q, fdselect - cff);
+        store8(FB + q, 12);
+        store8(FB + q + 1, 37);
+        q = q + 2;
+    }
+
+    var clen = p - cff;
+    put_u32(FB, 76, REKHA_TAG_CFF);
+    put_u32(FB, 84, cff);
+    put_u32(FB, 88, clen);
+    g_cff_at = cff;
+    g_cff_len = clen;
+    g_font_len = cff + clen;
+    return g_font_len;
+}
+
+fn opts_reset(): i64 {
+    o_cstype = 2;
+    o_major = 1;
+    o_offsize = 4;
+    o_cid = 0;
+    o_nocs = 0;
+    return 0;
+}
+
+var g_f = 0;
+var g_o = 0;
+
+fn load(gid): i64 {
+    g_o = rekha_load_glyph(g_f, gid);
+    return rekha_outline_n_points(g_o);
+}
+
+# Assert point k of the loaded outline.
+fn pt(k, x, y, flag): i64 {
+    check(load64(rekha_outline_xs(g_o) + k * 8), x);
+    check(load64(rekha_outline_ys(g_o) + k * 8), y);
+    check(load8(rekha_outline_on_curve(g_o) + k), flag);
+    return 0;
+}
+
+fn ends1(e0): i64 {
+    check(rekha_outline_n_contours(g_o), 1);
+    check(load64(rekha_outline_end_pts(g_o)), e0);
+    return 0;
+}
+
+fn empty(gid): i64 {
+    load(gid);
+    check(g_o != 0, 1);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_outline_n_points(g_o), 0);
+    return 0;
+}
+
+# ================================================================
+# A) one glyph per operator shape
+# ================================================================
+var g_cst = 0;
+var g_gst = 0;
+var g_lst = 0;
+var g_ls1 = 0;
+
+fn glyphs_a(): i64 {
+    var cs = g_cst;
+    var i = 0;
+    # 0 .notdef: endchar
+    cs_reset(); cs_op(14); tab_add(cs);
+    # 1 rmoveto + rlineto x2
+    cs_reset(); cs_n(10); cs_n(20); cs_op(21); cs_n(30); cs_n(0); cs_n(0); cs_n(40); cs_op(5); cs_op(14); tab_add(cs);
+    # 2 width + hmoveto, vlineto, hlineto
+    cs_reset(); cs_n(500); cs_n(15); cs_op(22); cs_n(20); cs_op(7); cs_n(30); cs_op(6); cs_op(14); tab_add(cs);
+    # 3 rrcurveto
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(10); cs_n(0); cs_n(20); cs_n(10); cs_n(0); cs_n(20); cs_op(8); cs_op(14); tab_add(cs);
+    # 4 hhcurveto with dy1
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_op(27);
+    cs_op(14); tab_add(cs);
+    # 5 vvcurveto with dx1
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_op(26);
+    cs_op(14); tab_add(cs);
+    # 6 hvcurveto, 5 args (the extra ends the curve)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_n(7); cs_op(31);
+    cs_op(14); tab_add(cs);
+    # 7 vhcurveto, 8 args (two alternating curves)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 1;
+    while (i <= 8) { cs_n(i * 10); i = i + 1; }
+    cs_op(30); cs_op(14); tab_add(cs);
+    # 8 rcurveline
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(10); cs_n(0); cs_n(10); cs_n(10); cs_n(0); cs_n(10); cs_n(5); cs_n(5); cs_op(24); cs_op(14); tab_add(cs);
+    # 9 rlinecurve
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(5); cs_n(0); cs_n(10); cs_n(0); cs_n(10); cs_n(10); cs_n(0); cs_n(10); cs_op(25); cs_op(14); tab_add(cs);
+    # 10 flex (13 args)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 1;
+    while (i <= 12) { cs_n(i); i = i + 1; }
+    cs_n(50); cs_op12(35); cs_op(14); tab_add(cs);
+    # 11 hflex: dx1 dx2 dy2 dx3 dx4 dx5 dx6
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(10); cs_n(20); cs_n(5); cs_n(30); cs_n(40); cs_n(50); cs_n(60); cs_op12(34); cs_op(14); tab_add(cs);
+    # 12 hflex1: dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(10); cs_n(1); cs_n(20); cs_n(2); cs_n(30); cs_n(40); cs_n(50); cs_n(3); cs_n(60); cs_op12(36);
+    cs_op(14); tab_add(cs);
+    # 13 flex1, |sum dx| > |sum dy|: last arg is dx6, dy6 returns to the start y
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(7);
+    cs_op12(37); cs_op(14); tab_add(cs);
+    # 14 flex1, |sum dy| >= |sum dx|: last arg is dy6
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(1); cs_n(10); cs_n(7);
+    cs_op12(37); cs_op(14); tab_add(cs);
+    # 15 hstem (2 stems) + hintmask with 2 implied vstem args (3 stems -> 1 mask byte = 14, endchar's
+    #    byte: skipped, not run), then rmoveto 1 1 / rlineto 4 0
+    cs_reset(); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_op(1); cs_n(5); cs_n(6); cs_op(19); cs_b(14);
+    cs_n(1); cs_n(1); cs_op(21); cs_n(4); cs_n(0); cs_op(5); cs_op(14); tab_add(cs);
+    # 16 callsubr (local subr 0: "10 0 rlineto return")
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_n(0); cs_n(10); cs_op(5); cs_op(14);
+    tab_add(cs);
+    # 17 callgsubr (global subr 0: "0 5 rlineto return")
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(29); cs_n(3); cs_n(0); cs_op(5); cs_op(14);
+    tab_add(cs);
+    # 18 endchar inside a subroutine (local subr 1: "0 7 rlineto endchar")
+    cs_reset(); cs_n(2); cs_n(2); cs_op(21); cs_n(0 - 106); cs_op(10); tab_add(cs);
+    # 19 a moveto-only contour is dropped
+    cs_reset(); cs_n(5); cs_n(5); cs_op(21); cs_n(10); cs_n(10); cs_op(21); cs_n(5); cs_n(0); cs_op(5);
+    cs_op(14); tab_add(cs);
+    # 20 two contours
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(10); cs_n(0); cs_op(5);
+    cs_n(20); cs_n(20); cs_op(21); cs_n(0); cs_n(10); cs_op(5); cs_op(14); tab_add(cs);
+    # 21 16.16 numbers (255): rmoveto 1.5 -1.5 then rlineto 0.5 0.25 -> rounding floor(v + 1/2)
+    cs_reset(); cs_fixed(0x18000); cs_fixed(0 - 0x18000); cs_op(21); cs_fixed(0x8000); cs_fixed(0x4000);
+    cs_op(5); cs_op(14); tab_add(cs);
+    # 22 the integer encodings: 108, 1131, -108, -1131, 1132 (int16) and 32767
+    cs_reset(); cs_n(108); cs_n(1131); cs_op(21); cs_n(0 - 108); cs_n(0 - 1131); cs_op(5);
+    cs_n(1132); cs_n(32767); cs_op(5); cs_op(14); tab_add(cs);
+    # 23 width + rmoveto (3 args) and a width on endchar-only glyph
+    cs_reset(); cs_n(600); cs_n(1); cs_n(2); cs_op(21); cs_n(3); cs_n(4); cs_op(5); cs_op(14); tab_add(cs);
+    # 24 a cubic that ends on its start point (a closed curve)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(10); cs_n(0); cs_n(10); cs_n(10); cs_n(0 - 20);
+    cs_n(0 - 10); cs_op(8); cs_op(14); tab_add(cs);
+    # 25 vmoveto with width
+    cs_reset(); cs_n(700); cs_n(9); cs_op(4); cs_n(1); cs_op(6); cs_op(14); tab_add(cs);
+    return 0;
+}
+
+fn subrs_a(): i64 {
+    cs_reset(); cs_n(10); cs_n(0); cs_op(5); cs_op(11); tab_add(g_lst);    # local 0
+    cs_reset(); cs_n(0); cs_n(7); cs_op(5); cs_op(14); tab_add(g_lst);     # local 1: endchar
+    cs_reset(); cs_n(0 - 105); cs_op(10); cs_op(11); tab_add(g_lst);        # local 2: calls itself
+    cs_reset(); cs_n(0); cs_n(5); cs_op(5); cs_op(11); tab_add(g_gst);     # global 0
+    # locals 3..10: a 4-way fan-out chain (local k calls local k+1 four times); local 11 is a leaf
+    var k = 3;
+    while (k <= 10) {
+        cs_reset();
+        var j = 0;
+        while (j < 4) { cs_n(k + 1 - 107); cs_op(10); j = j + 1; }
+        cs_op(11);
+        tab_add(g_lst);
+        k = k + 1;
+    }
+    cs_reset(); cs_n(0); cs_n(0); cs_op(5); cs_op(11); tab_add(g_lst);     # local 11
+    return 0;
+}
+
+fn t_ops(): i64 {
+    g_group = "A operators";
+    check(load(0), 0);
+    check(rekha_outline_n_contours(g_o), 0);
+    check(load(1), 3);
+    ends1(2);
+    pt(0, 10, 20, 1); pt(1, 40, 20, 1); pt(2, 40, 60, 1);
+    check(load(2), 3);
+    pt(0, 15, 0, 1); pt(1, 15, 20, 1); pt(2, 45, 20, 1);
+    check(load(3), 4);
+    ends1(3);
+    pt(0, 0, 0, 1); pt(1, 10, 0, 2); pt(2, 30, 10, 2); pt(3, 30, 30, 1);
+    check(load(4), 4);
+    pt(1, 10, 5, 2); pt(2, 30, 35, 2); pt(3, 70, 35, 1);
+    check(load(5), 4);
+    pt(1, 5, 10, 2); pt(2, 25, 40, 2); pt(3, 25, 80, 1);
+    check(load(6), 4);
+    pt(1, 10, 0, 2); pt(2, 30, 30, 2); pt(3, 37, 70, 1);
+    check(load(7), 7);
+    pt(1, 0, 10, 2); pt(2, 20, 40, 2); pt(3, 60, 40, 1);
+    pt(4, 110, 40, 2); pt(5, 170, 110, 2); pt(6, 170, 190, 1);
+    check(load(8), 5);
+    pt(1, 10, 0, 2); pt(2, 20, 10, 2); pt(3, 20, 20, 1); pt(4, 25, 25, 1);
+    check(load(9), 5);
+    pt(1, 5, 0, 1); pt(2, 15, 0, 2); pt(3, 25, 10, 2); pt(4, 25, 20, 1);
+    check(load(10), 7);
+    pt(1, 1, 2, 2); pt(2, 4, 6, 2); pt(3, 9, 12, 1); pt(4, 16, 20, 2); pt(5, 25, 30, 2); pt(6, 36, 42, 1);
+    check(load(11), 7);
+    pt(1, 10, 0, 2); pt(2, 30, 5, 2); pt(3, 60, 5, 1); pt(4, 100, 5, 2); pt(5, 150, 0, 2); pt(6, 210, 0, 1);
+    check(load(12), 7);
+    pt(1, 10, 1, 2); pt(2, 30, 3, 2); pt(3, 60, 3, 1); pt(4, 100, 3, 2); pt(5, 150, 6, 2); pt(6, 210, 0, 1);
+    check(load(13), 7);
+    pt(3, 30, 3, 1); pt(4, 40, 4, 2); pt(5, 50, 5, 2); pt(6, 57, 0, 1);
+    check(load(14), 7);
+    pt(3, 3, 30, 1); pt(4, 4, 40, 2); pt(5, 5, 50, 2); pt(6, 0, 57, 1);
+    check(load(15), 2);
+    pt(0, 1, 1, 1); pt(1, 5, 1, 1);
+    check(load(16), 3);
+    pt(1, 10, 0, 1); pt(2, 10, 10, 1);
+    check(load(17), 3);
+    pt(1, 0, 5, 1); pt(2, 3, 5, 1);
+    check(load(18), 2);
+    pt(0, 2, 2, 1); pt(1, 2, 9, 1);
+    check(load(19), 2);
+    ends1(1);
+    pt(0, 15, 15, 1); pt(1, 20, 15, 1);
+    check(load(20), 4);
+    check(rekha_outline_n_contours(g_o), 2);
+    check(load64(rekha_outline_end_pts(g_o)), 1);
+    check(load64(rekha_outline_end_pts(g_o) + 8), 3);
+    pt(2, 30, 20, 1); pt(3, 30, 30, 1);
+    check(load(21), 2);
+    pt(0, 2, 0 - 1, 1);                             # 1.5 -> 2, -1.5 -> -1
+    pt(1, 2, 0 - 1, 1);                             # (2.0, -1.25) -> 2, floor(-0.75) = -1
+    check(load(22), 3);
+    pt(0, 108, 1131, 1); pt(1, 0, 0, 1); pt(2, 1132, 32767, 1);
+    check(load(23), 2);
+    pt(0, 1, 2, 1); pt(1, 4, 6, 1);
+    check(load(24), 4);
+    pt(3, 0, 0, 1);
+    check(load(25), 2);
+    pt(0, 0, 9, 1); pt(1, 1, 9, 1);
+    return 0;
+}
+
+# ================================================================
+# B) refusals: each glyph is EMPTY
+# ================================================================
+var B0 = 26;
+
+fn glyphs_b(): i64 {
+    var cs = g_cst;
+    var i = 0;
+    # B0 seac
+    cs_reset(); cs_n(0); cs_n(0); cs_n(65); cs_n(66); cs_op(14); tab_add(cs);
+    # B1 an arithmetic operator (12 10 add)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(2); cs_op12(10); cs_op(14); tab_add(cs);
+    # B2 49 arguments
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 49) { cs_n(1); i = i + 1; }
+    cs_op(5); cs_op(14); tab_add(cs);
+    # B3 subroutine recursion past depth 10 (local 2 calls itself)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 105); cs_op(10); cs_op(14); tab_add(cs);
+    # B4 65,536 operators: local 3's 4-way fan-out 8 levels deep
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 104); cs_op(10); cs_op(14); tab_add(cs);
+    # B5 no endchar
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(1); cs_op(5); tab_add(cs);
+    # B6 rlineto before any moveto
+    cs_reset(); cs_n(1); cs_n(1); cs_op(5); cs_op(14); tab_add(cs);
+    # B7 rlineto with an odd argument count
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(1); cs_n(1); cs_op(5); cs_op(14); tab_add(cs);
+    # B8 4,097 points (1 moveto + 4,096 lineto points in 24-point rlinetos)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 4096) {
+        var j = 0;
+        while (j < 24 && i < 4096) { cs_n(1); cs_n(0); j = j + 1; i = i + 1; }
+        cs_op(5);
+    }
+    cs_op(14); tab_add(cs);
+    # B9 exactly 4,096 points decodes (1 + 4,095) — NOT a refusal; checked below
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 4095) {
+        var jj = 0;
+        while (jj < 24 && i < 4095) { cs_n(1); cs_n(0); jj = jj + 1; i = i + 1; }
+        cs_op(5);
+    }
+    cs_op(14); tab_add(cs);
+    # B10 reserved operator 2
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_op(2); cs_op(14); tab_add(cs);
+    # B11 a hintmask whose mask byte runs past the charstring
+    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_op(19); tab_add(cs);
+    # B12 callsubr past the Subrs INDEX
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(100); cs_op(10); cs_op(14); tab_add(cs);
+    # B13 a number cut by the end of the charstring (28 needs 2 more bytes)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_b(28); cs_b(1); tab_add(cs);
+    # B14 hvcurveto with 6 arguments
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 6) { cs_n(1); i = i + 1; }
+    cs_op(31); cs_op(14); tab_add(cs);
+    # B15 flex with 12 arguments
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 12) { cs_n(1); i = i + 1; }
+    cs_op12(35); cs_op(14); tab_add(cs);
+    # B16 return at the top level (no endchar)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(0); cs_op(5); cs_op(11); tab_add(cs);
+    return 0;
+}
+
+fn t_refuse(): i64 {
+    g_group = "B refusals";
+    var k = 0;
+    while (k <= 16) {
+        if (k != 9) { empty(B0 + k); }
+        k = k + 1;
+    }
+    check(load(B0 + 9), 4096);
+    ends1(4095);
+    pt(4095, 4095, 0, 1);
+    check(load(9999), 0);                           # a gid past CharStrings
+    check(rekha_outline_n_contours(rekha_load_glyph(g_f, 0 - 1)), 0);
+    return 0;
+}
+
+# ================================================================
+# C) CID-keyed: FDArray + FDSelect, per-FD local Subrs
+# ================================================================
+fn t_cid(): i64 {
+    g_group = "C CID-keyed";
+    var cs = tab_new();
+    var gs = tab_new();
+    var l0 = tab_new();
+    var l1 = tab_new();
+    var gid = 0;
+    while (gid < 4) {                               # every glyph: moveto, local subr 0, endchar
+        cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_op(14); tab_add(cs);
+        gid = gid + 1;
+    }
+    cs_reset(); cs_n(10); cs_n(0); cs_op(5); cs_op(11); tab_add(l0);      # FD 0: along x
+    cs_reset(); cs_n(0); cs_n(10); cs_op(5); cs_op(11); tab_add(l1);      # FD 1: along y
+    var fmt = 0;
+    while (fmt < 2) {
+        opts_reset();
+        o_cid = 3;
+        if (fmt == 1) { o_cid = 10; }
+        var len = build(cs, gs, l0, l1);
+        g_f = rekha_font_open(FB, len);
+        check(g_f != 0, 1);
+        check(load64(g_f + 200) != 0, 1);           # FDArray resolved
+        check(load64(g_f + 192), 0);                # no Top DICT Private Subrs in a CID font
+        check(load(1), 2);
+        pt(1, 10, 0, 1);                            # gid 1 -> FD 0
+        check(load(2), 2);
+        pt(1, 0, 10, 1);                            # gid 2 -> FD 1
+        check(load(3), 2);
+        pt(1, 0, 10, 1);
+        fmt = fmt + 1;
+    }
+    # FDSelect format 3 whose sentinel stops short of the last glyph: that glyph has no FD -> empty
+    opts_reset();
+    o_cid = 3;
+    var l2 = build(cs, gs, l0, l1);
+    var sel = load64(rekha_font_open(FB, l2) + 208);
+    put_u16(FB, sel + 9, 3);
+    g_f = rekha_font_open(FB, l2);
+    check(load(2), 2);
+    empty(3);
+    return 0;
+}
+
+# ================================================================
+# D) resolve refusals: the CFF cache stays empty and glyphs load empty
+# ================================================================
+fn no_cff(len): i64 {
+    g_f = rekha_font_open(FB, len);
+    check(g_f != 0, 1);
+    check(load64(g_f + 176), 0);
+    empty(1);
+    return 0;
+}
+
+fn t_resolve(): i64 {
+    g_group = "D resolve";
+    var len = 0;
+    opts_reset(); o_cstype = 1; len = build(g_cst, g_gst, g_lst, 0); no_cff(len);
+    opts_reset(); o_cstype = 0; len = build(g_cst, g_gst, g_lst, 0);
+    g_f = rekha_font_open(FB, len);
+    check(load(1), 3);                              # CharstringType absent defaults to 2
+    opts_reset(); o_major = 2; len = build(g_cst, g_gst, g_lst, 0); no_cff(len);
+    opts_reset(); o_nocs = 1; len = build(g_cst, g_gst, g_lst, 0); no_cff(len);
+    opts_reset(); o_offsize = 5; len = build(g_cst, g_gst, g_lst, 0); no_cff(len);
+    opts_reset(); len = build(g_cst, g_gst, g_lst, 0);
+    put_u32(FB, 88, g_cff_len - 1);                 # CFF declared one byte short: the local Subrs INDEX
+    g_f = rekha_font_open(FB, len);                 # (the table's last bytes) no longer validates
+    check(load64(g_f + 176) != 0, 1);
+    check(load64(g_f + 192), 0);
+    check(load(1), 3);                              # a glyph without subroutines still decodes
+    empty(16);                                      # callsubr has no Subrs to call
+    opts_reset(); len = build(g_cst, g_gst, g_lst, 0);
+    put_u32(FB, 0, 0x00010000);                     # the same bytes as a TrueType sfntVersion: CFF not read
+    no_cff(len);
+    return 0;
+}
+
+# ================================================================
+# E) emission: cubic -> sadish verbs, and a fill
+# ================================================================
+fn t_emit(): i64 {
+    g_group = "E emit";
+    opts_reset();
+    var len = build(g_cst, g_gst, g_lst, 0);
+    g_f = rekha_font_open(FB, len);
+    var p = rekha_glyph_to_sdpath(g_f, 3, SD_ONE, 0, 0);
+    check(sd_path_verb_count(p), 3);
+    var verbs = load64(p + SD_PATH_VERBS_OFFSET);
+    check(load64(verbs), SD_VERB_MOVETO);
+    check(load64(verbs + 8), SD_VERB_CUBICTO);
+    check(load64(verbs + 16), SD_VERB_CLOSE);
+    var pts = load64(p + SD_PATH_POINTS_OFFSET);
+    check(sd_path_point_count(p), 4);
+    check(sd_point_x(load64(pts + 8)), 10 * SD_ONE);
+    check(sd_point_y(load64(pts + 8)), 0);
+    check(sd_point_x(load64(pts + 16)), 30 * SD_ONE);
+    check(sd_point_y(load64(pts + 16)), 0 - 10 * SD_ONE);      # y-flip
+    check(sd_point_x(load64(pts + 24)), 30 * SD_ONE);
+    check(sd_point_y(load64(pts + 24)), 0 - 30 * SD_ONE);
+    # glyph 8 (rcurveline): moveto, cubicto, lineto, close
+    p = rekha_glyph_to_sdpath(g_f, 8, SD_ONE, 0, 0);
+    verbs = load64(p + SD_PATH_VERBS_OFFSET);
+    check(sd_path_verb_count(p), 4);
+    check(load64(verbs + 8), SD_VERB_CUBICTO);
+    check(load64(verbs + 16), SD_VERB_LINETO);
+    # a hand-built contour whose last two points are cubic controls curves back to its start, and a
+    # lone cubic control becomes a line
+    var xs = alloc(64);
+    var ys = alloc(64);
+    var oc = alloc(64);
+    var eps = alloc(16);
+    store64(xs, 0); store64(ys, 0); store8(oc, 1);
+    store64(xs + 8, 10); store64(ys + 8, 0); store8(oc + 1, 2);
+    store64(xs + 16, 10); store64(ys + 16, 10); store8(oc + 2, 2);
+    store64(eps, 2);
+    var o = alloc(REKHA_OUTLINE_SIZE);
+    store64(o, 1); store64(o + 8, 3); store64(o + 16, eps); store64(o + 24, xs); store64(o + 32, ys);
+    store64(o + 40, oc);
+    p = rekha_outline_to_sdpath(o, SD_ONE, 0, 0);
+    check(sd_path_verb_count(p), 3);                # moveto, cubicto (to the start), close
+    check(load64(load64(p + SD_PATH_VERBS_OFFSET) + 8), SD_VERB_CUBICTO);
+    check(sd_point_x(load64(load64(p + SD_PATH_POINTS_OFFSET) + 24)), 0);
+    store64(eps, 1);
+    store64(o + 8, 2);                              # [on, cubic]: the lone control is a line
+    p = rekha_outline_to_sdpath(o, SD_ONE, 0, 0);
+    check(sd_path_verb_count(p), 3);
+    check(load64(load64(p + SD_PATH_VERBS_OFFSET) + 8), SD_VERB_LINETO);
+    # fill: a 6x6 square drawn with rlineto on an 8x8 canvas — interior covered, outside empty
+    var cs = tab_new();
+    cs_reset(); cs_n(1); cs_n(1); cs_op(21); cs_n(6); cs_op(6); cs_n(6); cs_op(7); cs_n(0 - 6); cs_op(6);
+    cs_op(14); tab_add(cs);
+    var gs = tab_new();
+    var ls = tab_new();
+    len = build(cs, gs, ls, 0);
+    g_f = rekha_font_open(FB, len);
+    var cv = sd_canvas_new(8, 8);
+    sd_canvas_fill_path(cv, rekha_glyph_to_sdpath(g_f, 0, SD_ONE, 0, 8 * SD_ONE), SD_FILL_NONZERO);
+    check(sd_canvas_coverage_at(cv, 3, 4), 255);
+    check(sd_canvas_coverage_at(cv, 0, 0), 0);
+    check(sd_canvas_coverage_at(cv, 7, 7), 0);
+    return 0;
+}
+
+# ================================================================
+# F) allocation
+# ================================================================
+var g_arena = 0;
+
+fn hook(n): i64 { return arena_alloc(g_arena, n); }
+
+fn t_alloc(): i64 {
+    g_group = "F alloc";
+    opts_reset();
+    var len = build(g_cst, g_gst, g_lst, 0);
+    var a = alloc_used();
+    g_f = rekha_font_open(FB, len);
+    check(alloc_used() - a, REKHA_FONT_SIZE);
+    g_arena = arena_new_growable(4194304);
+    sd_alloc_set(&hook);
+    var g0 = alloc_used();
+    var a0 = arena_used(g_arena);
+    load(1);                                        # 1 contour, 3 points: 48 + 8 + 3 x 17 -> 112
+    check(arena_used(g_arena) - a0, 112);
+    a0 = arena_used(g_arena);
+    load(19);                                       # the dropped moveto's slot is reused by the next moveto:
+    check(arena_used(g_arena) - a0, (48 + 8 + 2 * 17 + 7) & (0 - 8));   # capacity 2, not 3
+    a0 = arena_used(g_arena);
+    load(B0);                                       # a refusal: one empty record
+    check(arena_used(g_arena) - a0, REKHA_OUTLINE_SIZE);
+    check(alloc_used() - g0, 0);                    # the global heap pays nothing under the hook
+    sd_alloc_set(0);
+    a = alloc_used();
+    rekha_char_to_glyph(g_f, 65);
+    rekha_advance_width(g_f, 3);
+    check(alloc_used() - a, 0);
+    check(rekha_advance_width(g_f, 3), 503);        # hmtx is read as for any font
+    return 0;
+}
+
+# ================================================================
+# G) A/B guard differential: every cut of the CFF table's declared length, and seeded mutations
+# ================================================================
+var GUARD = 256;
+var g_gb = 0;
+
+fn digest(len, fill): i64 {
+    memcpy(g_gb, FB, len);
+    memset(g_gb + len, fill, GUARD);
+    var h = 0xcbf29ce484222325;
+    var f = rekha_font_open(g_gb, len);
+    if (f == 0) { return 1; }
+    arena_reset(g_arena);
+    sd_alloc_set(&hook);
+    var gid = 0;
+    while (gid < 48) {
+        var o = rekha_load_glyph(f, gid);
+        var np = rekha_outline_n_points(o);
+        h = (h ^ np) * 0x100000001b3;
+        h = (h ^ rekha_outline_n_contours(o)) * 0x100000001b3;
+        var k = 0;
+        while (k < np) {
+            h = (h ^ load64(rekha_outline_xs(o) + k * 8)) * 0x100000001b3;
+            h = (h ^ load64(rekha_outline_ys(o) + k * 8)) * 0x100000001b3;
+            h = (h ^ load8(rekha_outline_on_curve(o) + k)) * 0x100000001b3;
+            k = k + 1;
+        }
+        gid = gid + 1;
+    }
+    sd_alloc_set(0);
+    return h;
+}
+
+var g_seed = 0;
+
+fn rnd(n): i64 {
+    g_seed = (g_seed * 6364136223846793005 + 1442695040888963407) & 0x7FFFFFFFFFFFFFFF;
+    return (g_seed >> 33) % n;
+}
+
+fn t_guard(): i64 {
+    g_group = "G guard";
+    opts_reset();
+    var len = build(g_cst, g_gst, g_lst, 0);
+    check(digest(len, 0xA5), digest(len, 0x5A));
+    var full = g_cff_len;
+    var bad = 0;
+    var cut = 0;
+    while (cut < full) {                            # the CFF table ends at EOF: each cut ends the file too
+        build(g_cst, g_gst, g_lst, 0);
+        put_u32(FB, 88, cut);
+        if (digest(g_cff_at + cut, 0xA5) != digest(g_cff_at + cut, 0x5A)) { bad = bad + 1; }
+        if (cut < 400) { cut = cut + 1; } else { cut = cut + 97; }
+    }
+    check(bad, 0);
+    g_seed = 99;
+    var m = 0;
+    bad = 0;
+    while (m < 300) {
+        build(g_cst, g_gst, g_lst, 0);
+        var flips = 1 + rnd(8);
+        var k = 0;
+        while (k < flips) {
+            var at = g_cff_at + rnd(g_cff_len);
+            if (rnd(3) == 0) { at = g_cff_at + rnd(400); }        # bias toward the header / INDEXes
+            store8(FB + at, rnd(256));
+            k = k + 1;
+        }
+        if (digest(len, 0xA5) != digest(len, 0x5A)) { bad = bad + 1; }
+        m = m + 1;
+    }
+    check(bad, 0);
+    return 0;
+}
+
+# ================================================================
+# H) the cases mutation testing asked for: each would decode (or cost) differently if its rule were
+#    missing — a refusal is asserted on a glyph that HAS drawn something, so emptiness means the rule.
+# ================================================================
+fn draw(): i64 {                                    # 0 0 rmoveto 5 0 rlineto: two points
+    cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5);
+    return 0;
+}
+
+fn open_h(cs, gs, ls): i64 {
+    opts_reset();
+    var len = build(cs, gs, ls, 0);
+    g_f = rekha_font_open(FB, len);
+    return len;
+}
+
+fn t_kills(): i64 {
+    g_group = "H kills";
+    var cs = tab_new();
+    var gs = tab_new();
+    var ls = tab_new();
+    var i = 0;
+    # 0 seac after a contour
+    cs_reset(); draw(); cs_n(0); cs_n(0); cs_n(65); cs_n(66); cs_op(14); tab_add(cs);
+    # 1 control: the same contour, plain endchar
+    cs_reset(); draw(); cs_op(14); tab_add(cs);
+    # 2 a lineto before the moveto, then a real contour
+    cs_reset(); cs_n(1); cs_n(1); cs_op(5); draw(); cs_op(14); tab_add(cs);
+    # 3 two contours and no endchar
+    cs_reset(); draw(); cs_n(0); cs_n(5); cs_op(21); cs_n(5); cs_n(0); cs_op(5); tab_add(cs);
+    # 4 49 stack arguments cleared by hstem, then a contour; 5: 48 of them
+    cs_reset();
+    i = 0;
+    while (i < 49) { cs_n(1); i = i + 1; }
+    cs_op(1); draw(); cs_op(14); tab_add(cs);
+    cs_reset();
+    i = 0;
+    while (i < 48) { cs_n(1); i = i + 1; }
+    cs_op(1); draw(); cs_op(14); tab_add(cs);
+    # 6 70,002 operators of hstem before a contour; 7: 63,000 of them
+    cs_reset();
+    i = 0;
+    while (i < 23334) { cs_n(1); cs_n(1); cs_op(1); i = i + 1; }
+    draw(); cs_op(14); tab_add(cs);
+    cs_reset();
+    i = 0;
+    while (i < 21000) { cs_n(1); cs_n(1); cs_op(1); i = i + 1; }
+    draw(); cs_op(14); tab_add(cs);
+    # 8 a subroutine whose hint mask runs past its end, then the caller draws (local 0)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
+    tab_add(cs);
+    # 9 vvcurveto with dx1 over TWO curves
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    cs_n(5); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_n(11); cs_n(12); cs_n(13); cs_n(14); cs_op(26); cs_op(14);
+    tab_add(cs);
+    # 10 flex1 with |sum dx| == |sum dy|: the tie takes the dy6 branch
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 10) { cs_n(1); i = i + 1; }
+    cs_n(7); cs_op12(37); cs_op(14); tab_add(cs);
+    # 11 a moveto-only contour LAST (dropped by endchar): 2 points kept, 3 held at once
+    cs_reset(); draw(); cs_n(3); cs_n(3); cs_op(21); cs_op(14); tab_add(cs);
+    # 12 callsubr through a chain whose leaf runs at depth 11 (locals 1..11); 13: depth 10 (locals 2..11)
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1 - 107); cs_op(10); cs_op(14); tab_add(cs);
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(2 - 107); cs_op(10); cs_op(14); tab_add(cs);
+    # 14 callsubr local 12, whose END offset lies before its start
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(12 - 107); cs_op(10); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
+    tab_add(cs);
+    # locals: 0 = hint mask past its end; 1..10 call the next; 11 = leaf draw; 12 = "return", 13 = leaf
+    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_op(19); tab_add(ls);
+    i = 1;
+    while (i <= 10) { cs_reset(); cs_n(i + 1 - 107); cs_op(10); cs_op(11); tab_add(ls); i = i + 1; }
+    cs_reset(); cs_n(5); cs_n(0); cs_op(5); cs_op(11); tab_add(ls);
+    cs_reset(); cs_op(11); cs_op(11); cs_op(11); tab_add(ls);
+    cs_reset(); cs_op(11); tab_add(ls);
+    var len = open_h(cs, gs, ls);
+    empty(0);
+    check(load(1), 2);
+    empty(2);
+    empty(3);
+    empty(4);
+    check(load(5), 2);
+    empty(6);
+    check(load(7), 2);
+    empty(8);
+    check(load(9), 7);
+    pt(1, 5, 10, 2); pt(2, 25, 40, 2); pt(3, 25, 80, 1); pt(4, 25, 91, 2); pt(5, 37, 104, 2); pt(6, 37, 118, 1);
+    check(load(10), 7);
+    pt(3, 3, 3, 1); pt(4, 4, 4, 2); pt(5, 5, 5, 2); pt(6, 0, 12, 1);
+    g_arena = arena_new_growable(1048576);
+    sd_alloc_set(&hook);
+    var a0 = arena_used(g_arena);
+    check(load(11), 2);
+    check(arena_used(g_arena) - a0, (48 + 8 + 3 * 17 + 7) & (0 - 8));   # carved for 3, holds 2
+    sd_alloc_set(0);
+    empty(12);
+    check(load(13), 2);                             # moveto + the chain leaf's line: depth 10 is allowed
+    # local 12's end offset (offset[13], 1-based) rewritten below its start: the subroutine is refused
+    var n = tab_count(ls);
+    var offs = g_ls_at + 3;
+    put_u32(FB, offs + 13 * 4, load64(ls + 16 + 12 * 8));
+    g_f = rekha_font_open(FB, len);
+    check(load(14), 0);
+    put_u32(FB, offs + 13 * 4, load64(ls + 16 + 13 * 8) + 1);
+    g_f = rekha_font_open(FB, len);
+    check(load(14), 2);                             # control: the real offset decodes
+
+    # a negative Private Subrs offset that lands on a VALID INDEX (the Global Subrs) is still refused
+    var cs2 = tab_new();
+    var gs2 = tab_new();
+    var ls2 = tab_new();
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_op(14); tab_add(cs2);
+    cs_reset(); cs_n(0); cs_n(9); cs_op(5); cs_op(11); tab_add(gs2);
+    cs_reset(); cs_n(9); cs_n(0); cs_op(5); cs_op(11); tab_add(ls2);
+    len = open_h(cs2, gs2, ls2);
+    check(load(0), 2);
+    pt(1, 9, 0, 1);
+    d_int(FB, g_priv0 + 11, g_gs_at - g_priv0);     # Subrs operand -> the Global Subr INDEX (negative)
+    check(g_gs_at < g_priv0, 1);
+    g_f = rekha_font_open(FB, len);
+    check(load64(g_f + 192), 0);
+    empty(0);
+
+    # bias: 1,239 / 1,240 local subroutines (107 / 1131) and 33,899 / 33,900 global ones (1131 / 32768)
+    var k = 0;
+    while (k < 2) {
+        var cs3 = tab_new();
+        var gs3 = tab_new_cap(34000);
+        var ls3 = tab_new();
+        var nl = 1239 + k;
+        var ng = 33899 + k;
+        var lb = 107;
+        if (nl >= 1240) { lb = 1131; }
+        var gb = 1131;
+        if (ng >= 33900) { gb = 32768; }
+        cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - lb); cs_op(10); cs_n(0 - gb); cs_op(29); cs_op(14);
+        tab_add(cs3);
+        cs_reset(); cs_n(4); cs_n(0); cs_op(5); cs_op(11); tab_add(ls3);
+        i = 1;
+        while (i < nl) { cs_reset(); cs_op(11); tab_add(ls3); i = i + 1; }
+        cs_reset(); cs_n(0); cs_n(4); cs_op(5); cs_op(11); tab_add(gs3);
+        i = 1;
+        while (i < ng) { cs_reset(); cs_op(11); tab_add(gs3); i = i + 1; }
+        open_h(cs3, gs3, ls3);
+        check(load(0), 3);
+        pt(1, 4, 0, 1);
+        pt(2, 4, 4, 1);
+        k = k + 1;
+    }
+
+    # genuine 5-byte CharStrings offsets: well-formed bytes, but offSize 5 is not CFF — refused
+    opts_reset();
+    o_offsize = 5;
+    len = build(cs, gs, ls, 0);
+    no_cff(len);
+    opts_reset();
+    o_offsize = 3;                                  # control: 3-byte offsets are legal and decode
+    len = build(cs, gs, ls, 0);
+    g_f = rekha_font_open(FB, len);
+    check(load(1), 2);
+
+    # FDSelect cut by the CFF extent (it is the table's last structure): format 3 and format 0
+    var cc = tab_new();
+    var c0 = tab_new();
+    var c1 = tab_new();
+    var gid = 0;
+    while (gid < 3) { cs_reset(); draw(); cs_op(14); tab_add(cc); gid = gid + 1; }
+    k = 0;
+    while (k < 2) {
+        opts_reset();
+        o_cid = 3;
+        if (k == 1) { o_cid = 10; }
+        len = build(cc, gs, c0, c1);
+        g_f = rekha_font_open(FB, len);
+        check(load(2), 2);                          # control
+        put_u32(FB, 88, g_cff_len - 1);
+        g_f = rekha_font_open(FB, len - 1);
+        check(load64(g_f + 176), 0);
+        k = k + 1;
+    }
+    n = 0;
+    return n;
+}
+
+fn main(): i64 {
+    alloc_init();
+    FB = alloc(FB_CAP + GUARD);
+    g_gb = alloc(FB_CAP + GUARD);
+    g_cs = alloc(BLOB_CAP);
+    g_cst = tab_new();
+    g_gst = tab_new();
+    g_lst = tab_new();
+    glyphs_a();
+    check(tab_count(g_cst), B0);
+    glyphs_b();
+    subrs_a();
+    opts_reset();
+    var len = build(g_cst, g_gst, g_lst, 0);
+    g_f = rekha_font_open(FB, len);
+    check(g_f != 0, 1);
+    check(load64(g_f + 232), B0 + 17);
+    t_ops();
+    t_refuse();
+    t_cid();
+    t_resolve();
+    t_emit();
+    t_alloc();
+    t_guard();
+    t_kills();
+    if (g_fails == 0) {
+        var ok = "cff_test: PASS (Type 2 operators, refusals, CID-keyed, resolve, cubic emit, guard; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

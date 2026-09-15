@@ -5,6 +5,79 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-09-15 — CFF: OpenType `OTTO` faces draw
+
+### Added — `src/cff.cyr`, the `CFF ` table and its Type 2 charstrings
+
+- **`rekha_font_open` accepts the `OTTO` sfntVersion** and resolves the `CFF ` table once: the four
+  INDEXes, the Top DICT (CharStrings, Private, CharstringType, and for a **CID-keyed** font ROS /
+  FDArray / FDSelect), the Private DICT's local Subrs, and for CID fonts the per-FD Subrs reached
+  through FDSelect (formats 0 and 3).
+- **`rekha_load_glyph` interprets the glyph's Type 2 charstring** into the same `RekhaOutline` glyf
+  produces — so `rekha_glyph_to_sdpath` / `rekha_char_to_sdpath` / the advances work on an OTTO face
+  with **no consumer change**. Implemented: rmoveto / hmoveto / vmoveto (with the optional width),
+  rlineto / hlineto / vlineto, rrcurveto / rcurveline / rlinecurve / vvcurveto / hhcurveto /
+  vhcurveto / hvcurveto, flex / hflex / hflex1 / flex1, hstem / vstem / hstemhm / vstemhm / hintmask /
+  cntrmask (read for their stem count), callsubr / callgsubr with the count-dependent bias, return and
+  endchar.
+- **A cubic control point carries on_curve flag 2** (glyf's 0 = quadratic control, 1 = on-curve);
+  `rekha_emit_contour` turns control, control, on-curve into one `sd_path_cubicto`, and a pair of
+  controls ending a contour curves back to its start. `RekhaOutline` is otherwise unchanged.
+- **The decode contract**, pinned by both the suite and the reference: coordinates accumulate in 16.16
+  and each point is rounded floor(v + ½) into design units (charstring units — all 405 faces surveyed
+  carry FontMatrix = 1 / unitsPerEm); a contour holding only its moveto point is dropped; a glyph is
+  EMPTY (never partial) for `seac` endchar arguments, the deprecated arithmetic / storage operators, an
+  operator with too few arguments, drawing before any moveto, a charstring ending without endchar, and
+  any bound below.
+- **Bounds and work, whatever the font says:** every INDEX header, object span and DICT walk is checked
+  against the CFF table's DECLARED extent; one decode is limited to 65,536 interpreted operators per
+  pass, subroutine nesting 10, a 48-argument stack and `REKHA_COMPOSITE_MAXP` (4,096) points.
+- **`RekhaFont` is 240 B** (was 176): the CFF cache holds the CharStrings / Global Subr / local Subrs
+  INDEXes, FDArray / FDSelect, the table extent and the CharStrings count. Resolved once at open.
+- ⚠ **A font rekha refused before now opens.** An `OTTO` file was rejected by `rekha_font_open` up to
+  0.4.1; a consumer that treated 0 as "not a usable face" now gets a handle and outlines. An `OTTO`
+  file with no `CFF ` table opens too and reads its glyf tables, the way any absent table behaves.
+  A WOFF 1.0 container wrapping an OTTO face now works end to end.
+
+### Verified
+
+- **Against an independent reference, on every CFF face of the dev host.** A Python CFF parser and
+  Type 2 interpreter written from the spec (Adobe TN 5176 / 5177), compared glyph by glyph — point
+  coordinates, flags and contour ends — with `rekha_load_glyph` on **405 OTTO faces: 5,093,070 glyphs
+  and 415,584,832 points, digest-identical, 405 / 405**. The same survey measured what those faces
+  use: no CID-keyed, `seac`, flex or arithmetic operators among them, which is why the suite builds
+  those cases itself.
+- **`programs/cff_test.cyr`** (new, 530 checks): every operator shape decoded to hand-computed points
+  and flags; each refusal asserted on a glyph that HAS drawn a contour, so emptiness means the rule
+  fired; a CID-keyed font with both FDSelect formats and per-FD subroutines; the resolve refusals;
+  cubic emission to exact sadish verbs and 16.16 points plus a fill; exact allocation; and an A/B
+  guard differential over every cut of the CFF table plus 300 seeded mutations of its bytes.
+- **Mutation testing:** 43 mutants over `cff.cyr` and the cubic emit path. The first pass killed 16 —
+  the suite was passing several refusals for the wrong reason (glyphs that would be empty anyway) and
+  had no case for the bias boundaries, the depth / operator / stack limits, a two-curve `vvcurveto`,
+  the flex1 tie, or a trailing moveto-only contour (which sizes the allocation). With those added,
+  19 of 20 re-run mutants are killed; the survivor is a bounds guard two later checks shadow.
+  Three checks no test could observe were REMOVED as no-ops instead of papered over: the width pop on
+  hint operators (floor(n/2) is the same either way) and on endchar (nothing can have been drawn yet),
+  and the CFF loader's load-budget charges (a CFF glyph has no components, so its budget can never be
+  reached).
+
+### Performance — MEASURED, per glyph, whole-face decode under an arena hook (3 passes)
+
+| | glyphs | points / glyph | ns / glyph |
+|---|---:|---:|---:|
+| glyf, LiberationSans (embedded) | 2,620 | 27 | **1,010** |
+| CFF, FreeSans.otf | 6,272 | 49 | **6,005** |
+
+A CFF glyph costs more than a glyf glyph of the same size: the charstring is interpreted TWICE (once to
+count points and contours, once to fill) so each outline is still exactly one `sd_alloc`, and the
+interpreter walks subroutines rather than a flat point array.
+
+### Roadmap
+
+- `seac` (accented glyphs an old CFF face builds from two others; EMPTY today), CFF2, and TrueType
+  Collections (`.ttc`) are the next CFF-side items on README's ladder.
+
 ## [0.4.1] - 2026-09-15 — WOFF 1.0, opt-in
 
 ### Added — `src/woff.cyr` and the `[lib.woff]` bundle

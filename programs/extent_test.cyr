@@ -230,8 +230,11 @@ fn t_open(buf): i64 {
     check(ft != 0, 1);
     check(rekha_units_per_em(ft), 1000);
     check(glyph_x0(ft, 2), 20);
-    put_u32(buf, 0, 0x4F54544F);                        # 'OTTO' (CFF) — refused
-    check(rekha_font_open(buf, FONT_LEN), 0);
+    put_u32(buf, 0, 0x4F54544F);                        # 'OTTO' opens (0.4.2); with no 'CFF ' table the
+    var fo = rekha_font_open(buf, FONT_LEN);            # CFF cache stays empty and glyf is still read
+    check(fo != 0, 1);
+    check(load64(fo + 176), 0);
+    check(glyph_x0(fo, 2), 20);
     put_u32(buf, 0, 0x00020000);
     check(rekha_font_open(buf, FONT_LEN), 0);
 
@@ -627,7 +630,7 @@ fn t_null(): i64 {
 fn t_alloc(buf): i64 {
     g_group = "H alloc";
     build(buf, 1);
-    check(REKHA_FONT_SIZE, 176);
+    check(REKHA_FONT_SIZE, 240);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

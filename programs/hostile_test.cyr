@@ -908,8 +908,8 @@ fn t_null(): i64 {
     put_u16(g_fb, 4, 1000);
     check(rekha_font_open(g_fb, len), 0);              # numTables past EOF
     put_u16(g_fb, 4, 7);
-    put_u32(g_fb, 0, 0x4F54544F);
-    check(rekha_font_open(g_fb, len), 0);              # 'OTTO'
+    put_u32(g_fb, 0, 0x00020000);
+    check(rekha_font_open(g_fb, len), 0);              # an sfntVersion rekha does not read
     # The null font through the whole sweep: every entry point, identically under A and B.
     g_sec = "R-19 null handle sweep";
     memcpy(g_fbuf + HB_GUARD, g_fb, len);
