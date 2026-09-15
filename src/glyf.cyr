@@ -49,7 +49,7 @@
 # on_curve): MEASURED 112 B for that 3-point glyph, and a composite costs its children + an
 # n-slot pointer array + one exact-size merged block — MEASURED 232 B for alloc_test's
 # one-component composite, which 0.3.10 paid 70,856 B for (fixed 4096-point merge buffers).
-# ⚠ `rekha_font_open`'s 160-byte RekhaFont lands in the hook too when one is set. A font outlives
+# ⚠ `rekha_font_open`'s 176-byte RekhaFont lands in the hook too when one is set. A font outlives
 # every frame, so a consumer opens fonts OUTSIDE a scoped hook. Reading one costs nothing:
 # rekha_char_to_glyph / rekha_advance_width / rekha_units_per_em allocate 0 B (MEASURED).
 # ⛔ A pointer that outlives the hook's backing store is dangling. An outline or a path made under
@@ -63,7 +63,8 @@
 # the refusal lands on a rekha site, rekha_char_to_sdpath returns 0 (rc 0 — 0.3.10 faulted, rc 139);
 # when it lands on sadish's verb buffer, the draw still faults (rc 139). So a hook backed by an
 # arena that can refuse must do what dhancha's `dh_falloc` does ("exhaustion degrades to a leak,
-# never to a null deref").
+# never to a null deref"). Filed in sadish 2026-09-15:
+# docs/development/issues/2026-09-15-path-construction-stores-through-a-refused-allocation.md.
 # ================================================================
 var REKHA_OUTLINE_SIZE = 48;
 

@@ -27,7 +27,8 @@
 #      maxp >= 6 B, hhea >= 36 B. A shorter table is cached as absent — rekha_font_open.
 #   4. Variable arrays are bounded by their OWN table's declared extent, never merely by `len`:
 #      hmtx metrics by hmtx_len, loca entries by loca_len, glyph spans by glyf_len, cmap records /
-#      the format-4 segment arrays / the glyphIdArray index by the cmap extent.
+#      the chosen subtable's header and arrays (formats 0 / 4 / 6 / 12 / 13) and the format-4
+#      glyphIdArray index by the cmap extent.
 # ⚠ The glyph bytes inside a span are glyf.cyr's to bound; this file hands out only spans that
 # lie inside glyf.
 
@@ -40,7 +41,7 @@ var REKHA_SFNT_DIRENT_LEN = 16;   # one table-directory entry byte length
 var REKHA_SFNT_VER_TT   = 65536;      # 0x00010000 — TrueType outlines
 var REKHA_SFNT_VER_TRUE = 0x74727565; # 'true' — Apple TrueType
 # 'OTTO' = 0x4F54544F — OpenType/CFF outlines: rejected (rekha reads glyf); CFF is on README's
-# "v0.4.0 / staged" roadmap.
+# v0.4.x line (step 3).
 
 # Table tags — 4 ASCII bytes packed big-endian into an i64.
 var REKHA_TAG_HEAD = 0x68656164;   # 'head'
@@ -92,7 +93,7 @@ fn rekha_rd_i8(buf, off): i64 {
 }
 
 # ================================================================
-# RekhaFont — parsed SFNT handle (160 bytes).
+# RekhaFont — parsed SFNT handle (176 bytes).
 #   +0   data        (ptr — the raw font byte buffer, borrowed not owned)
 #   +8   len         (i64 — byte length of `data`)
 #   +16  sfnt_ver    (i64 — sfntVersion u32; 0x00010000 = TrueType)
@@ -108,9 +109,13 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +104 nhm         (i64 — hhea.numberOfHMetrics; 0 when hhea_off is 0)
 #   +112 hmtx_off    (i64 — 0 = absent)      +120 hmtx_len
 #   +128 cmap_off    (i64 — 0 = absent)      +136 cmap_len
-#   +144 cmap_sub    (i64 — absolute offset of the chosen format-4 subtable, its segment arrays
-#                     validated inside the cmap extent; 0 = none usable)
-#   +152 cmap_segc2  (i64 — that subtable's segCountX2 (>= 2); 0 when cmap_sub is 0)
+#   +144 cmap_sub    (i64 — absolute offset of the chosen subtable, its header and arrays validated
+#                     inside the cmap extent; 0 = none usable)
+#   +152 cmap_n      (i64 — its entry count: format 4 segCountX2 (>= 2), format 6 entryCount,
+#                     format 12/13 numGroups, format 0 256; 0 when cmap_sub is 0)
+#   +160 cmap_first  (i64 — format 6 firstCode; 0 otherwise)
+#   +168 cmap_kind   (i64 — the subtable format (0 / 4 / 6 / 12 / 13), + 0x10000 when it came from a
+#                     (3,0) SYMBOL record, whose lookups also try U+F000 + cp; 0 when cmap_sub is 0)
 #
 # ⭐ WHY A CACHE. Every reader used to re-walk the table directory per call — rekha_char_advance_px
 # walked it for head, cmap, hhea and hmtx on every character, rekha_char_to_sdpath for cmap, maxp,
@@ -124,7 +129,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 160;
+var REKHA_FONT_SIZE = 176;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -136,7 +141,7 @@ fn rekha_font_dir_off(f): i64    { return load64(f + 32); }
 # (sfntVersion + numTables), records the table-directory offset and resolves the
 # table cache (RekhaFont layout above).
 # Returns a RekhaFont pointer, or 0 when `buf` is 0, len < 12, sfntVersion is not
-# 0x00010000 / 'true' (OTTO/CFF: README "v0.4.0 / staged"), the table directory
+# 0x00010000 / 'true' (OTTO/CFF: README's v0.4.x line), the table directory
 # overruns `len`, or the allocation fails. The caller treats 0 as "not a usable
 # TrueType font"; no distinct RekhaErr code is surfaced.
 #
@@ -165,7 +170,7 @@ fn rekha_font_open(buf, len): i64 {
     return f;
 }
 
-# Fill the table cache (+40..+159) of a RekhaFont whose +0..+32 header fields are set.
+# Fill the table cache (+40..+175) of a RekhaFont whose +0..+32 header fields are set.
 # Every table goes through rekha_find_table_len (extent rule) and, where a fixed field is read,
 # a minimum declared length. Stack cell only — 0 B of heap.
 fn rekha_font_resolve(f): i64 {
@@ -213,12 +218,8 @@ fn rekha_font_resolve(f): i64 {
     store64(f + 128, rekha_find_table_len(f, REKHA_TAG_CMAP, &c));
     store64(f + 136, load64(&c));
 
-    # cmap.cyr's resolver reads cmap_off / cmap_len from the cache just stored
-    var sub = rekha_cmap_subtable(f);
-    var segc2 = 0;
-    if (sub != 0) { segc2 = rekha_rd_u16(buf, sub + 6); }
-    store64(f + 144, sub);
-    store64(f + 152, segc2);
+    # cmap.cyr's resolver reads cmap_off / cmap_len from the cache just stored and fills +144..+175
+    rekha_cmap_resolve(f);
     return 0;
 }
 

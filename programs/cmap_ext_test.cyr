@@ -1,19 +1,20 @@
 # programs/cmap_ext_test.cyr — RUN test for the 0.3.11 cmap resolver, the format-4 lookup and the
 # gid-level / 16.16 advance API.
 #
-# ⭐ WHAT THIS PINS. cmap.cyr picks ONE subtable at open — the LAST (3,1) or (0,*) encoding record
-# whose subtable is format 4 — and validates its header and all four segment arrays against the cmap
-# table's DECLARED extent; a lookup then re-checks only the glyphIdArray index. Each of those rules
-# gets a pass/fail pair here: the record walk cut by the cmap length, the arrays one byte past it,
-# the glyphIdArray entry one byte past it, the selection order, and the mapped-gid >= numGlyphs rule
-# with and without maxp.
+# ⭐ WHAT THIS PINS. cmap.cyr picks ONE subtable at open — the best-RANKED encoding record whose
+# subtable fits the cmap table's DECLARED extent (0.4.0; up to 0.3.11 it was the LAST (3,1) / (0,*)
+# format-4 record, validated after it was chosen) — and a format-4 lookup then re-checks only the
+# glyphIdArray index. Each rule gets a pass/fail pair here: the record walk cut by the cmap length,
+# the arrays one byte past it, the glyphIdArray entry one byte past it, the selection order, and the
+# mapped-gid >= numGlyphs rule with and without maxp. Formats 0 / 6 / 12 / 13, the rank table and
+# (3,0) symbol remapping are pinned by programs/cmap_fmt_test.cyr.
 # ⭐ THE HYBRID SEARCH IS PROVEN BY EXHAUSTION, NOT BY SAMPLES. Group I builds a 300-segment subtable
 # in code (ascending endCode, gaps, adjacent segments, random deltas, one segment in seven on the
 # glyphIdArray path with zero entries) and requires every codepoint 0..65535 to equal a plain
 # linear-scan reference written from the spec over the test's OWN segment arrays — not over the
 # bytes rekha reads. Twice: with the 0xFFFF terminator and maxp, and without either.
-# ⛔ (3,0)-ONLY FONTS MAP NOTHING. That is the coverage gap cmap.cyr documents; group D asserts it so
-# a silent fix (or a silent regression of the documented gap into a crash) shows up here.
+# Group D pins the (3,0) SYMBOL behaviour on this suite's format-4 fixture: read since 0.4.0 (0.3.11
+# mapped nothing through it), with U+00xx -> U+F0xx tried when the direct lookup misses.
 #
 # Base font (5 tables, directory [12,92)): head @92/54 (upem 1000) · maxp @148/6 · hhea @154/36
 # (numberOfHMetrics 8) · hmtx @192/32 · cmap @592/<per case>. The file length handed to
@@ -237,7 +238,7 @@ fn t_gia_extent(buf): i64 {
     return 0;
 }
 
-# ── C) SUBTABLE SELECTION: platform 0, and the LAST matching record wins ───────
+# ── C) SUBTABLE SELECTION: platform 0, ranks, and a later record winning a TIE ───────
 fn t_select(buf): i64 {
     g_group = "C selection";
     base(buf, 100, 12 + 32);                        # a single (0,3) record
@@ -259,13 +260,16 @@ fn t_select(buf): i64 {
     one_seg(buf, CM + 52, 65, 65, 6 - 65);
     f = opn(buf);
     check(rekha_cmap_subtable(f), CM + 52);
-    check(rekha_char_to_glyph(f, 65), 6);           # the last record, (3,1)
+    check(rekha_char_to_glyph(f, 65), 6);           # (3,1) ranks above (0,3)
     rec(buf, 0, 3, 1, 52);                          # reversed: (3,1) -> 6, then (0,3) -> 5
     rec(buf, 1, 0, 3, 20);
     f = opn(buf);
-    check(rekha_char_to_glyph(f, 65), 5);           # still the LAST record, now (0,3)
+    check(rekha_char_to_glyph(f, 65), 6);           # still (3,1): rank, not record order
+    rec(buf, 1, 3, 1, 20);                          # a TIE — two (3,1) records: the later one wins
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 5);
 
-    # a last Unicode record whose subtable is not format 4 is skipped
+    # (3,1) -> 5 at +20, then (0,3) at +52 whose format word is changed: it never outranks (3,1)
     rec(buf, 0, 3, 1, 20);
     rec(buf, 1, 0, 3, 52);
     put_u16(buf, CM + 52, 6);                       # format 6
@@ -277,7 +281,11 @@ fn t_select(buf): i64 {
     check(rekha_char_to_glyph(f, 65), 5);
     put_u16(buf, CM + 52, 4);
     f = opn(buf);
-    check(rekha_char_to_glyph(f, 65), 6);           # control: format 4 there does win
+    check(rekha_char_to_glyph(f, 65), 5);           # a valid format 4 under (0,3) still ranks below (3,1)
+    rec(buf, 0, 0, 1, 20);                          # control: under (0,1) the (0,3) table wins
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 6);
+    rec(buf, 0, 3, 1, 20);
     rec(buf, 1, 0, 3, 20 + 32 + 32 - 1);            # subtable's format word straddles the cmap end
     f = opn(buf);
     check(rekha_char_to_glyph(f, 65), 5);
@@ -305,21 +313,23 @@ fn t_select(buf): i64 {
     return 0;
 }
 
-# ── D) THE (3,0) SYMBOL GAP, STATED IN cmap.cyr ─────────────────
+# ── D) (3,0) SYMBOL: read, with the U+00xx -> U+F0xx retry ─────────────────
 fn t_symbol(buf): i64 {
-    g_group = "D (3,0) gap";
+    g_group = "D (3,0) symbol";
     base(buf, 100, 12 + 32);
     hdr(buf, 1);
     rec(buf, 0, 3, 0, 12);
     one_seg(buf, CM + 12, 0xF041, 0xF041, 5 - 0xF041);
     var f = opn(buf);
     check(f != 0, 1);
-    check(rekha_cmap_subtable(f), 0);
-    check(rekha_char_to_glyph(f, 0xF041), 0);       # the subtable maps it; rekha does not read (3,0)
-    check(rekha_char_to_glyph(f, 65), 0);           # and no U+00xx -> U+F0xx remap
-    rec(buf, 0, 3, 1, 12);                          # control: the same subtable under (3,1)
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(rekha_char_to_glyph(f, 0xF041), 5);       # the symbol table's own code
+    check(rekha_char_to_glyph(f, 65), 5);           # 'A' misses, then U+F041 maps
+    check(rekha_char_to_glyph(f, 0x1041), 0);       # the retry is for U+0000..U+00FF only
+    rec(buf, 0, 3, 1, 12);                          # the same subtable under (3,1): no retry
     f = opn(buf);
     check(rekha_char_to_glyph(f, 0xF041), 5);
+    check(rekha_char_to_glyph(f, 65), 0);
     return 0;
 }
 

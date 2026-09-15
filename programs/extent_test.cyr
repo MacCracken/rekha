@@ -627,7 +627,7 @@ fn t_null(): i64 {
 fn t_alloc(buf): i64 {
     g_group = "H alloc";
     build(buf, 1);
-    check(REKHA_FONT_SIZE, 160);
+    check(REKHA_FONT_SIZE, 176);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

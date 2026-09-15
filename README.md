@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.3.11
+Version: 0.4.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -63,9 +63,28 @@ shim, no external binaries.
   new `rekha_glyph_advance_px` / `_fx` and `rekha_char_advance_fx` (16.16).
   ⚠ The font buffer is borrowed and its metadata snapshotted at open — do not
   mutate it afterwards.
-- **v0.4.0 / staged — next:** cmap formats 12 (full Unicode) / 6 / 0,
-  OpenType/CFF (`OTTO`) outlines, WOFF/WOFF2 (needs `sankoch` inflate +
-  Brotli), and hinting.
+- **v0.4.0 — every Unicode cmap (shipped).** `rekha_char_to_glyph` reads formats 4, **12**
+  (the whole Unicode range), **13**, **6** and **0**; the best-ranked valid subtable wins —
+  (3,10) > (0,4)/(0,6) > a wide table under any other Unicode record > (3,1) > (0,3) > other (0,x)
+  > (3,0) — and a broken record is skipped instead of blanking the map. (3,0) **symbol** faces map,
+  with U+00xx retried at U+F0xx. MEASURED on 92 system faces against an independent reference: every
+  codepoint U+0000..U+10FFFF identical; the 80 with a format-12 map keep 0.3.11's BMP mapping exactly
+  and gain the planes past it (Iosevka Nerd Fonts: 9,442 icon codepoints).
+- **v0.4.x line — next, in order:**
+  1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
+  2. **WOFF 1.0** — per-table zlib through sankoch's `[lib.zlib]` profile
+     (`zlib_decompress_capped`, sankoch >= 2.7.13), output sized from the WOFF directory and capped.
+  3. **OpenType/CFF (`OTTO`) outlines** — Type 2 charstrings (subroutines, CID-keyed FDSelect) emitted
+     as cubic Béziers through `sd_path_cubicto`, under the same load budget as glyf.
+  4. **WOFF2** — the container, the glyf/loca and hmtx transforms, tested on
+     transformed-but-uncompressed tables; the Brotli stream decodes through sankoch's requested
+     `[lib.brotli]` (`sankoch/docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md`).
+  5. **`[deps].stdlib` trim** — to what `src/` calls; released on its own, since it changes the
+     `dist/rekha.deps` sidecar consumers resolve.
+  6. **Adopt the sadish filings as they ship** — bounded flatten, checked path allocation,
+     `sd_path_new_cap` sized from the outline (5.5× less path arena on ASCII, MEASURED).
+- **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
+  sizes.
 
 ## Place in the stack
 
@@ -128,8 +147,8 @@ document / UI text — anywhere scalable glyphs are needed.
   must clear the same floor.
 - **Cyrius stdlib** — `string`, `fmt`, `alloc`, `io`, `vec`, `str`,
   `syscalls`, `assert`, `bench`. Resolved by `cyrius deps` into `lib/`.
-- No inflate/thread deps yet — SFNT tables are read raw (uncompressed).
-  WOFF/WOFF2 (which need `sankoch`) are a later scope.
+- **sankoch** arrives with WOFF 1.0 (`[lib.zlib]`) and WOFF2 (`[lib.brotli]`, requested —
+  see the v0.4.x line). Until then SFNT tables are read raw (uncompressed).
 
 The toolchain pin is `cyrius = "6.6.4"`.
 

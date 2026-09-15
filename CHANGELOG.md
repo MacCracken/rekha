@@ -5,6 +5,78 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-15 — every Unicode cmap: formats 12 / 13 / 6 / 0, ranked selection, symbol faces
+
+### Added — the cmap reads the whole Unicode range
+
+- **Formats 12 (segmented coverage — U+0000..U+10FFFF), 13 (many-to-one), 6 (trimmed table) and 0
+  (byte table)** beside format 4. Format 12 / 13 groups are binary-searched; an id past 0xFFFF has no
+  glyph (glyph ids are u16) and maps to `.notdef`; a codepoint past U+10FFFF maps to `.notdef` even
+  when a u32 group end reaches past it.
+- **(3,0) SYMBOL faces map.** A symbol table is looked up at `cp` and, when that misses and
+  `cp <= U+00FF`, at U+F000 + `cp` — symbol fonts keep their glyphs in the private-use F0xx block.
+  (0.3.11 mapped nothing through a (3,0)-only cmap.)
+
+### Changed — which subtable a font uses
+
+- ⭐ **The best-RANKED valid subtable wins, not the last matching record.** Rank: (3,10) > (0,4) /
+  (0,6) > a format 12 / 13 table under any other Unicode record > (3,1) > (0,3) > other (0,x) >
+  (3,0); a later record wins a tie; (0,5) (Variation Sequences) and Macintosh (1,0) (Mac OS Roman, not
+  Unicode) are never candidates. ⚠ Two consequences a consumer can observe: a (3,1) table now
+  outranks a (0,3) table whatever the record order (0.3.11 took whichever came LAST), and a
+  better-ranked record whose header or arrays do not fit the cmap extent is SKIPPED in favour of the
+  next valid one (0.3.11 chose first and then found no usable subtable at all). Both follow what
+  FreeType and HarfBuzz do. Every candidate is validated against the cmap table's DECLARED extent at
+  `rekha_font_open`, as format 4 alone was in 0.3.11.
+- **`RekhaFont` is 176 B** (was 160): the cmap cache holds the chosen table's entry count, format 6's
+  firstCode, and its format + symbol flag. Paid once per `rekha_font_open`; every reader still
+  allocates 0 B.
+- ⚠ **~5 ns more per format-4 lookup.** MEASURED interleaved against 0.3.11, `bench_hotpath`,
+  LiberationSans ASCII: `rekha_char_to_glyph` 29 -> 34 ns, `rekha_char_advance_px` 48 -> ~56 ns — the
+  format dispatch. A format-4 fast path is in; inlining the lookup back into
+  `rekha_char_to_glyph` did NOT recover it (measured, reverted). That is ~1 % of a 54-character label
+  draw (~75 µs). Output is identical: the bench's result checksum over cp 32..255 is unchanged
+  (`-6023123829465929365`).
+
+### Verified
+
+- **Real faces, against an independent reference.** A Python implementation of the selection rules
+  and all five lookups, written from the spec, against `rekha_char_to_glyph` over EVERY codepoint
+  U+0000..U+10FFFF, on 92 system `.ttf` faces (80 whose best map is format 12, 12 whose only map is
+  format 4): **92 / 92 identical** (count of mapped codepoints and an FNV-1a digest of every
+  (cp, gid) pair). On the 80 format-12 faces the BMP mapping is **identical to 0.3.11's** and every one
+  of them gains codepoints past it — the Iosevka Nerd Fonts gain 9,442 (their plane-15 icons).
+  LiberationSans still maps exactly 2,327 codepoints.
+- **`programs/cmap_fmt_test.cyr`** (new, 90 checks): each format's mappings, range edges and a
+  fits-exactly / one-byte-short pair on its arrays; every rank pair in BOTH record orders; symbol retry
+  and its limits; supplementary codepoints through `rekha_char_to_sdpath` / the advance calls at 0 B;
+  and a 600-group format-12 table whose lookup must equal a sequential reference on all 1,114,112
+  codepoints, with and without the numGlyphs cap.
+- **`hostile_test`** (540 checks): the A/B sentinel sweep now strides the supplementary planes, and
+  formats 12 / 6 / 0 and a (3,0) table sit at EOF exactly long enough and one byte short — a fit
+  check that reads one byte too far fails the differential itself (proven with three off-by-one
+  mutants).
+- **Mutation testing of the new cmap code:** 21 mutants. The first 16 left 5 alive — 3 real gaps
+  (format 6's upper bound with a zero byte behind it, (0,5) / (1,0) only ever tested beside a better
+  record, a u32 group end past U+10FFFF), now killed; 2 equivalent (`entryCount < 1` / `numGroups < 1`
+  checks shadowed by the resolver's own `count > 0` gate), removed from the code.
+- `cmap_ext_test` / `sfnt_edge_test` checks that pinned "last record wins", "a (3,0) table maps
+  nothing" and "a cut header means no subtable" now pin the 0.4.0 behaviour, each with its reason in
+  the comment.
+
+### Dependencies — filed where the work is
+
+- **sankoch:** `docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md` — a decode-only RFC
+  7932 decoder as a `[lib.brotli]` profile for rekha's WOFF2 (roadmap Backlog note added).
+  MEASURED on the embedded face: 410,820 B raw, 209,707 B WOFF1-style zlib, 169,278 B Brotli q11.
+- **sadish:** two issues and one proposal, re-measured on sadish 0.6.0 — flatten keeps subdividing
+  and allocating past `SD_FLATTEN_CAP` (50,200,616 B / 3,133,443 allocations for one flatten of
+  4,096 curved quads, output silently truncated at 8,192 points); path construction stores through a
+  refused `sd_alloc` (rc 139); and `sd_path_new_cap`, which would cut rekha's ASCII path arena
+  433,648 -> 78,656 B. README's candidate list notes all three.
+- README's roadmap is now an ordered v0.4.x ladder: WOFF 1.0, CFF outlines, WOFF2, the stdlib trim,
+  adopting the sadish filings, then hinting.
+
 ## [0.3.11] - 2026-09-15 — hostile fonts: four overreads closed, fan-out bounded, the hot path cached
 
 A full audit/hardening/optimization sweep. Eight independent audit lenses produced 88 raw findings
@@ -186,21 +258,25 @@ and emitted 16.16 path match 0.3.10 and an independent spec-written Python refer
   every codepoint is `.notdef`); writes atomically in UTF-8; escapes the file name in the generated
   string and comment. `fonts/face_data.cyr` regenerates byte-identically.
 
-### Known limits (stated, not fixed here)
+### Open items — where each one is tracked
 
 - Glyphs over the load caps render EMPTY (a >4,096-point outline, a >128-contour composite, a
   composite needing >64 loads or >16,384 decoded points). No face checked exceeds them; LiberationSans
   peaks at 338 points (gid 2193).
-- cmap formats 12 / 6 / 0 and `(3,0)` symbol fonts still map nothing (README v0.4.0 / staged).
+- cmap formats 12 / 6 / 0 and `(3,0)` symbol fonts map nothing yet — first item of README's v0.4.0 line.
 - Transform rounding is floor(v + ½) on the sum; FreeType rounds each product half away from zero,
   so exact negative halves can differ by 1 unit.
-- **Upstream, sadish:** `sd_flatten_quad` keeps recursing and allocating after its output cap is
-  full — MEASURED 12,386,304 B and 95 ms for ONE `sd_canvas_fill_path` of an adversarial glyph that
-  fits every rekha cap — and `sd_path_new` / grow store through refused allocations. Both belong to
-  sadish.
+- **Filed in sadish (2026-09-15):** `sd_path_flatten` keeps subdividing and allocating after its
+  8,192-point output is full and truncates silently — MEASURED on sadish 0.6.0: 12,386,304 B, 774,144
+  allocations, ~47 ms for ONE `sd_canvas_fill_path` (64×64) of a glyph that fits every rekha cap
+  (`sadish/docs/development/issues/2026-09-15-flatten-keeps-subdividing-and-allocating-after-the-output-cap-is-full.md`);
+  `sd_path_new` / `sd_point_new` store through a refused `sd_alloc`
+  (`…/issues/2026-09-15-path-construction-stores-through-a-refused-allocation.md`); and
+  `sd_path_new_cap`, which would cut rekha's per-glyph path arena 5.5× on ASCII
+  (`…/proposals/2026-09-15-path-capacity-for-known-size-paths.md`). rekha adopts each as it ships.
 - `[deps].stdlib` still declares `io`, `vec`, `str`, `syscalls`, `assert`, `bench` that `src/` does not
-  call; trimming it changes the `dist/rekha.deps` sidecar consumers resolve, so it waits for a
-  coordinated change with sadish.
+  call. Trimming changes the `dist/rekha.deps` sidecar consumers resolve, so it goes out as its own
+  release with the sidecar change called out — on README's v0.4.0 line.
 
 ## [0.3.10] - 2026-09-14 — rekha draws its memory from sadish's seam
 

@@ -1,0 +1,494 @@
+# programs/cmap_fmt_test.cyr — RUN test for the 0.4.0 cmap: formats 0 / 6 / 12 / 13, the subtable
+# rank table, and (3,0) symbol remapping.
+#
+# ⭐ WHAT THIS PINS. rekha_font_open ranks every encoding record whose subtable fits the cmap extent
+# ((3,10) > (0,4)/(0,6) > wide-under-other > (3,1) > (0,3) > other (0,x) > (3,0)) and caches the
+# winner; rekha_char_to_glyph looks up through it. Each format gets exact mappings, both range edges,
+# and a fits-exactly / one-byte-short pair on its arrays; each rank gets a pair of records in BOTH
+# orders, so a "last record wins" regression cannot pass.
+# ⭐ FORMAT 12's BINARY SEARCH IS PROVEN BY EXHAUSTION: group H generates 600 groups (gaps, adjacent
+# groups, single-codepoint groups, ids near 0xFFFF) and requires EVERY codepoint 0..U+10FFFF to equal
+# a sequential reference that walks the test's OWN group arrays in step with the codepoints.
+#
+# Base font: head @96/54 (upem 1000) · maxp @150/6 · hhea @156/36 (numberOfHMetrics 1) · hmtx @192/4
+# (advance 600) · cmap @CM with a per-case length. rekha_font_open gets the whole buffer, so every cmap
+# bound below is the cmap extent's. Exit code = failed checks; each failure prints its number, group,
+# got and want.
+
+include "src/lib.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+var BUF_LEN = 131072;
+var CM = 256;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "cmap_fmt_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# Base font with numGlyphs `ng` and a cmap of declared length `clen`; ntab encoding records.
+fn base(buf, ng, clen, ntab): i64 {
+    memset(buf, 0, BUF_LEN);
+    put_u32(buf, 0, 0x00010000);
+    put_u16(buf, 4, 5);
+    dir_entry(buf, 12, REKHA_TAG_HEAD, 96, 54);
+    dir_entry(buf, 28, REKHA_TAG_MAXP, 150, 6);
+    dir_entry(buf, 44, REKHA_TAG_HHEA, 156, 36);
+    dir_entry(buf, 60, REKHA_TAG_HMTX, 192, 4);
+    dir_entry(buf, 76, REKHA_TAG_CMAP, CM, clen);
+    put_u16(buf, 96 + 18, 1000);
+    put_u16(buf, 150 + 4, ng);
+    put_u16(buf, 156 + 34, 1);
+    put_u16(buf, 192, 600);
+    put_u16(buf, CM + 2, ntab);
+    return 0;
+}
+
+fn set_clen(buf, clen): i64 {
+    put_u32(buf, 76 + 12, clen);
+    return 0;
+}
+
+fn rec(buf, i, plat, enc, off): i64 {
+    var r = CM + 4 + i * 8;
+    put_u16(buf, r, plat);
+    put_u16(buf, r + 2, enc);
+    put_u32(buf, r + 4, off);
+    return 0;
+}
+
+fn opn(buf): i64 {
+    return rekha_font_open(buf, BUF_LEN);
+}
+
+# format 0 at absolute s: glyphIdArray[c] = (c * 3) & 255 for c in 1..255, [0] = 0.
+fn f0(buf, s): i64 {
+    put_u16(buf, s, 0);
+    put_u16(buf, s + 2, 262);
+    var c = 1;
+    while (c < 256) {
+        store8(buf + s + 6 + c, (c * 3) & 255);
+        c = c + 1;
+    }
+    return 262;
+}
+
+# format 6 at absolute s: firstCode, entryCount, glyphIdArray[i] = base + i.
+fn f6(buf, s, first, cnt, gbase): i64 {
+    put_u16(buf, s, 6);
+    put_u16(buf, s + 2, 10 + cnt * 2);
+    put_u16(buf, s + 6, first);
+    put_u16(buf, s + 8, cnt);
+    var i = 0;
+    while (i < cnt) {
+        put_u16(buf, s + 10 + i * 2, gbase + i);
+        i = i + 1;
+    }
+    return 10 + cnt * 2;
+}
+
+# format 12 / 13 header at absolute s for ng groups; returns the table length.
+fn f12_hdr(buf, s, fmt, ng): i64 {
+    put_u16(buf, s, fmt);
+    put_u32(buf, s + 4, 16 + ng * 12);
+    put_u32(buf, s + 12, ng);
+    return 16 + ng * 12;
+}
+
+fn f12_grp(buf, s, i, start, end, gid): i64 {
+    var g = s + 16 + i * 12;
+    put_u32(buf, g, start);
+    put_u32(buf, g + 4, end);
+    put_u32(buf, g + 8, gid);
+    return 0;
+}
+
+# format 4 at absolute s with ONE segment [start, end] -> start + delta, plus the 0xFFFF terminator.
+fn f4(buf, s, start, end, delta): i64 {
+    put_u16(buf, s, 4);
+    put_u16(buf, s + 2, 32);
+    put_u16(buf, s + 6, 4);
+    put_u16(buf, s + 14, end);
+    put_u16(buf, s + 16, 0xFFFF);
+    put_u16(buf, s + 20, start);
+    put_u16(buf, s + 22, 0xFFFF);
+    put_u16(buf, s + 24, delta & 65535);
+    put_u16(buf, s + 26, 1);
+    return 32;
+}
+
+# ── A) FORMAT 0 ──────────────────────────
+fn t_f0(buf): i64 {
+    g_group = "A format 0";
+    base(buf, 256, 12 + 262, 1);
+    rec(buf, 0, 3, 1, 12);
+    f0(buf, CM + 12);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(rekha_char_to_glyph(f, 1), 3);
+    check(rekha_char_to_glyph(f, 65), 195);
+    check(rekha_char_to_glyph(f, 255), (255 * 3) & 255);
+    check(rekha_char_to_glyph(f, 0), 0);
+    check(rekha_char_to_glyph(f, 256), 0);          # past the byte table
+    check(rekha_char_to_glyph(f, 0x1F600), 0);
+    base(buf, 100, 12 + 262, 1);                    # numGlyphs 100: ids >= 100 are .notdef
+    rec(buf, 0, 3, 1, 12);
+    f0(buf, CM + 12);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 33), 99);
+    check(rekha_char_to_glyph(f, 34), 0);           # 102 >= numGlyphs
+    set_clen(buf, 12 + 261);                        # one byte short of the 256 entries
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    check(rekha_char_to_glyph(f, 1), 0);
+    return 0;
+}
+
+# ── B) FORMAT 6 ──────────────────────────
+fn t_f6(buf): i64 {
+    g_group = "B format 6";
+    base(buf, 1000, 12 + 10 + 2 * 5, 1);
+    rec(buf, 0, 0, 3, 12);
+    f6(buf, CM + 12, 0x20, 5, 40);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(rekha_char_to_glyph(f, 0x20), 40);
+    check(rekha_char_to_glyph(f, 0x24), 44);        # the last entry
+    check(rekha_char_to_glyph(f, 0x1F), 0);         # below firstCode
+    put_u16(buf, CM + 12 + 10 + 2 * 5, 999);        # poison just past the table (and the cmap)
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x25), 0);         # past firstCode + entryCount — never the poison
+    check(rekha_char_to_glyph(f, 0x10020), 0);
+    set_clen(buf, 12 + 10 + 2 * 5 - 1);             # the last entry cut
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    set_clen(buf, 12 + 10 + 2 * 5);
+    put_u16(buf, CM + 12 + 8, 0);                   # entryCount 0 is no candidate
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    return 0;
+}
+
+# ── C) FORMAT 12 ──────────────────────────
+fn t_f12(buf): i64 {
+    g_group = "C format 12";
+    base(buf, 65535, 12 + 16 + 4 * 12, 1);
+    rec(buf, 0, 3, 10, 12);
+    var s = CM + 12;
+    f12_hdr(buf, s, 12, 4);
+    f12_grp(buf, s, 0, 0x41, 0x43, 10);
+    f12_grp(buf, s, 1, 0x1F600, 0x1F602, 20);
+    f12_grp(buf, s, 2, 0x20000, 0x20000, 65534);
+    f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65533);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), s);
+    check(rekha_char_to_glyph(f, 0x41), 10);
+    check(rekha_char_to_glyph(f, 0x43), 12);
+    check(rekha_char_to_glyph(f, 0x44), 0);         # gap between groups
+    check(rekha_char_to_glyph(f, 0x40), 0);         # before the first group
+    check(rekha_char_to_glyph(f, 0x1F600), 20);     # a supplementary-plane codepoint
+    check(rekha_char_to_glyph(f, 0x1F602), 22);
+    check(rekha_char_to_glyph(f, 0x20000), 65534);
+    check(rekha_char_to_glyph(f, 0x10FFFD), 65533);
+    check(rekha_char_to_glyph(f, 0x10FFFE), 65534);
+    check(rekha_char_to_glyph(f, 0x10FFFF), 0);     # 65535 >= numGlyphs 65535
+    check(rekha_char_to_glyph(f, 0x110000), 0);     # past Unicode
+    f12_grp(buf, s, 3, 0x10FFFD, 0x110005, 100);    # a u32 group END past U+10FFFF
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x10FFFF), 102);
+    check(rekha_char_to_glyph(f, 0x110000), 0);     # still nothing past Unicode
+    f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65533);
+    check(rekha_char_to_glyph(f, 0 - 1), 0);
+    f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65535);  # startGlyphID + 2 = 65537: no u16 glyph id
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x10FFFF), 0);
+    check(rekha_char_to_glyph(f, 0x10FFFD), 0);     # 65535 >= numGlyphs
+    base(buf, 0, 12 + 16 + 4 * 12, 1);              # no maxp count: a raw id up to 0xFFFF comes back
+    rec(buf, 0, 3, 10, 12);
+    f12_hdr(buf, s, 12, 4);
+    f12_grp(buf, s, 0, 0x41, 0x43, 10);
+    f12_grp(buf, s, 1, 0x1F600, 0x1F602, 20);
+    f12_grp(buf, s, 2, 0x20000, 0x20000, 65534);
+    f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65533);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x10FFFF), 65535);
+    set_clen(buf, 12 + 16 + 4 * 12 - 1);            # the last group cut
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    set_clen(buf, 12 + 15);                         # the 16-byte header cut
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    set_clen(buf, 12 + 16 + 4 * 12);
+    put_u32(buf, s + 12, 0);                        # numGroups 0 is no candidate
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    put_u32(buf, s + 12, 0xFFFFFFFF);               # a numGroups no extent could hold
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), 0);
+    return 0;
+}
+
+# ── D) FORMAT 13 ──────────────────────────
+fn t_f13(buf): i64 {
+    g_group = "D format 13";
+    base(buf, 1000, 12 + 16 + 2 * 12, 1);
+    rec(buf, 0, 0, 6, 12);
+    var s = CM + 12;
+    f12_hdr(buf, s, 13, 2);
+    f12_grp(buf, s, 0, 0x0, 0xFFFF, 7);
+    f12_grp(buf, s, 1, 0x10000, 0x10FFFF, 8);
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), s);
+    check(rekha_char_to_glyph(f, 0), 7);
+    check(rekha_char_to_glyph(f, 0x4E00), 7);       # many-to-one: the whole group is ONE id
+    check(rekha_char_to_glyph(f, 0xFFFF), 7);
+    check(rekha_char_to_glyph(f, 0x10000), 8);
+    check(rekha_char_to_glyph(f, 0x10FFFF), 8);
+    return 0;
+}
+
+# ── E) RANKS — every pair in BOTH record orders ───────────────
+# Two subtables: format 4 at +20 mapping 'A' -> 5, format 12 at +52 mapping 'A' -> 6 and U+1F600 -> 9.
+fn two(buf, p0, e0, o0, p1, e1, o1): i64 {
+    base(buf, 1000, 20 + 32 + 28, 2);
+    rec(buf, 0, p0, e0, o0);
+    rec(buf, 1, p1, e1, o1);
+    f4(buf, CM + 20, 65, 65, 5 - 65);
+    f12_hdr(buf, CM + 52, 12, 1);
+    f12_grp(buf, CM + 52, 0, 65, 65, 6);
+    return opn(buf);
+}
+
+fn t_rank(buf): i64 {
+    g_group = "E ranks";
+    var f = two(buf, 3, 1, 20, 3, 10, 52);          # (3,1) fmt4, (3,10) fmt12
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 3, 10, 52, 3, 1, 20);              # reversed
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 0, 4, 52, 3, 1, 20);               # (0,4) outranks (3,1)
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 3, 1, 20, 0, 4, 52);
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 3, 1, 52, 3, 1, 20);               # the SAME record kind: the wide table (rank 4) wins
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 3, 1, 20, 3, 1, 52);
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 0, 3, 20, 0, 1, 52);               # a wide table under (0,1) outranks (0,3) format 4
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 3, 10, 52, 0, 4, 20);              # (3,10) outranks (0,4), even over format 4 there
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 0, 4, 20, 3, 10, 52);
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 0, 4, 20, 0, 6, 52);               # (0,4) and (0,6) TIE: the later record wins
+    check(rekha_char_to_glyph(f, 65), 6);
+    f = two(buf, 0, 6, 52, 0, 4, 20);
+    check(rekha_char_to_glyph(f, 65), 5);
+    f = two(buf, 3, 1, 20, 0, 5, 52);               # (0,5) is Variation Sequences: never a candidate
+    check(rekha_char_to_glyph(f, 65), 5);
+    f = two(buf, 3, 1, 20, 1, 0, 52);               # Macintosh (1,0): not Unicode
+    check(rekha_char_to_glyph(f, 65), 5);
+    f = two(buf, 3, 1, 20, 3, 10, 52);
+    put_u32(buf, CM + 52 + 12, 2);                  # the (3,10) table claims a group past the extent
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 20);         # a broken better-ranked record is skipped
+    check(rekha_char_to_glyph(f, 65), 5);
+    f = two(buf, 3, 1, 20, 3, 3, 52);               # (3,3) PRC: no rank
+    check(rekha_char_to_glyph(f, 65), 5);
+    # ...and each non-candidate record ALONE maps nothing (beside (3,1) its rank would never show)
+    f = two(buf, 0, 5, 20, 0, 5, 52);
+    check(rekha_cmap_subtable(f), 0);
+    f = two(buf, 1, 0, 20, 1, 0, 52);
+    check(rekha_cmap_subtable(f), 0);
+    f = two(buf, 3, 3, 20, 3, 3, 52);
+    check(rekha_cmap_subtable(f), 0);
+    return 0;
+}
+
+# ── F) (3,0) SYMBOL ─────────────────────────
+fn t_symbol(buf): i64 {
+    g_group = "F symbol";
+    base(buf, 1000, 12 + 10 + 2 * 4, 1);
+    rec(buf, 0, 3, 0, 12);
+    f6(buf, CM + 12, 0xF020, 4, 70);                # U+F020..U+F023 -> 70..73
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 12);
+    check(rekha_char_to_glyph(f, 0xF021), 71);
+    check(rekha_char_to_glyph(f, 0x21), 71);        # U+0021 misses, U+F021 maps
+    check(rekha_char_to_glyph(f, 0x24), 0);         # U+F024 is past the table too
+    check(rekha_char_to_glyph(f, 0x121), 0);        # the retry is for U+0000..U+00FF only
+    check(rekha_char_advance_px(f, 0x21, 10), 6);   # the advance follows the remapped glyph
+    rec(buf, 0, 3, 1, 12);                          # the same table under (3,1): no retry
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x21), 0);
+    check(rekha_char_to_glyph(f, 0xF021), 71);
+    # (3,0) next to a Unicode table: the Unicode table wins and no retry happens
+    base(buf, 1000, 20 + 32 + 18, 2);
+    rec(buf, 0, 3, 0, 52);
+    rec(buf, 1, 3, 1, 20);
+    f4(buf, CM + 20, 65, 65, 5 - 65);
+    f6(buf, CM + 52, 0xF020, 4, 70);
+    f = opn(buf);
+    check(rekha_cmap_subtable(f), CM + 20);
+    check(rekha_char_to_glyph(f, 0x21), 0);
+    check(rekha_char_to_glyph(f, 65), 5);
+    return 0;
+}
+
+# ── G) SUPPLEMENTARY PLANES THROUGH THE PUBLIC DRAW / ADVANCE CALLS, AND 0 B READS ────
+fn t_public(buf): i64 {
+    g_group = "G public";
+    var f = two(buf, 3, 1, 20, 3, 10, 52);
+    put_u32(buf, CM + 52 + 12, 2);
+    set_clen(buf, 20 + 32 + 40);
+    f12_grp(buf, CM + 52, 1, 0x1F600, 0x1F600, 0);
+    f12_grp(buf, CM + 52, 0, 65, 65, 6);
+    f12_grp(buf, CM + 52, 1, 0x1F600, 0x1F600, 9);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x1F600), 9);
+    check(rekha_char_advance(f, 0x1F600), 600);
+    check(rekha_char_advance_px(f, 0x1F600, 10), 6);
+    check(sd_path_verb_count(rekha_char_to_sdpath(f, 0x1F600, SD_ONE, 0, 0)), 0);   # no glyf: empty
+    var a = alloc_used();
+    var k = 0;
+    while (k < 1000) {
+        rekha_char_to_glyph(f, 0x1F600 + k);
+        rekha_char_advance_fx(f, 60 + k, 12);
+        k = k + 1;
+    }
+    check(alloc_used() - a, 0);
+    a = alloc_used();
+    var f2 = opn(buf);
+    check(alloc_used() - a, REKHA_FONT_SIZE);
+    check(rekha_char_to_glyph(f2, 65), 6);
+    return 0;
+}
+
+# ── H) FORMAT 12 SEARCH PARITY OVER EVERY CODEPOINT ──────────────
+var NG = 600;
+var g_start = 0;
+var g_end = 0;
+var g_gid = 0;
+var g_seed = 0;
+
+fn rnd(n): i64 {
+    g_seed = (g_seed * 6364136223846793005 + 1442695040888963407) & 0x7FFFFFFFFFFFFFFF;
+    return (g_seed >> 33) % n;
+}
+
+fn t_parity(buf, ng_maxp): i64 {
+    g_group = "H parity";
+    g_start = alloc(NG * 8);
+    g_end = alloc(NG * 8);
+    g_gid = alloc(NG * 8);
+    g_seed = 12345;
+    var cp = 0;
+    var i = 0;
+    while (i < NG) {
+        cp = cp + rnd(4000);                        # a gap of 0..3999 (0 = an ADJACENT group)
+        var len = 1;
+        if (rnd(4) != 0) { len = 1 + rnd(300); }    # one group in four covers one codepoint
+        var e = cp + len - 1;
+        if (e > 0x10FFFF) { e = 0x10FFFF; }
+        store64(g_start + i * 8, cp);
+        store64(g_end + i * 8, e);
+        var gid = rnd(65535);
+        if (rnd(10) == 0) { gid = 65535 - rnd(4); }  # near the u16 ceiling
+        store64(g_gid + i * 8, gid);
+        cp = e + 1;
+        i = i + 1;
+    }
+    var clen = 12 + 16 + NG * 12;
+    base(buf, ng_maxp, clen, 1);
+    rec(buf, 0, 3, 10, 12);
+    var s = CM + 12;
+    f12_hdr(buf, s, 12, NG);
+    i = 0;
+    while (i < NG) {
+        f12_grp(buf, s, i, load64(g_start + i * 8), load64(g_end + i * 8), load64(g_gid + i * 8));
+        i = i + 1;
+    }
+    var f = opn(buf);
+    check(rekha_cmap_subtable(f), s);
+    var bad = 0;
+    var mapped = 0;
+    var gi = 0;
+    cp = 0;
+    while (cp <= 0x10FFFF) {
+        while (gi < NG && load64(g_end + gi * 8) < cp) { gi = gi + 1; }
+        var want = 0;
+        if (gi < NG) {
+            if (load64(g_start + gi * 8) <= cp) {
+                want = load64(g_gid + gi * 8) + (cp - load64(g_start + gi * 8));
+                if (want > 65535) { want = 0; }
+                if (ng_maxp > 0) {
+                    if (want >= ng_maxp) { want = 0; }
+                }
+            }
+        }
+        if (rekha_char_to_glyph(f, cp) != want) { bad = bad + 1; }
+        if (want != 0) { mapped = mapped + 1; }
+        cp = cp + 1;
+    }
+    check(bad, 0);
+    return mapped;
+}
+
+fn main(): i64 {
+    alloc_init();
+    var buf = alloc(BUF_LEN);
+    t_f0(buf);
+    t_f6(buf);
+    t_f12(buf);
+    t_f13(buf);
+    t_rank(buf);
+    t_symbol(buf);
+    t_public(buf);
+    var m1 = t_parity(buf, 65535);
+    var m2 = t_parity(buf, 0);
+    check(m1 > 50000, 1);                           # the sweep is not vacuous
+    check(m2 >= m1, 1);                             # without maxp nothing is clamped away
+    if (g_fails == 0) {
+        var ok = "cmap_fmt_test: PASS (formats 0/6/12/13, ranks, symbol, U+0000..U+10FFFF parity; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

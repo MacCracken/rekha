@@ -6,8 +6,9 @@
 # those bytes 0; (2) no fixture had an ODD unitsPerEm, so `upem / 2` vs `(upem + 1) / 2` rounding in
 # rekha_glyph_advance_px / _fx was unpinned; (3) a cmap encoding record whose format word straddles
 # the cmap extent must not be chosen even when the byte past the extent reads 4, and a format-4
-# record inside the extent whose 14-byte header is cut means NO subtable. Plus the direct
-# rekha_cmap_subtable(0) guard. Exit code = failed checks.
+# record inside the extent whose 14-byte header is cut is no candidate (0.3.11 read that as NO
+# subtable; 0.4.0 falls back to the valid one). Plus the direct rekha_cmap_subtable(0) guard.
+# Exit code = failed checks.
 include "src/lib.cyr"
 
 var g_fails = 0;
@@ -158,13 +159,13 @@ fn p_fmt_word(buf): i64 {
     var f = rekha_font_open(buf, BUF_LEN);
     check(rekha_cmap_subtable(f), CM + 20);       # #10 straddling record does not exist (C05a: 0)
     check(rekha_char_to_glyph(f, 65), 5);         # #11
-    # (0,3) -> @+82: format 4 ENTIRELY inside the extent but no room for its header -> no usable subtable
+    # (0,3) -> @+82: format 4 ENTIRELY inside the extent but no room for its header -> not a candidate
     store8(buf + CM + 84, 0);
     rec(buf, 1, 0, 3, 82);
     put_u16(buf, CM + 82, 4);
     f = rekha_font_open(buf, BUF_LEN);
-    check(rekha_cmap_subtable(f), 0);             # #12 last fmt-4 record wins, then its header is cut (C05b: CM+20)
-    check(rekha_char_to_glyph(f, 65), 0);         # #13
+    check(rekha_cmap_subtable(f), CM + 20);       # #12 the (0,3) candidate's header is cut: it is no candidate
+    check(rekha_char_to_glyph(f, 65), 5);         # #13 and the valid (3,1) table still maps (0.4.0)
     return 0;
 }
 
