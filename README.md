@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.0
+Version: 0.4.1
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -70,10 +70,19 @@ shim, no external binaries.
   with U+00xx retried at U+F0xx. MEASURED on 92 system faces against an independent reference: every
   codepoint U+0000..U+10FFFF identical; the 80 with a format-12 map keep 0.3.11's BMP mapping exactly
   and gain the planes past it (Iosevka Nerd Fonts: 9,442 icon codepoints).
+- **v0.4.1 — WOFF 1.0 (shipped).** `rekha_font_open_woff` / `rekha_font_open_any` open a `.woff`
+  (the W3C WOFF 1.0 container: per-table zlib) by rebuilding its SFNT into one `sd_alloc` and opening
+  that; `rekha_woff_sfnt_size` validates without inflating, `rekha_woff_decode` rebuilds into a
+  caller's buffer. Every declared size is checked before anything is allocated or inflated (tag
+  order, table extents, DEFLATE's 1,032:1 ratio, the exact totalSfntSize, no stream shared between
+  entries) and each table must inflate to exactly its origLength. **Opt-in:** it lives in
+  `dist/rekha-woff.cyr` (`[lib.woff]`), which a WOFF consumer takes instead of `dist/rekha.cyr` and
+  pairs with sankoch (the stdlib `sankoch` leaf + `sync`); the base bundle never requires sankoch.
+  MEASURED: all 29 real `.woff` files on the dev host (Lato, Roboto Slab, KaTeX, FontAwesome, Qt
+  icons) rebuild byte-identical to an independent Python/zlib decoder and open.
 - **v0.4.x line — next, in order:**
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
-  2. **WOFF 1.0** — per-table zlib through sankoch's `[lib.zlib]` profile
-     (`zlib_decompress_capped`, sankoch >= 2.7.13), output sized from the WOFF directory and capped.
+  2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
   3. **OpenType/CFF (`OTTO`) outlines** — Type 2 charstrings (subroutines, CID-keyed FDSelect) emitted
      as cubic Béziers through `sd_path_cubicto`, under the same load budget as glyf.
   4. **WOFF2** — the container, the glyf/loca and hmtx transforms, tested on
@@ -147,8 +156,12 @@ document / UI text — anywhere scalable glyphs are needed.
   must clear the same floor.
 - **Cyrius stdlib** — `string`, `fmt`, `alloc`, `io`, `vec`, `str`,
   `syscalls`, `assert`, `bench`. Resolved by `cyrius deps` into `lib/`.
-- **sankoch** arrives with WOFF 1.0 (`[lib.zlib]`) and WOFF2 (`[lib.brotli]`, requested —
-  see the v0.4.x line). Until then SFNT tables are read raw (uncompressed).
+- **sankoch** — only for WOFF, and only through `dist/rekha-woff.cyr`: `zlib_decompress_capped`
+  (sankoch >= 2.7.13; the cyrius 6.6.4 stdlib ships 2.7.15). A consumer includes `lib/sync.cyr` and
+  `lib/sankoch.cyr` before the bundle. ⚠ sankoch's lean `[lib.zlib]` profile does not link on its own
+  today (filed: `sankoch/docs/development/issues/2026-09-15-profile-bundles-call-sankoch-reset-tables-outside-their-closure.md`).
+  WOFF2's Brotli decoder is requested from sankoch (see the v0.4.x line). `dist/rekha.cyr` needs no
+  sankoch.
 
 The toolchain pin is `cyrius = "6.6.4"`.
 

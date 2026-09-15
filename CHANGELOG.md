@@ -5,6 +5,69 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-09-15 — WOFF 1.0, opt-in
+
+### Added — `src/woff.cyr` and the `[lib.woff]` bundle
+
+- **`rekha_font_open_woff(buf, len)`** opens a W3C WOFF 1.0 file: it validates the container, rebuilds
+  the SFNT it carries into ONE `sd_alloc(totalSfntSize)` (offset table with a recomputed
+  searchRange / entrySelector / rangeShift, the WOFF's tag-sorted directory with each origChecksum, every
+  table inflated where compLength < origLength and zero-padded to 4 bytes) and `rekha_font_open`s it.
+  **`rekha_font_open_any(buf, len)`** sniffs `wOFF` and otherwise opens plain SFNT bytes.
+  **`rekha_woff_sfnt_size(buf, len)`** validates header + directory without inflating (0 B) and
+  returns the rebuilt size; **`rekha_woff_decode(buf, len, dst, cap)`** rebuilds into a caller buffer.
+- ⛔ **Refused before anything is allocated or inflated:** a signature other than `wOFF`,
+  reserved != 0, `length` past the bytes given, no tables, a directory that does not fit, tags not
+  strictly ascending, table data outside [end of directory, length), compLength > origLength, an
+  origLength past **1,032 x** its compLength (DEFLATE cannot expand further), padded compressed sizes
+  summing past `length` (one stream named by many entries cannot be expanded many times), a
+  totalSfntSize that is not exactly the rebuilt size, and metadata / private blocks outside `length`.
+  Inflating must then produce **exactly** origLength under an output cap of origLength
+  (`zlib_decompress_capped`, sankoch >= 2.7.13).
+- ⭐ **Opt-in, so no consumer pays for it.** `src/woff.cyr` is in the new `[lib.woff]` profile
+  (`dist/rekha-woff.cyr` = rekha's modules + woff), NOT in `[lib]`: `dist/rekha.cyr` and its
+  `dist/rekha.deps` are unchanged and never require sankoch. A WOFF consumer takes `dist/rekha-woff.cyr`
+  instead and includes `lib/sync.cyr` + `lib/sankoch.cyr` (the cyrius 6.6.4 stdlib ships sankoch
+  2.7.15) before it. sankoch is not added to rekha's `[deps].stdlib` — that would union it into the base
+  sidecar — and `cyrius.lock` is unchanged. The release publishes `rekha-woff-<tag>.cyr` beside
+  `rekha-<tag>.cyr`.
+- **Allocation, MEASURED:** under an arena hook, `rekha_font_open_woff` of the embedded face puts
+  exactly the SFNT (410,824 B) + the `RekhaFont` (176 B) on the arena; sankoch's inflate does not use
+  the sd_alloc seam and takes a flat 448 B of global heap per `rekha_woff_decode` (sankoch 2.7.15,
+  19 tables). Open a WOFF once, outside a per-frame hook, like any font.
+
+### Verified
+
+- **29 real WOFF files from other encoders** on the dev host (QEMU docs: Lato ×4, Roboto Slab ×2,
+  FontAwesome; KaTeX ×19; Qt docs' icomoon ×2): all accepted, every rebuilt table (tag, checksum,
+  length, bytes) identical to an independent Python decoder using `zlib.decompress`, every one opens,
+  and their cmaps map (Lato 2,164 codepoints each).
+- **`programs/woff_test.cyr`** (new, 123 checks): LiberationSans wrapped into WOFF in the test with
+  sankoch's own `zlib_compress` — compressed and stored — must rebuild with every table byte-identical,
+  zero padding, the recomputed offset-table fields, and a font whose every glyph, BMP mapping and
+  advance digests identically to the face opened directly; one one-defect copy per refusal rule
+  (including each rule ALONE, with the padded sums and totalSfntSize kept valid); a corrupted glyf
+  stream, streams inflating one table short and long; and an A/B guard differential over every cut of
+  the header and directory and a stride through the data. No converted font is committed.
+- **`programs/woff_dist_test.cyr`** (new): `dist/rekha-woff.cyr` compiled the consumer way, opening a
+  WOFF and asserting the arena cost above to the byte.
+- **Mutation testing** of `src/woff.cyr`: 30 mutants. The first pass left 10 alive: 5 real gaps
+  (numTables 0 with a consistent totalSfntSize; out-of-range data and compLength > origLength each
+  isolated from the padded-sum rule; the private block's offset; padding bytes), now killed; 2 dead
+  checks (`length < 44`, shadowed by the directory fit; `origLength == 0` on the inflate path, where
+  compLength <= origLength forces the stored path), removed; 2 bounds that change no RESULT but keep
+  the header / directory reads inside `len` (`len < 44`, the directory fit), kept and commented; 1
+  mutation that did not apply.
+
+### Dependencies — filed where the work is
+
+- **sankoch:** `docs/development/issues/2026-09-15-profile-bundles-call-sankoch-reset-tables-outside-their-closure.md`
+  — every codec profile bundle (zlib, gzip, xz, bzip2, zstd, tar, zip, zipall) calls
+  `_sankoch_reset_tables`, which only the full bundle defines, since 2.7.10: MEASURED, a program that
+  calls `zlib_decompress_capped` through `dist/sankoch-zlib.cyr` is refused (`1 reachable undefined
+  function`). This is why rekha's WOFF test uses the full stdlib `sankoch`. Noted at the head of
+  sankoch's roadmap queue.
+
 ## [0.4.0] - 2026-09-15 — every Unicode cmap: formats 12 / 13 / 6 / 0, ranked selection, symbol faces
 
 ### Added — the cmap reads the whole Unicode range

@@ -1,0 +1,201 @@
+# @internal — WOFF 1.0: unwrap a Web Open Font Format container into the SFNT bytes rekha opens.
+#
+# woff.cyr — validate a WOFF 1.0 file (W3C Recommendation, 13 Dec 2012) and rebuild the SFNT it
+# carries: an offset table, a table directory in the WOFF's (tag-sorted) order, and every table's
+# data — inflated when compLength < origLength — padded to a 4-byte boundary.
+#
+# ⛔ OPT-IN. This module calls sankoch's `zlib_decompress_capped` (sankoch >= 2.7.13), so it is NOT
+# in `[lib].modules`: `dist/rekha.cyr` never requires sankoch. A WOFF consumer takes
+# `dist/rekha-woff.cyr` (`[lib.woff]` — rekha's modules plus this one) and brings sankoch itself —
+# the stdlib `sankoch` leaf (which needs `sync` in scope), or a profile bundle that links. (sankoch's
+# per-codec profiles do not link today: sankoch/docs/development/issues/
+# 2026-09-15-profile-bundles-call-sankoch-reset-tables-outside-their-closure.md.) In-tree it follows
+# `src/lib.cyr`, `lib/sync.cyr` and `lib/sankoch.cyr`.
+#
+# WOFFHeader (44 bytes, big-endian):
+#   +0 signature u32 'wOFF' · +4 flavor u32 (the SFNT's sfntVersion) · +8 length u32 (whole file)
+#   +12 numTables u16 · +14 reserved u16 (0) · +16 totalSfntSize u32 · +20 major u16 · +22 minor u16
+#   +24 metaOffset u32 · +28 metaLength u32 · +32 metaOrigLength u32 · +36 privOffset u32
+#   +40 privLength u32
+# TableDirectoryEntry (20 bytes): tag u32 · offset u32 · compLength u32 · origLength u32 ·
+#   origChecksum u32
+#
+# ⛔ WHAT IS REFUSED (0), all before a byte is inflated — a WOFF is untrusted input and its declared
+# sizes decide what the caller allocates:
+#   - a signature other than 'wOFF', reserved != 0, or `length` past the bytes given;
+#   - a directory that does not fit, or tags not STRICTLY ascending (the spec's order; it also rules
+#     out a tag named twice);
+#   - a table whose data does not lie inside [end of directory, length), or compLength > origLength;
+#   - table data whose 4-byte-padded compressed sizes sum past `length` (so compressed data cannot be
+#     shared between entries to multiply what one stream expands to);
+#   - an origLength past REKHA_WOFF_MAX_RATIO x its compLength (DEFLATE cannot expand further);
+#   - a totalSfntSize that is not EXACTLY 12 + 16 x numTables + the padded origLengths;
+#   - a metadata or private block that does not lie inside `length`.
+# Inflating then must produce EXACTLY origLength bytes, under an output cap of origLength.
+# ⚠ Table checksums are carried into the rebuilt directory, not verified (the spec leaves that to the
+# user agent). The metadata and private blocks are validated for position only and not copied.
+# ⚠ ALLOCATION: rekha_woff_sfnt_size allocates 0 B. rekha_font_open_woff's SFNT buffer is ONE
+# sd_alloc(totalSfntSize) and its RekhaFont another (MEASURED under an arena hook: exactly those two,
+# for the embedded face 410,824 + 176 B). sankoch's inflate does not use the sd_alloc seam: MEASURED
+# 448 B on the global heap per rekha_woff_decode (sankoch 2.7.15, 19 tables), flat, not scaling with
+# the font. Like any font, open a WOFF once, outside a per-frame hook.
+
+var REKHA_WOFF_SIG       = 0x774F4646;   # 'wOFF'
+var REKHA_WOFF_HDR_LEN   = 44;
+var REKHA_WOFF_DIR_LEN   = 20;
+# DEFLATE's densest encoding expands 1 input byte to at most 258 output bytes per 2-bit match code
+# (RFC 1951) — a bound of 1,032:1 once the block headers are paid. An origLength beyond this x its
+# compLength cannot be a real zlib stream, so it is refused before anything is allocated.
+var REKHA_WOFF_MAX_RATIO = 1032;
+
+fn rekha_wr_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn rekha_wr_u32(buf, off, v): i64 {
+    rekha_wr_u16(buf, off, (v >> 16) & 65535);
+    rekha_wr_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn rekha_pad4(n): i64 {
+    return (n + 3) & (0 - 4);
+}
+
+# @public — the byte size of the SFNT a WOFF 1.0 container at (buf, len) rebuilds to
+# (= its validated totalSfntSize), or 0 when (buf, len) is not a valid WOFF 1.0 file under the rules
+# above. Reads only the header and directory; inflates nothing; allocates 0 B.
+fn rekha_woff_sfnt_size(buf, len): i64 {
+    if (buf == 0) { return 0; }
+    if (len < REKHA_WOFF_HDR_LEN) { return 0; }
+    if (rekha_rd_u32(buf, 0) != REKHA_WOFF_SIG) { return 0; }
+    var wlen = rekha_rd_u32(buf, 8);
+    if (wlen > len) { return 0; }
+    if (rekha_rd_u16(buf, 14) != 0) { return 0; }
+    var n = rekha_rd_u16(buf, 12);
+    if (n == 0) { return 0; }
+    var dir_end = REKHA_WOFF_HDR_LEN + n * REKHA_WOFF_DIR_LEN;
+    # ⚠ This check (and `len < 44` above) change no RESULT when removed — a later rule still refuses —
+    # but without them the header / directory reads run past `len` first. They are bounds, not rules.
+    if (dir_end > wlen) { return 0; }
+
+    var want = 12 + n * 16;
+    var packed = dir_end;
+    var prev_tag = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var e = REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN;
+        var tag = rekha_rd_u32(buf, e);
+        if (tag <= prev_tag) { return 0; }
+        prev_tag = tag;
+        var off = rekha_rd_u32(buf, e + 4);
+        var clen = rekha_rd_u32(buf, e + 8);
+        var olen = rekha_rd_u32(buf, e + 12);
+        if (off < dir_end) { return 0; }
+        if (off + clen > wlen) { return 0; }
+        if (clen > olen) { return 0; }
+        if (olen > clen * REKHA_WOFF_MAX_RATIO) { return 0; }
+        packed = packed + rekha_pad4(clen);
+        want = want + rekha_pad4(olen);
+        i = i + 1;
+    }
+    if (packed > rekha_pad4(wlen)) { return 0; }
+    if (rekha_rd_u32(buf, 16) != want) { return 0; }
+
+    var moff = rekha_rd_u32(buf, 24);
+    var mlen = rekha_rd_u32(buf, 28);
+    if (moff != 0 || mlen != 0) {
+        if (moff < dir_end) { return 0; }
+        if (moff + mlen > wlen) { return 0; }
+    }
+    var poff = rekha_rd_u32(buf, 36);
+    var plen = rekha_rd_u32(buf, 40);
+    if (poff != 0 || plen != 0) {
+        if (poff < dir_end) { return 0; }
+        if (poff + plen > wlen) { return 0; }
+    }
+    return want;
+}
+
+# @public — rebuild the SFNT carried by the WOFF 1.0 container at (buf, len) into `dst` (`cap`
+# bytes). Returns the SFNT's byte length, or 0 when the container is invalid (rekha_woff_sfnt_size
+# returns 0), `cap` is smaller than the SFNT, or a table does not inflate to exactly its origLength.
+# On 0 the contents of `dst` are unspecified. Allocates 0 B on rekha's seam; sankoch's inflate takes
+# MEASURED 448 B of global heap per call (above).
+fn rekha_woff_decode(buf, len, dst, cap): i64 {
+    var size = rekha_woff_sfnt_size(buf, len);
+    if (size == 0) { return 0; }
+    if (dst == 0) { return 0; }
+    if (cap < size) { return 0; }
+    var n = rekha_rd_u16(buf, 12);
+
+    # offset table: searchRange = 16 x the largest power of two <= numTables
+    var pow2 = 1;
+    var sel = 0;
+    while (pow2 * 2 <= n) {
+        pow2 = pow2 * 2;
+        sel = sel + 1;
+    }
+    rekha_wr_u32(dst, 0, rekha_rd_u32(buf, 4));
+    rekha_wr_u16(dst, 4, n);
+    rekha_wr_u16(dst, 6, pow2 * 16);
+    rekha_wr_u16(dst, 8, sel);
+    rekha_wr_u16(dst, 10, n * 16 - pow2 * 16);
+
+    var at = 12 + n * 16;
+    var i = 0;
+    while (i < n) {
+        var e = REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN;
+        var off = rekha_rd_u32(buf, e + 4);
+        var clen = rekha_rd_u32(buf, e + 8);
+        var olen = rekha_rd_u32(buf, e + 12);
+        var d = 12 + i * 16;
+        rekha_wr_u32(dst, d, rekha_rd_u32(buf, e));
+        rekha_wr_u32(dst, d + 4, rekha_rd_u32(buf, e + 16));
+        rekha_wr_u32(dst, d + 8, at);
+        rekha_wr_u32(dst, d + 12, olen);
+        if (clen == olen) {
+            memcpy(dst + at, buf + off, olen);
+        } else {
+            # ⛔ EXACTLY origLength, capped at it: a stream that would write more fails closed in
+            # sankoch (ERR_OUTPUT_LIMIT), one that writes less fails here.
+            var r = zlib_decompress_capped(buf + off, clen, dst + at, olen, olen);
+            if (r != olen) { return 0; }
+        }
+        var pad = rekha_pad4(olen) - olen;
+        var k = 0;
+        while (k < pad) {
+            store8(dst + at + olen + k, 0);
+            k = k + 1;
+        }
+        at = at + rekha_pad4(olen);
+        i = i + 1;
+    }
+    return at;
+}
+
+# @public — open a WOFF 1.0 font: validate, rebuild its SFNT into ONE sd_alloc(totalSfntSize) that the
+# returned RekhaFont borrows, and rekha_font_open it. Returns 0 for an invalid container, a failed
+# inflate, an allocation failure, or an SFNT rekha_font_open refuses (e.g. an 'OTTO' flavor).
+# ⚠ The rebuilt buffer lives as long as the allocator it came from — open fonts outside a scoped
+# per-frame hook, as with rekha_font_open.
+fn rekha_font_open_woff(buf, len): i64 {
+    var size = rekha_woff_sfnt_size(buf, len);
+    if (size == 0) { return 0; }
+    var dst = sd_alloc(size);
+    if (dst == 0) { return 0; }
+    if (rekha_woff_decode(buf, len, dst, size) != size) { return 0; }
+    return rekha_font_open(dst, size);
+}
+
+# @public — open font bytes of either container: a WOFF 1.0 file ('wOFF') goes through
+# rekha_font_open_woff, anything else through rekha_font_open. 0 as either would return.
+fn rekha_font_open_any(buf, len): i64 {
+    if (buf == 0) { return 0; }
+    if (len >= 4) {
+        if (rekha_rd_u32(buf, 0) == REKHA_WOFF_SIG) { return rekha_font_open_woff(buf, len); }
+    }
+    return rekha_font_open(buf, len);
+}

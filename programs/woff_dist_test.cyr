@@ -1,0 +1,123 @@
+# programs/woff_dist_test.cyr — RUN test for the SHIPPED WOFF bundle, dist/rekha-woff.cyr, compiled
+# the way a WOFF consumer compiles it.
+#
+# ⭐ WHAT THIS EXISTS TO PROVE. programs/woff_test.cyr includes src/, so a `[lib.woff]` profile that
+# `cyrius distlib woff` folded wrong would pass it and fail the first consumer. This suite never
+# touches src/: the stdlib prelude as src/lib.cyr lists it, sadish, then what a WOFF consumer adds —
+# `sync` and the stdlib `sankoch` leaf — then dist/rekha-woff.cyr INSTEAD of dist/rekha.cyr, then the
+# embedded face. It wraps the face into a WOFF with sankoch's zlib_compress and opens it through the
+# bundle's public API, and measures what that open allocates.
+#
+# ⚠ The bundle must be CURRENT for this to mean anything: `cyrius distlib --check` (every profile) is
+# the companion gate. Exit code = failed checks; each failure prints its check number to fd 2.
+
+# ---- a WOFF consumer's include chain ----
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+include "lib/bench.cyr"
+include "lib/sadish.cyr"
+include "lib/sync.cyr"
+include "lib/sankoch.cyr"
+include "dist/rekha-woff.cyr"
+include "fonts/face_data.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "woff_dist_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var g_arena = 0;
+
+fn hook_alloc(n): i64 {
+    return arena_alloc(g_arena, n);
+}
+
+fn main(): i64 {
+    alloc_init();
+    var n = rekha_face_default_len();
+    var face = alloc(n);
+    rekha_face_default_copy(face, n);
+    check(rekha_face_default_verify(face, n), 1);                     # 1
+
+    # wrap the face: every table zlib-compressed where that is shorter
+    var cap = 1048576;
+    var w = alloc(cap);
+    memset(w, 0, cap);
+    var nt = rekha_rd_u16(face, 4);
+    var at = REKHA_WOFF_HDR_LEN + nt * REKHA_WOFF_DIR_LEN;
+    var total = 12 + nt * 16;
+    var i = 0;
+    while (i < nt) {
+        var d = 12 + i * 16;
+        var off = rekha_rd_u32(face, d + 8);
+        var olen = rekha_rd_u32(face, d + 12);
+        var e = REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN;
+        var clen = zlib_compress(face + off, olen, w + at, cap - at);
+        if (clen <= 0 || clen >= olen) {
+            memcpy(w + at, face + off, olen);
+            clen = olen;
+        }
+        rekha_wr_u32(w, e, rekha_rd_u32(face, d));
+        rekha_wr_u32(w, e + 4, at);
+        rekha_wr_u32(w, e + 8, clen);
+        rekha_wr_u32(w, e + 12, olen);
+        rekha_wr_u32(w, e + 16, rekha_rd_u32(face, d + 4));
+        at = at + rekha_pad4(clen);
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    rekha_wr_u32(w, 0, REKHA_WOFF_SIG);
+    rekha_wr_u32(w, 4, rekha_rd_u32(face, 0));
+    rekha_wr_u32(w, 8, at);
+    rekha_wr_u16(w, 12, nt);
+    rekha_wr_u32(w, 16, total);
+
+    check(rekha_woff_sfnt_size(w, at), total);                        # 2
+    var f = rekha_font_open_any(w, at);
+    check(f != 0, 1);                                                  # 3
+    check(rekha_units_per_em(f), 2048);                                # 4
+    check(rekha_char_to_glyph(f, 65), rekha_char_to_glyph(rekha_font_open(face, n), 65));   # 5
+    check(sd_path_verb_count(rekha_char_to_sdpath(f, 65, 65536 / 64, 0, 0)) > 0, 1);         # 6
+    check(rekha_char_advance_px(f, 65, 16) > 0, 1);                    # 7
+
+    # ── what an open costs: the SFNT buffer + the RekhaFont on the sd_alloc seam; sankoch's inflate
+    # bookkeeping on the global heap. MEASURED (sankoch 2.7.15): 448 B per rekha_woff_decode, flat —
+    # asserted as a bound, not an exact count, since it is sankoch's to change ──
+    g_arena = arena_new_growable(4194304);
+    sd_alloc_set(&hook_alloc);
+    var a0 = arena_used(g_arena);
+    var f2 = rekha_font_open_woff(w, at);
+    var arena_cost = arena_used(g_arena) - a0;
+    var g0 = alloc_used();
+    var f3 = rekha_font_open_woff(w, at);
+    var heap_second = alloc_used() - g0;
+    sd_alloc_set(0);
+    check(f2 != 0, 1);                                                 # 8
+    check(f3 != 0, 1);                                                 # 9
+    check(arena_cost, ((total + 7) & (0 - 8)) + REKHA_FONT_SIZE);      # 10 — exactly the SFNT + the font
+    check(heap_second < 4096, 1);                                      # 11 — the 410 KB SFNT is NOT here
+
+    if (g_fails == 0) {
+        var ok = "woff_dist_test: PASS (dist/rekha-woff.cyr compiles, opens a WOFF, SFNT + font on the seam)\n";
+        syscall(1, 1, ok, strlen(ok));
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -27,11 +27,27 @@ modules = [
     "src/cmap.cyr",
 ]
 
+# `[lib.woff]` (`cyrius distlib woff` -> dist/rekha-woff.cyr) is rekha PLUS src/woff.cyr, the WOFF 1.0
+# container reader. It calls sankoch's `zlib_decompress_capped` (sankoch >= 2.7.13), so it is a
+# separate bundle: `dist/rekha.cyr` must never require sankoch. A consumer that wants WOFF takes this
+# bundle INSTEAD of dist/rekha.cyr and brings sankoch itself (the stdlib `sankoch` leaf + `sync`).
+# rekha's own programs/woff_test.cyr includes lib/sync.cyr and lib/sankoch.cyr from the toolchain pin.
+[lib.woff]
+modules = [
+    "src/error.cyr",
+    "src/sfnt.cyr",
+    "src/glyf.cyr",
+    "src/cmap.cyr",
+    "src/woff.cyr",
+]
+
 [deps]
 # Stdlib base set — byte readers + struct alloc + smoke banner + the
-# assert/bench harness. No inflate/thread here: SFNT tables are read
-# raw (uncompressed) at v0.1.0. WOFF/WOFF2 (which DO need sankoch
-# inflate + Brotli) are a later scope.
+# assert/bench harness. sankoch is deliberately NOT here: declaring it would
+# union it into dist/rekha.deps and make every consumer of the base bundle
+# pull it. WOFF 1.0 (src/woff.cyr, [lib.woff]) resolves `sync` + `sankoch`
+# from the toolchain pin in its own test; WOFF2's Brotli decoder is requested
+# from sankoch (docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md).
 stdlib = [
     "string",
     "fmt",

@@ -92,6 +92,7 @@ jobs:
           TAG="${GITHUB_REF_NAME#v}"
           git archive --format=tar.gz --prefix="rekha-${TAG}/" -o "rekha-${TAG}-src.tar.gz" HEAD
           cp dist/rekha.cyr "rekha-${TAG}.cyr"
+          cp dist/rekha-woff.cyr "rekha-woff-${TAG}.cyr"   # the [lib.woff] bundle (needs sankoch)
           sha256sum rekha-*.tar.gz rekha-*.cyr > SHA256SUMS
           cat SHA256SUMS
 

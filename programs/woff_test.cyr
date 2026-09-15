@@ -1,0 +1,417 @@
+# programs/woff_test.cyr — RUN test for WOFF 1.0 (src/woff.cyr): the container reader, rebuilt SFNT,
+# every refusal rule, and an A/B guard differential on decode.
+#
+# ⭐ THE CONTAINERS ARE BUILT HERE, FROM THE EMBEDDED FACE, WITH sankoch's OWN zlib_compress — no
+# converted font is committed. Group A wraps LiberationSans (19 tables) twice — every table
+# zlib-compressed where that helps, and every table stored — then requires: rekha_woff_sfnt_size is
+# the exact rebuilt size; every rebuilt table is byte-identical to the face's; the font opened from the
+# WOFF decodes every glyph, cmap mapping and advance to the SAME digest as the face opened directly.
+# ⭐ EACH REFUSAL RULE IN src/woff.cyr GETS A ONE-DEFECT COPY of a valid container (group B), and group
+# C puts the WOFF flush against 256 guard bytes filled A then B: any read past `len` changes a digest.
+#
+# Includes lib/sync.cyr + lib/sankoch.cyr from the toolchain pin (not declared in [deps].stdlib, so
+# dist/rekha.deps stays sankoch-free). Exit code = failed checks; each failure prints its number,
+# group, got and want.
+
+include "src/lib.cyr"
+include "lib/sync.cyr"
+include "lib/sankoch.cyr"
+include "src/woff.cyr"
+include "fonts/face_data.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "woff_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var g_face = 0;
+var g_face_len = 0;
+var WCAP = 1048576;
+
+# Wrap the SFNT at (s, slen) into a WOFF 1.0 file at `out`. compress = 1: zlib each table where the
+# stream is shorter; 0: store every table. Returns the WOFF length.
+fn woff_build(s, slen, out, compress): i64 {
+    var n = rekha_rd_u16(s, 4);
+    memset(out, 0, WCAP);
+    var at = REKHA_WOFF_HDR_LEN + n * REKHA_WOFF_DIR_LEN;
+    var total = 12 + n * 16;
+    var i = 0;
+    while (i < n) {
+        var d = 12 + i * 16;
+        var off = rekha_rd_u32(s, d + 8);
+        var olen = rekha_rd_u32(s, d + 12);
+        var e = REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN;
+        rekha_wr_u32(out, e, rekha_rd_u32(s, d));
+        rekha_wr_u32(out, e + 4, at);
+        rekha_wr_u32(out, e + 12, olen);
+        rekha_wr_u32(out, e + 16, rekha_rd_u32(s, d + 4));
+        var clen = olen;
+        if (compress != 0) {
+            var c = zlib_compress(s + off, olen, out + at, WCAP - at);
+            if (c > 0) {
+                if (c < olen) { clen = c; }
+            }
+        }
+        if (clen == olen) { memcpy(out + at, s + off, olen); }
+        rekha_wr_u32(out, e + 8, clen);
+        at = at + rekha_pad4(clen);
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    rekha_wr_u32(out, 0, REKHA_WOFF_SIG);
+    rekha_wr_u32(out, 4, rekha_rd_u32(s, 0));
+    rekha_wr_u32(out, 8, at);
+    rekha_wr_u16(out, 12, n);
+    rekha_wr_u32(out, 16, total);
+    rekha_wr_u16(out, 20, 1);
+    return at;
+}
+
+# FNV-1a over everything a text draw reads from a font: every glyph's points and path verbs, every BMP
+# codepoint's glyph and 16 px advance.
+fn font_digest(f): i64 {
+    var h = 0xcbf29ce484222325;
+    var ng = rekha_glyph_count(f);
+    var gid = 0;
+    while (gid < ng) {
+        var o = rekha_load_glyph(f, gid);
+        var np = rekha_outline_n_points(o);
+        h = (h ^ np) * 0x100000001b3;
+        var k = 0;
+        while (k < np) {
+            h = (h ^ load64(rekha_outline_xs(o) + k * 8)) * 0x100000001b3;
+            h = (h ^ load64(rekha_outline_ys(o) + k * 8)) * 0x100000001b3;
+            k = k + 1;
+        }
+        h = (h ^ sd_path_verb_count(rekha_outline_to_sdpath(o, 4096, 0, 0))) * 0x100000001b3;
+        gid = gid + 1;
+    }
+    var cp = 0;
+    while (cp < 65536) {
+        h = (h ^ rekha_char_to_glyph(f, cp)) * 0x100000001b3;
+        h = (h ^ rekha_char_advance_px(f, cp, 16)) * 0x100000001b3;
+        cp = cp + 1;
+    }
+    return h;
+}
+
+# 1 when every table of the rebuilt SFNT at `s` is followed by zero padding up to a 4-byte boundary.
+fn pad_is_zero(s): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var i = 0;
+    while (i < n) {
+        var end = rekha_rd_u32(s, 12 + i * 16 + 8) + rekha_rd_u32(s, 12 + i * 16 + 12);
+        while ((end & 3) != 0) {
+            if (load8(s + end) != 0) { return 0; }
+            end = end + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn bytes_equal(p, q, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load8(p + i) != load8(q + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 when every table of the SFNT at `a` equals the same-tag table of the SFNT at `b`, byte for byte.
+fn tables_equal(a, b): i64 {
+    var n = rekha_rd_u16(a, 4);
+    if (rekha_rd_u16(b, 4) != n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var da = 12 + i * 16;
+        var tag = rekha_rd_u32(a, da);
+        var j = 0;
+        var hit = 0;
+        while (j < n) {
+            var db = 12 + j * 16;
+            if (rekha_rd_u32(b, db) == tag) {
+                var la = rekha_rd_u32(a, da + 12);
+                if (rekha_rd_u32(b, db + 12) != la) { return 0; }
+                if (rekha_rd_u32(b, db + 4) != rekha_rd_u32(a, da + 4)) { return 0; }
+                if (bytes_equal(a + rekha_rd_u32(a, da + 8), b + rekha_rd_u32(b, db + 8), la) == 0) { return 0; }
+                hit = 1;
+            }
+            j = j + 1;
+        }
+        if (hit == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ── A) ROUND TRIP ─────────────────────────
+var g_w = 0;
+var g_wlen = 0;
+var g_out = 0;
+
+fn t_roundtrip(): i64 {
+    g_group = "A round trip";
+    var f0 = rekha_font_open(g_face, g_face_len);
+    var want = font_digest(f0);
+    var mode = 0;
+    while (mode < 2) {
+        g_wlen = woff_build(g_face, g_face_len, g_w, 1 - mode);
+        if (mode == 0) { check(g_wlen < g_face_len, 1); }      # compressed really is smaller
+        var size = rekha_woff_sfnt_size(g_w, g_wlen);
+        check(size > 0, 1);
+        check(size % 4, 0);
+        memset(g_out, 0xEE, WCAP);
+        check(rekha_woff_decode(g_w, g_wlen, g_out, WCAP), size);
+        check(pad_is_zero(g_out), 1);                            # the 4-byte padding is written, as 0
+        check(tables_equal(g_out, g_face), 1);
+        check(tables_equal(g_face, g_out), 1);
+        check(rekha_rd_u32(g_out, 0), 0x00010000);
+        check(rekha_rd_u16(g_out, 6), 16 * 16);                  # searchRange for 19 tables
+        check(rekha_rd_u16(g_out, 8), 4);                        # entrySelector
+        check(rekha_rd_u16(g_out, 10), 19 * 16 - 16 * 16);       # rangeShift
+        var fw = rekha_font_open_woff(g_w, g_wlen);
+        check(fw != 0, 1);
+        check(font_digest(fw), want);
+        check(rekha_char_to_glyph(fw, 65), rekha_char_to_glyph(f0, 65));
+        var fa = rekha_font_open_any(g_w, g_wlen);
+        check(font_digest(fa), want);
+        mode = mode + 1;
+    }
+    check(font_digest(rekha_font_open_any(g_face, g_face_len)), want);   # plain SFNT through _any
+    return 0;
+}
+
+# ── B) REFUSALS — one defect per copy of a valid (compressed) container ───────
+var g_b = 0;
+
+fn fresh(): i64 {
+    memcpy(g_b, g_w, g_wlen);
+    return 0;
+}
+
+fn refused(len): i64 {
+    check(rekha_woff_sfnt_size(g_b, len), 0);
+    check(rekha_woff_decode(g_b, len, g_out, WCAP), 0);
+    check(rekha_font_open_woff(g_b, len), 0);
+    return 0;
+}
+
+fn dirent(i): i64 { return REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN; }
+
+fn t_refuse(): i64 {
+    g_group = "B refusals";
+    g_wlen = woff_build(g_face, g_face_len, g_w, 1);
+    var n = rekha_rd_u16(g_w, 12);
+    var size = rekha_woff_sfnt_size(g_w, g_wlen);
+    fresh();
+    check(rekha_woff_sfnt_size(g_b, g_wlen), size);             # control
+
+    refused(REKHA_WOFF_HDR_LEN - 1);                           # shorter than the header
+    fresh(); rekha_wr_u32(g_b, 0, 0x774F4632);                 # 'wOF2'
+    refused(g_wlen);
+    fresh(); rekha_wr_u16(g_b, 14, 1);                         # reserved != 0
+    refused(g_wlen);
+    fresh();
+    refused(g_wlen - 1);                                       # `length` past the bytes given
+    fresh(); rekha_wr_u32(g_b, 8, 43);                         # `length` shorter than the header
+    refused(g_wlen);
+    fresh(); rekha_wr_u16(g_b, 12, 0);                         # no tables
+    refused(g_wlen);
+    rekha_wr_u32(g_b, 16, 12);                                 # ...even with a totalSfntSize that agrees
+    refused(g_wlen);
+    fresh(); rekha_wr_u16(g_b, 12, 40000);                     # a directory past `length`
+    refused(g_wlen);
+
+    # tags: swap two entries (order), then name one twice
+    fresh();
+    var t1 = rekha_rd_u32(g_b, dirent(1));
+    rekha_wr_u32(g_b, dirent(1), rekha_rd_u32(g_b, dirent(2)));
+    rekha_wr_u32(g_b, dirent(2), t1);
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, dirent(2), rekha_rd_u32(g_b, dirent(1)));
+    refused(g_wlen);
+
+    var last = dirent(n - 1);
+    fresh(); rekha_wr_u32(g_b, dirent(3) + 4, dirent(n) - 1);  # data starting inside the directory
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, last + 8, rekha_rd_u32(g_b, last + 8) + 8);   # last table's data past `length`
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, last + 8, rekha_rd_u32(g_b, last + 12) + 1);  # compLength > origLength
+    refused(g_wlen);
+    # the same two rules ALONE: the padded-size sum and totalSfntSize kept exactly as a valid file's
+    fresh();                                                   # data moved to straddle `length`
+    rekha_wr_u32(g_b, last + 4, g_wlen - rekha_rd_u32(g_b, last + 8) + 4);
+    refused(g_wlen);
+    fresh();                                                   # origLength one below compLength
+    var cl = rekha_rd_u32(g_b, dirent(4) + 8);
+    var ol = rekha_rd_u32(g_b, dirent(4) + 12);
+    rekha_wr_u32(g_b, dirent(4) + 12, cl - 1);
+    rekha_wr_u32(g_b, 16, size - rekha_pad4(ol) + rekha_pad4(cl - 1));
+    refused(g_wlen);
+
+    # the ratio bound: a 1-byte "compressed" table claiming 1,033 bytes, totalSfntSize kept consistent
+    fresh();
+    var e3 = dirent(3);
+    var o3 = rekha_rd_u32(g_b, e3 + 12);
+    rekha_wr_u32(g_b, e3 + 8, 1);
+    rekha_wr_u32(g_b, e3 + 12, 1033);
+    rekha_wr_u32(g_b, 16, rekha_rd_u32(g_b, 16) - rekha_pad4(o3) + rekha_pad4(1033));
+    refused(g_wlen);
+    rekha_wr_u32(g_b, e3 + 12, 1032);                          # exactly at the bound: header passes...
+    rekha_wr_u32(g_b, 16, rekha_rd_u32(g_w, 16) - rekha_pad4(o3) + rekha_pad4(1032));
+    check(rekha_woff_sfnt_size(g_b, g_wlen) > 0, 1);
+    check(rekha_woff_decode(g_b, g_wlen, g_out, WCAP), 0);      # ...and the 1-byte stream does not inflate
+
+    fresh(); rekha_wr_u32(g_b, 16, size + 4);                  # totalSfntSize off by 4
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, 16, size - 4);
+    refused(g_wlen);
+
+    # compressed data shared by every entry: glyf's stream named by all 19 entries — each entry fits
+    # `length`, their sum does not, so one stream cannot be expanded 19 times
+    var ge = 0;
+    var gi = 0;
+    while (gi < n) {
+        if (rekha_rd_u32(g_w, dirent(gi)) == REKHA_TAG_GLYF) { ge = dirent(gi); }
+        gi = gi + 1;
+    }
+    check(ge != 0, 1);
+    check(rekha_rd_u32(g_w, ge + 8) * n > g_wlen, 1);           # the premise: 19 x glyf > the file
+    fresh();
+    var k = 0;
+    while (k < n) {
+        rekha_wr_u32(g_b, dirent(k) + 4, rekha_rd_u32(g_w, ge + 4));
+        rekha_wr_u32(g_b, dirent(k) + 8, rekha_rd_u32(g_w, ge + 8));
+        rekha_wr_u32(g_b, dirent(k) + 12, rekha_rd_u32(g_w, ge + 12));
+        k = k + 1;
+    }
+    rekha_wr_u32(g_b, 16, 12 + n * 16 + n * rekha_pad4(rekha_rd_u32(g_w, ge + 12)));
+    refused(g_wlen);
+
+    # metadata / private blocks
+    fresh(); rekha_wr_u32(g_b, 24, g_wlen - 4); rekha_wr_u32(g_b, 28, 8);
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, 24, 4); rekha_wr_u32(g_b, 28, 1);
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, 36, g_wlen - 2); rekha_wr_u32(g_b, 40, 4);
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, 36, 4); rekha_wr_u32(g_b, 40, 1);   # private block inside the header
+    refused(g_wlen);
+    fresh(); rekha_wr_u32(g_b, 24, g_wlen - 8); rekha_wr_u32(g_b, 28, 8);   # control: in range
+    check(rekha_woff_sfnt_size(g_b, g_wlen), size);
+
+    # a corrupt deflate stream in the glyf table: the header is fine, decode fails closed
+    fresh();
+    check(rekha_rd_u32(g_b, ge + 8) < rekha_rd_u32(g_b, ge + 12), 1);      # glyf really is compressed
+    var gdata = g_b + rekha_rd_u32(g_b, ge + 4);
+    store8(gdata + 40, load8(gdata + 40) ^ 0xFF);
+    check(rekha_woff_sfnt_size(g_b, g_wlen), size);
+    check(rekha_woff_decode(g_b, g_wlen, g_out, WCAP), 0);
+    check(rekha_font_open_woff(g_b, g_wlen), 0);
+    # a stream that inflates to one byte LESS than declared (origLength + 1)
+    fresh();
+    rekha_wr_u32(g_b, ge + 12, rekha_rd_u32(g_b, ge + 12) + 4);
+    rekha_wr_u32(g_b, 16, size + 4);
+    check(rekha_woff_sfnt_size(g_b, g_wlen), size + 4);
+    check(rekha_woff_decode(g_b, g_wlen, g_out, WCAP), 0);
+    # ...and to MORE than declared (origLength - 4): sankoch's output cap refuses it
+    fresh();
+    rekha_wr_u32(g_b, ge + 12, rekha_rd_u32(g_b, ge + 12) - 4);
+    rekha_wr_u32(g_b, 16, size - 4);
+    check(rekha_woff_sfnt_size(g_b, g_wlen), size - 4);
+    check(rekha_woff_decode(g_b, g_wlen, g_out, WCAP), 0);
+
+    # the caller's side
+    fresh();
+    check(rekha_woff_decode(g_b, g_wlen, g_out, size - 1), 0);  # cap one byte short
+    check(rekha_woff_decode(g_b, g_wlen, 0, WCAP), 0);
+    check(rekha_woff_sfnt_size(0, g_wlen), 0);
+    check(rekha_font_open_any(0, 100), 0);
+    check(rekha_font_open_any(g_b, 3), 0);
+    # an 'OTTO' flavor rebuilds, but rekha_font_open refuses CFF
+    fresh(); rekha_wr_u32(g_b, 4, 0x4F54544F);
+    check(rekha_woff_decode(g_b, g_wlen, g_out, WCAP), size);
+    check(rekha_font_open_woff(g_b, g_wlen), 0);
+    return 0;
+}
+
+# ── C) A/B GUARD DIFFERENTIAL ─────────────────────
+var GUARD = 256;
+
+fn guarded_digest(src, len, fill): i64 {
+    var g = alloc(len + GUARD);
+    memcpy(g, src, len);
+    memset(g + len, fill, GUARD);
+    var size = rekha_woff_sfnt_size(g, len);
+    var h = (0xcbf29ce484222325 ^ size) * 0x100000001b3;
+    var r = rekha_woff_decode(g, len, g_out, WCAP);
+    h = (h ^ r) * 0x100000001b3;
+    var i = 0;
+    while (i < r) {
+        h = (h ^ load8(g_out + i)) * 0x100000001b3;
+        i = i + 1;
+    }
+    return h;
+}
+
+fn t_guard(): i64 {
+    g_group = "C guard";
+    g_wlen = woff_build(g_face, g_face_len, g_w, 1);
+    check(guarded_digest(g_w, g_wlen, 0xA5), guarded_digest(g_w, g_wlen, 0x5A));
+    # every prefix cut of the header + directory, and a sample of cuts through the table data
+    var cut = 0;
+    var bad = 0;
+    var dir_end = REKHA_WOFF_HDR_LEN + rekha_rd_u16(g_w, 12) * REKHA_WOFF_DIR_LEN;
+    while (cut < g_wlen) {
+        # a truncated copy whose `length` field still claims the whole file, and one whose `length` is
+        # rewritten to the cut: the second passes the length check and meets the data checks
+        memcpy(g_b, g_w, g_wlen);
+        rekha_wr_u32(g_b, 8, cut);
+        if (guarded_digest(g_b, cut, 0xA5) != guarded_digest(g_b, cut, 0x5A)) { bad = bad + 1; }
+        if (cut < dir_end + 8) { cut = cut + 1; } else { cut = cut + 4093; }
+    }
+    check(bad, 0);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_face_len = rekha_face_default_len();
+    g_face = alloc(g_face_len);
+    rekha_face_default_copy(g_face, g_face_len);
+    check(rekha_face_default_verify(g_face, g_face_len), 1);
+    g_w = alloc(WCAP);
+    g_b = alloc(WCAP);
+    g_out = alloc(WCAP);
+    t_roundtrip();
+    t_refuse();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "woff_test: PASS (WOFF 1.0 round trip, refusals, guard differential; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
