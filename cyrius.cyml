@@ -65,17 +65,19 @@ stdlib = [
 # sadish — the rasterize target. rekha emits glyph-outline PATHS
 # (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT
 # bundle its own Bézier rasterizer.
-# ⛔ FLOOR >= 0.5.5, HARD: every allocation rekha makes goes through `sd_alloc`
-# (0.3.10), which 0.5.4 and below do not define. ⛔ Against an older pin the
-# build MAY still go green: cyrius 6.6.4 judges an undefined name by its FIRST
-# call site in code order, and rekha's is rekha_err_new (src/error.cyr), dead
-# in every suite — so path_test/glyf_test COMPILE with `warning: undefined
-# function 'sd_alloc'` and die (SIGILL, rc 132) at the first rekha_font_open,
-# while a fold whose first site is live (crab via dhancha 0.10.0) is refused
-# outright. MEASURED both ways; see CHANGELOG 0.3.10. Grep build output for
-# `undefined function` — it is printed in both cases. dhancha vendors
-# dist/rekha.cyr AND dist/sadish.cyr separately, so its own sadish pin must
-# clear the same floor.
+# ⛔ FLOOR >= 0.9.0, HARD (0.4.3). Three sadish releases are load-bearing here: `sd_alloc` (0.5.5)
+# takes every allocation rekha makes, `sd_path_new_cap` (0.7.2) opens a path at the glyph's own size,
+# and 0.9.0 stores a path's points INLINE — rekha's tests read them through `sd_path_point_x` / `_y`,
+# which 0.8.0 and below do not define. ⛔ Against an older pin the build MAY still go green: cyrius
+# 6.6.4 judges an undefined name by its FIRST call site in code order, and rekha's is rekha_err_new
+# (src/error.cyr), dead in every suite — so a suite COMPILES with `warning: undefined function` and
+# dies (SIGILL, rc 132) at the first call, while a fold whose first site is live is refused outright.
+# MEASURED both ways; see CHANGELOG 0.3.10. Grep build output for `undefined function` — printed in
+# both cases. ⚠ The reverse mistake is silent: rekha builds against sadish's DIST, so a stale lib/
+# looks fine. The provenance check that does not rot is
+# `grep -c '^fn sd_path_point_x' lib/sadish.cyr` — 1 on 0.9.0, 0 below (sadish's filing, 2026-09-16).
+# dhancha vendors dist/rekha.cyr AND dist/sadish.cyr separately, so its own sadish pin must clear
+# the same floor.
 [deps.sadish]
 git = "https://github.com/MacCracken/sadish.git"
 # ⛔ NO `path` LINE IN THE COMMITTED MANIFEST (removed 0.3.11). `path` WINS over `tag` and skips
@@ -84,7 +86,7 @@ git = "https://github.com/MacCracken/sadish.git"
 # 0.5.5 tag did not exist yet; it is published now (9760ead), so the tag is the source of truth.
 # For cross-repo dev, add `path = "../sadish"` in an UNCOMMITTED working copy — CI refuses a
 # manifest with a live `path =` line.
-tag = "0.5.5"
+tag = "0.9.0"
 modules = ["dist/sadish.cyr"]
 
 # fonts/face_data.cyr — the embedded DEFAULT FACE, a freestanding data module (no stdlib) a

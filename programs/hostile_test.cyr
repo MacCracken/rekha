@@ -307,24 +307,21 @@ fn hb_path(p): i64 {
     var npt = sd_path_point_count(p);
     hb_fold(nv);
     hb_fold(npt);
-    var verbs = load64(p + SD_PATH_VERBS_OFFSET);
-    var pts = load64(p + SD_PATH_POINTS_OFFSET);
     # hb_fold inlined over a local, as in hb_outline. Verb tags are 0..4: their high limb is 0.
     var h = g_h;
     var i = 0;
     while (i < nv) {
-        var vb = load64(verbs + i * 8);
+        var vb = sd_path_verb_at(p, i);
         h = (h ^ (vb & 0xFFFFFFFF)) * 1099511628211;
         h = (h ^ ((vb >> 32) & 0xFFFFFFFF)) * 1099511628211;
         i = i + 1;
     }
     i = 0;
     while (i < npt) {
-        var pt = load64(pts + i * 8);
-        var px = load64(pt + SD_POINT_X_OFFSET);
+        var px = sd_path_point_x(p, i);
         h = (h ^ (px & 0xFFFFFFFF)) * 1099511628211;
         h = (h ^ ((px >> 32) & 0xFFFFFFFF)) * 1099511628211;
-        var py = load64(pt + SD_POINT_Y_OFFSET);
+        var py = sd_path_point_y(p, i);
         h = (h ^ (py & 0xFFFFFFFF)) * 1099511628211;
         h = (h ^ ((py >> 32) & 0xFFFFFFFF)) * 1099511628211;
         i = i + 1;
@@ -1646,8 +1643,10 @@ fn t_pointmatch(): i64 {
 # A hook that refuses every block from the K-th on. rekha_load_glyph must return 0 or EXACTLY the
 # unrefused outline — never a partial one, never a fault. rekha_font_open under refusal returns 0.
 # Exactly the K below the load's block count return 0: 1 block for the triangle, 32 for glyph 2
-# (30 components), 67 for glyph 4 (the budget abort). sadish is not exercised under refusal:
-# sd_point_new stores through its block unchecked (glyf.cyr header).
+# (30 components), 67 for glyph 4 (the budget abort).
+# ⭐ THE DRAW IS UNDER THE SAME SWEEP (0.4.3). sadish >= 0.7.2 returns SADISH_ERR_OOM from a refused
+# path allocation instead of faulting, and rekha checks every sd_path_* status — so a refused block
+# gives 0, never a glyph missing the verbs the refusal ate.
 fn t_refuse_glyph(f, gid, kmax, want_zeros): i64 {
     hb_sentinel(g_which);
     var ref = hb_odigest(rekha_load_glyph(f, gid));
@@ -1671,6 +1670,36 @@ fn t_refuse_glyph(f, gid, kmax, want_zeros): i64 {
     return 0;
 }
 
+# The same sweep through the DRAW: rekha_glyph_to_sdpath must return 0 or a path with exactly the
+# verbs and points the unrefused draw produces.
+fn t_refuse_draw(f, gid, kmax): i64 {
+    hb_sentinel(g_which);
+    hb_reset();
+    var ref = rekha_glyph_to_sdpath(f, gid, HB_SCALE, 0, HB_OY);
+    var rv = sd_path_verb_count(ref);
+    var rp = sd_path_point_count(ref);
+    check(rv > 0, 1);
+    var zeros = 0;
+    var bad = 0;
+    var k = 0;
+    while (k <= kmax) {
+        hb_reset();
+        g_pool_refuse_at = k;
+        var p = rekha_glyph_to_sdpath(f, gid, HB_SCALE, 0, HB_OY);
+        g_pool_refuse_at = 0 - 1;
+        if (p == 0) {
+            zeros = zeros + 1;
+        } else {
+            if (sd_path_verb_count(p) != rv) { bad = bad + 1; }
+            if (sd_path_point_count(p) != rp) { bad = bad + 1; }
+        }
+        k = k + 1;
+    }
+    check(bad, 0);
+    check(zeros > 0, 1);
+    return 0;
+}
+
 fn t_refuse(): i64 {
     g_sec = "refusing hook";
     fb_reset();
@@ -1685,6 +1714,8 @@ fn t_refuse(): i64 {
     t_refuse_glyph(f, 0, 4, 1);
     t_refuse_glyph(f, mid, 40, 32);
     t_refuse_glyph(f, top, 72, 67);
+    t_refuse_draw(f, 0, 8);
+    t_refuse_draw(f, mid, 40);
     check(g_st_viol, 0);
     hb_reset();
     g_pool_refuse_at = 0;

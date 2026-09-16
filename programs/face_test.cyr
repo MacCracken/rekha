@@ -238,6 +238,25 @@ fn main(): i64 {
     # beyond the BMP format 4 maps nothing
     check(rekha_char_to_glyph(f, 65536), 0);
 
+    # ⭐ EVERY PATH IS SIZED EXACTLY (0.4.3): rekha counts the verbs and points a glyph's contours come
+    # to and opens the SdPath at that capacity, so for a loader outline the capacity sadish reports
+    # EQUALS the final count — no growth, no slack — except where it clamps to sadish's 8-slot floor.
+    var cap_bad = 0;
+    var gidc = 0;
+    while (gidc < rekha_glyph_count(f)) {
+        var pc = rekha_glyph_to_sdpath(f, gidc, 4096, 0, 0);
+        var vn = sd_path_verb_count(pc);
+        var pn = sd_path_point_count(pc);
+        if (vn > 8) {
+            if (sd_path_verb_cap(pc) != vn) { cap_bad = cap_bad + 1; }
+        }
+        if (pn > 8) {
+            if (sd_path_point_cap(pc) != pn) { cap_bad = cap_bad + 1; }
+        }
+        gidc = gidc + 1;
+    }
+    check(cap_bad, 0);
+
     if (g_fails == 0) {
         var ok = "face_test: PASS (embedded default face byte-exact + usable through rekha)\n";
         syscall(1, 1, ok, strlen(ok));

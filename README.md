@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.2
+Version: 0.4.3
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -89,6 +89,13 @@ shim, no external binaries.
   an independent reference on **all 405 CFF faces of the dev host — 5,093,070 glyphs, 415,584,832
   points, identical**. ⚠ Accented glyphs built with `seac`, CFF2 and TrueType Collections are on the
   list below; a WOFF wrapping an OTTO face now works end to end.
+- **v0.4.3 — sadish 0.9.0, and a path sized to its glyph (shipped).** `[deps.sadish]` moves
+  **0.5.5 → 0.9.0**, whose `SdPath` stores point coordinates INLINE (rekha filed the measurement that
+  asked for it); five test programs move to `sd_path_point_x` / `_y` / `sd_path_verb_at`.
+  `rekha_outline_to_sdpath` now counts a glyph's verbs and points first and opens the path at exactly
+  that (`sd_path_new_cap`), so nothing grows: MEASURED, the printable-ASCII set **433,648 B → 59,784 B**
+  of paths and a 54-character label **231,928 B → 55,320 B** of arena. A consumer hook that refuses now
+  yields 0, never a glyph missing verbs — rekha checks every `sd_path_*` status.
 - **v0.4.x line — next, in order:**
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
   2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
@@ -98,8 +105,8 @@ shim, no external binaries.
      `[lib.brotli]` (`sankoch/docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md`).
   5. **`[deps].stdlib` trim** — to what `src/` calls; released on its own, since it changes the
      `dist/rekha.deps` sidecar consumers resolve.
-  6. **Adopt the sadish filings as they ship** — bounded flatten, checked path allocation,
-     `sd_path_new_cap` sized from the outline (5.5× less path arena on ASCII, MEASURED).
+  6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
+     allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
   7. **CFF `seac`** — the accented glyphs old CFF faces build from a base + an accent (none of the 405
      surveyed faces use it; they are EMPTY today), which needs the charset and standard-encoding
      lookup.
@@ -158,7 +165,8 @@ document / UI text — anywhere scalable glyphs are needed.
 
 - **sadish** — the 2D vector-fill core rekha emits glyph paths into (the
   rasterize target), AND the allocation seam rekha draws from (`sd_alloc`).
-  ⛔ Floor **0.5.5**: `sd_alloc` does not exist below it — the build may
+  ⛔ Floor **0.9.0**: `SdPath`'s inline points and `sd_path_new_cap` are 0.7.2 / 0.9.0, and
+  `sd_alloc` does not exist below 0.5.5 — the build may
   still compile (`warning: undefined function 'sd_alloc'`, printed either way)
   and fault at the first `rekha_font_open`, or be refused outright, depending
   on where the first call site sits (CHANGELOG 0.3.10). Wired via

@@ -131,9 +131,8 @@ fn vseq(path, s): i64 {
 
 # Point i of the path is (x, y), both 16.16.
 fn ppt(path, i, x, y): i64 {
-    var pp = load64(load64(path + SD_PATH_POINTS_OFFSET) + i * 8);
-    check(sd_point_x(pp), x);
-    check(sd_point_y(pp), y);
+    check(sd_path_point_x(path, i), x);
+    check(sd_path_point_y(path, i), y);
     return 0;
 }
 

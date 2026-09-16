@@ -629,11 +629,10 @@ fn main(): i64 {
     store64(oh + 40, ocb);
     var pc = rekha_outline_to_sdpath(oh, 1, 0, 0);
     check(sd_path_point_count(pc), 7);
-    var pts = load64(pc + SD_PATH_POINTS_OFFSET);
-    check(sd_point_x(load64(pts + 2 * 8)), 0 - 2);
-    check(sd_point_y(load64(pts + 2 * 8)), 0 - 2);
-    check(sd_point_x(load64(pts + 4 * 8)), 0 - 2);
-    check(sd_point_y(load64(pts + 4 * 8)), 1);
+    check(sd_path_point_x(pc, 2), 0 - 2);
+    check(sd_path_point_y(pc, 2), 0 - 2);
+    check(sd_path_point_x(pc, 4), 0 - 2);
+    check(sd_path_point_y(pc, 4), 1);
 
     # ---------------- G14 ----------------
     # ⛔ rekha_load_simple walks endPts BEFORE its one sd_alloc and copies them AFTER it, so a hook

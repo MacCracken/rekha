@@ -733,14 +733,13 @@ fn t_emit(): i64 {
     check(load64(verbs), SD_VERB_MOVETO);
     check(load64(verbs + 8), SD_VERB_CUBICTO);
     check(load64(verbs + 16), SD_VERB_CLOSE);
-    var pts = load64(p + SD_PATH_POINTS_OFFSET);
     check(sd_path_point_count(p), 4);
-    check(sd_point_x(load64(pts + 8)), 10 * SD_ONE);
-    check(sd_point_y(load64(pts + 8)), 0);
-    check(sd_point_x(load64(pts + 16)), 30 * SD_ONE);
-    check(sd_point_y(load64(pts + 16)), 0 - 10 * SD_ONE);      # y-flip
-    check(sd_point_x(load64(pts + 24)), 30 * SD_ONE);
-    check(sd_point_y(load64(pts + 24)), 0 - 30 * SD_ONE);
+    check(sd_path_point_x(p, 1), 10 * SD_ONE);
+    check(sd_path_point_y(p, 1), 0);
+    check(sd_path_point_x(p, 2), 30 * SD_ONE);
+    check(sd_path_point_y(p, 2), 0 - 10 * SD_ONE);             # y-flip
+    check(sd_path_point_x(p, 3), 30 * SD_ONE);
+    check(sd_path_point_y(p, 3), 0 - 30 * SD_ONE);
     # glyph 8 (rcurveline): moveto, cubicto, lineto, close
     p = rekha_glyph_to_sdpath(g_f, 8, SD_ONE, 0, 0);
     verbs = load64(p + SD_PATH_VERBS_OFFSET);
@@ -763,7 +762,7 @@ fn t_emit(): i64 {
     p = rekha_outline_to_sdpath(o, SD_ONE, 0, 0);
     check(sd_path_verb_count(p), 3);                # moveto, cubicto (to the start), close
     check(load64(load64(p + SD_PATH_VERBS_OFFSET) + 8), SD_VERB_CUBICTO);
-    check(sd_point_x(load64(load64(p + SD_PATH_POINTS_OFFSET) + 24)), 0);
+    check(sd_path_point_x(p, 3), 0);
     store64(eps, 1);
     store64(o + 8, 2);                              # [on, cubic]: the lone control is a line
     p = rekha_outline_to_sdpath(o, SD_ONE, 0, 0);

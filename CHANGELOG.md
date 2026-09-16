@@ -5,6 +5,65 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-09-16 — sadish 0.9.0, and a path sized to its glyph
+
+### Changed — `[deps.sadish]` 0.5.5 → 0.9.0 (commit-pinned 9a51a05)
+
+- **sadish 0.9.0 stores an `SdPath`'s points INLINE** (16 B a slot) instead of 8 B pointers to
+  separately allocated `SdPoint`s — the change rekha's own proposal asked for and measured. sadish
+  filed the port against rekha (`docs/development/issues/archived/2026-09-16-sadish-0.9.0-inlines-path-points-five-programs-must-port.md`,
+  now closed) and it reproduced exactly as written: **4 of 23 suites SIGSEGV, rc 139** (cff_test,
+  glyf_edge_test, hostile_test, path_start_test), the other 19 green. All five sites — those four
+  plus `bench_hotpath` — now read through **`sd_path_point_x` / `sd_path_point_y` / `sd_path_verb_at`**,
+  and `src/` needed no change (it names no `SD_PATH_*` constant).
+- **Two filings rekha made against sadish came back fixed** and are adopted here: `sd_path_flatten` no
+  longer allocates mid-points past its output cap and flags a truncated polyline (sadish 0.7.1 /
+  0.7.2), and a refused allocation inside path construction and strokes is a return code, not a fault
+  (0.7.2).
+- ⛔ **The floor is now sadish >= 0.9.0** and the manifest says why. ⚠ The reverse mistake is silent —
+  rekha builds against sadish's `dist/`, so a stale `lib/` looks fine; the provenance check that does
+  not rot is `grep -c '^fn sd_path_point_x' lib/sadish.cyr` (1 on 0.9.0, 0 below).
+
+### Changed — every path opens at the size of its glyph
+
+- ⭐ **`rekha_outline_to_sdpath` counts before it builds.** A new `rekha_contour_size` walks a
+  contour's flags exactly as `rekha_emit_contour` does and totals the verbs and points the emit will
+  push; the path is then opened with **`sd_path_new_cap(v, p)`** (sadish >= 0.7.2) instead of
+  `sd_path_new`'s 4,144 B default. This is item 3 of rekha's own proposal
+  (`sadish/docs/development/proposals/2026-09-15-path-capacity-for-known-size-paths.md`), the part
+  sadish could not close from its side; the proposal is now closed.
+- **MEASURED on rekha's tree**, LiberationSans:
+
+| | 0.4.2 (sadish 0.5.5) | 0.4.3 (sadish 0.9.0, exact caps) |
+|---|---:|---:|
+| printable-ASCII paths (95 glyphs) | 433,648 B | **59,784 B** |
+| `rekha_char_to_sdpath` 'A' | 4,776 B | **816 B** |
+| one 3-point glyph, path + outline (alloc_test) | 4,304 B | **352 B** |
+| 54-character label, arena per draw | 231,928 B | **55,320 B** |
+| `rekha_outline_to_sdpath` (ASCII) | 921 ns | **818 ns** |
+| `rekha_char_to_sdpath` (composite U+00C5) | 2,795 ns | 3,010 ns |
+
+  The composite row is the one that went the wrong way (+8 %, three runs): a composite's path is
+  counted as well as emitted, and its outline is the part the counting walk cannot skip. The bench's
+  result checksum is unchanged (`-6023123829465929365`), so nothing rendered differently.
+- **The estimate is exact, and a test says so.** `face_test` now asserts `sd_path_verb_cap ==
+  sd_path_verb_count` and the same for points on **all 2,620 glyphs** of the embedded face: no path
+  grows, and none carries slack (above sadish's 8-slot floor, which the sub-8 paths meet).
+
+### Fixed — a refused allocation can no longer truncate a glyph
+
+`rekha_emit_contour` ignored what `sd_path_moveto` / `_lineto` / `_quadto` / `_cubicto` / `_close`
+returned. sadish >= 0.7.2 returns `SADISH_ERR_OOM` from those instead of faulting, so an ignored
+status would have left a glyph MISSING THE VERBS the refusal ate — the silent-truncation failure mode
+rekha itself filed against sadish's flatten. Every status is checked now and the first failure makes
+`rekha_outline_to_sdpath` return 0 (OOM). MEASURED, a hook granting its first K blocks then refusing,
+K = 0..63 over 'A': every call returns 0 or the whole 17-verb path — no fault, no truncation, gated by
+`hostile_test`'s refusing-hook sweep, which now sweeps the DRAW as well as the load.
+⚠ With paths sized exactly there is no growth left to refuse, so no test can kill these checks today:
+they are what turns a future divergence between the counting walk and the emitter into a clean 0
+instead of a silent truncation, and `face_test`'s capacity assertion is what would catch the
+divergence itself.
+
 ## [0.4.2] - 2026-09-15 — CFF: OpenType `OTTO` faces draw
 
 ### Added — `src/cff.cyr`, the `CFF ` table and its Type 2 charstrings

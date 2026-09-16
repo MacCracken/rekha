@@ -95,11 +95,9 @@ fn main(): i64 {
         var np = sd_path_point_count(pth);
         ck = ck * 31 + nv;
         ck = ck * 31 + np;
-        var pts = load64(pth + SD_PATH_POINTS_OFFSET);
         var q = 0;
         while (q < np) {
-            var pp = load64(pts + q * 8);
-            ck = ck * 31 + sd_point_x(pp) + sd_point_y(pp) * 7;
+            ck = ck * 31 + sd_path_point_x(pth, q) + sd_path_point_y(pth, q) * 7;
             q = q + 1;
         }
         arena_reset(g_arena);

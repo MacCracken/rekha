@@ -6,7 +6,7 @@
 # text calls rekha_char_to_sdpath per glyph, per label, per frame, and rekha drew its outline
 # scratch (span, end_pts, flags, on_curve, xs, ys, the record) from the global heap: MEASURED
 # 136 B per call of a 3-point glyph that no hook could reach, even after sadish 0.5.5 had moved
-# the 4,192 B path onto the consumer's arena. dhancha filed it (2026-09-13, scalable text
+# the path onto the consumer's arena. dhancha filed it (2026-09-13, scalable text
 # allocates per call outside the frame arena); crab's headline gate asserts a rendered frame costs
 # the global heap EXACTLY 0. This suite is that gate from rekha's side.
 #
@@ -161,8 +161,10 @@ fn main(): i64 {
     var p = rekha_char_to_sdpath(f, 65, scale, 0, oy);
     var glyph_cost = alloc_used() - g0;
     # ⛔ THE BASELINE, ASSERTED RATHER THAN ASSUMED. If this ever reads 0 the zeros below are
-    # measured against nothing. MEASURED 4,304 B: 112 B of rekha outline (one carved block) +
-    # 4,192 B of sadish path (sd_path_new 4,144 + 3 points x 16).
+    # measured against nothing. MEASURED 352 B (0.4.3, sadish 0.9.0): 112 B of rekha outline (one
+    # carved block) + 240 B of path — rekha now opens the SdPath at the glyph's OWN size
+    # (sd_path_new_cap, 4 verbs / 3 points, each raised to sadish's 8-slot floor: 48 + 8 x 8 + 16 x 8).
+    # It was 4,304 B through 0.4.2, when every path opened at sd_path_new's 4,144 B default.
     check(glyph_cost > 0, 1);                                          # 5
     check(sd_path_verb_count(p), 4);                                   # 6 — moveto, 2 lineto, close
     g0 = alloc_used();
@@ -198,7 +200,7 @@ fn main(): i64 {
     }
     var hw1 = arena_used(g_arena) - ab;
     # ⭐ THE HEADLINE. Twenty character -> path conversions: not one byte on the global heap.
-    # MEASURED: the twenty calls put 86,080 B on the arena (4,304 B per call — the same bytes group
+    # MEASURED: the twenty calls put 7,040 B on the arena (352 B per call — the same bytes group
     # A saw on the global heap, moved). Before 0.3.10 the same loop leaked 2,720 B (136 x 20) on the
     # global heap under this very hook. The arena is 4 MiB so it never chains a chunk — a chunk would
     # come from the global allocator and fail this, which is the correct answer for an arena sized
