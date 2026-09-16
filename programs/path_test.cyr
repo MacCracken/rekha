@@ -6,7 +6,7 @@
 #     sequence (implied-midpoint between two consecutive off-curve points).
 # Exit code = failed checks. Validates that rekha consumes the sadish API.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 

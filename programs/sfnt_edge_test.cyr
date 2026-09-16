@@ -9,7 +9,7 @@
 # record inside the extent whose 14-byte header is cut is no candidate (0.3.11 read that as NO
 # subtable; 0.4.0 falls back to the valid one). Plus the direct rekha_cmap_subtable(0) guard.
 # Exit code = failed checks.
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

@@ -22,7 +22,7 @@
 # printed FIRST, so two builds of rekha can be compared for identical output before their timings
 # are compared at all.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 include "fonts/face_data.cyr"
 
 var g_arena = 0;

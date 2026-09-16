@@ -1,0 +1,53 @@
+# @public — rekha's TEST/PROGRAM prelude. Never part of dist/rekha.cyr.
+#
+# ⭐ WHY THIS FILE EXISTS. `cyrius distlib` builds dist/rekha.deps — the list
+# every consumer of the bundle must vendor — from TWO sources, unioned:
+#
+#   1. the include scan of src/lib.cyr   (_distlib_scan_umbrella, hardcoded path)
+#   2. the `[deps] stdlib` array         (_distlib_union_declared_stdlib)
+#
+# So a leaf named in either one is a leaf every consumer pays for, whether or
+# not the bundle touches it. Through 0.4.3 both listed all nine leaves and the
+# sidecar said nine; the bundled modules call exactly `strlen` and `memcpy`.
+#
+# rekha's own harness genuinely wants the other eight — fmt_int_fd for the
+# failure lines, arena_*/alloc_* for the corpus builders, str_same, assert_*,
+# bench_*. They are declared HERE, one hop outside the scan, so the harness
+# keeps them and consumers do not inherit them.
+#
+# Programs include this instead of src/lib.cyr. The two consumer-simulating
+# suites (dist_test, woff_dist_test) deliberately do NOT — they spell out the
+# leaves their sidecar names, so the file documents a real consumer chain.
+#
+# ⚠ WHERE THESE EIGHT COME FROM NOW, MEASURED (0.4.4). They are no longer in
+# rekha's `[deps] stdlib`, so whether `cyrius deps` vendors them into lib/ is
+# not up to rekha: today it does, because sadish's own sidecar requires all
+# nine. That does NOT matter here. An include resolves from vendored lib/
+# first and from the PINNED TOOLCHAIN SNAPSHOT (~/.cyrius/versions/6.6.4/lib)
+# otherwise — proven two ways: rekha's lib/ has never contained sync.cyr or
+# sankoch.cyr, yet programs/woff_test.cyr includes both and passes; and
+# resolving rekha against a sadish whose sidecar lists only string+alloc cuts
+# lib/ to 8 files, after which every suite here still builds and runs green.
+# A file that exists in NEITHER place is a hard build error ("cannot open
+# include file"), never a silent miss. So this prelude is self-sufficient.
+#
+# ⛔ WHAT THIS FILE CANNOT DO. Inside rekha's tree cyrius AUTO-PREPENDS every
+# resolved leaf into scope, so a program compiles whether or not it includes
+# what it calls — measured: a program with zero includes calls alloc/strlen/
+# vec_new and builds clean. These include lines are therefore DOCUMENTATION,
+# not enforcement, and no include list in programs/ can gate the sidecar.
+# The sidecar's sufficiency is proven by distlib's own compile-verify pass,
+# which splices the bundle with exactly the leaves under test and _skip_deps
+# on; `cyrius distlib --check` runs it and CI gates it.
+
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+include "lib/bench.cyr"
+
+# The library proper — string + sadish + the rekha domain modules.
+include "src/lib.cyr"

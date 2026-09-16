@@ -5,7 +5,7 @@
 # include chain (stdlib + domain modules) parses and links without error.
 # The emitted binary writes a one-line banner and exits 0.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 fn main(): i64 {
     alloc_init();

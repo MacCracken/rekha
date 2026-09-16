@@ -21,7 +21,7 @@
 # 'A' -> 0, 'B' -> 1; hhea/hmtx so the read-only calls have real tables to walk.
 # Exit code = failed checks; each failure prints its check number.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

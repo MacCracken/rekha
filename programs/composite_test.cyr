@@ -4,7 +4,7 @@
 # glyph 0 with an (dx,dy) offset (identity transform). Loading glyph 1 must
 # yield the triangle's points translated by (dx,dy). Exit code = failed checks.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 

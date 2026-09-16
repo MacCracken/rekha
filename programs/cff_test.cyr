@@ -11,7 +11,7 @@
 # host (CHANGELOG 0.4.2); this suite is what CI can run.
 # Exit code = failed checks; each failure prints its number, group, got and want.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

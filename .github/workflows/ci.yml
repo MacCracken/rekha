@@ -113,6 +113,37 @@ jobs:
           fi
           echo "dist/ matches src/"
 
+      - name: Pin the published leaf requirements (dist/*.deps)
+        # `--check` above only proves the sidecar matches src/ — it passes just as happily on a
+        # sidecar that has GROWN. Every leaf named in dist/rekha.deps is one each consumer must
+        # vendor, and the way it grows is quiet: one `include "lib/fmt.cyr"` added to src/lib.cyr
+        # for convenience (distlib scans that exact file and unions `[deps] stdlib`), or a leaf
+        # added back to that array. rekha 0.4.3 shipped nine leaves for a bundle whose entire
+        # stdlib appetite is strlen + memcpy; 0.4.4 cut it to two and this pins it there.
+        # `alloc` is not padding: lib/string.cyr calls alloc() and declares no include for it.
+        # CHANGING THIS LIST IS A DELIBERATE ACT — a consumer-visible change that belongs in its
+        # own release with a CHANGELOG line, not a drive-by. Update it here when you mean it.
+        run: |
+          expect_base="string alloc"
+          expect_woff="string alloc sankoch"
+          got_base="$(grep -v '^#' dist/rekha.deps | tr -s '\n' ' ' | sed 's/ *$//')"
+          got_woff="$(grep -v '^#' dist/rekha-woff.deps | tr -s '\n' ' ' | sed 's/ *$//')"
+          rc=0
+          if [ "$got_base" != "$expect_base" ]; then
+            echo "ERROR: dist/rekha.deps changed: expected [$expect_base], got [$got_base]"
+            rc=1
+          fi
+          if [ "$got_woff" != "$expect_woff" ]; then
+            echo "ERROR: dist/rekha-woff.deps changed: expected [$expect_woff], got [$got_woff]"
+            rc=1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "A consumer of dist/rekha.cyr must vendor every leaf listed there."
+            echo "If the change is intended, update the expected list in this step and say so in CHANGELOG.md."
+            exit 1
+          fi
+          echo "leaf requirements pinned: base [$got_base], woff [$got_woff]"
+
       - name: Verify the embedded default face is in sync with its source .ttf
         # fonts/face_data.cyr is GENERATED from fonts/LiberationSans-Regular.ttf by
         # scripts/face2cyr.py and lives outside src/ on purpose: cyrfmt refuses files over

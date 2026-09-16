@@ -22,7 +22,7 @@
 # hmtx advances gid 0..7: 600 500 333 499 250 0 1000 777; bytes 190..191 (in no table) hold 0xA5A5.
 # Exit code = failed checks; each failure prints its global check number, group, got and want.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

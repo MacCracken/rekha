@@ -6,7 +6,7 @@
 # array and returns a bearing as if it were a width — so it is the case this file exists for.
 # Exit code = failed checks.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 

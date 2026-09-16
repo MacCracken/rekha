@@ -5,7 +5,7 @@
 # 0xFFFF terminator segment. Checks mapped chars, gaps, and beyond-BMP.
 # Exit code = failed checks.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 

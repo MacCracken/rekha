@@ -35,7 +35,7 @@
 # Exit code = failed checks (capped at 255 so a multiple of 256 cannot read as a pass); each failure
 # prints its check number, its section and got/want to fd 2.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 include "fonts/face_data.cyr"
 
 var g_fails = 0;

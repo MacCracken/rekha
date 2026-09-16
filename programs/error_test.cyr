@@ -6,7 +6,7 @@
 # byte for byte (an unknown code included), and checks the record follows an allocation hook.
 # Exit code = failed checks; each failure prints its check number to fd 2.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

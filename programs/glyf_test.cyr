@@ -4,7 +4,7 @@
 # 2-byte delta, Y_SAME (no bytes), and a negative X_SHORT. Verifies the decoded
 # absolute points, on-curve flags, and contour end. Exit code = failed checks.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 

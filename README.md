@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.3
+Version: 0.4.4
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -96,6 +96,19 @@ shim, no external binaries.
   that (`sd_path_new_cap`), so nothing grows: MEASURED, the printable-ASCII set **433,648 B → 59,784 B**
   of paths and a 54-character label **231,928 B → 55,320 B** of arena. A consumer hook that refuses now
   yields 0, never a glyph missing verbs — rekha checks every `sd_path_*` status.
+- **v0.4.4 — nine leaves become two (shipped).** `dist/rekha.deps` told every consumer to vendor
+  nine stdlib leaves for a bundle whose entire stdlib appetite is `strlen` + `memcpy`; it now says
+  **`string`, `alloc`** and the WOFF sidecar says **`string`, `alloc`, `sankoch`** (was five).
+  ⭐ **Not one line of bundle code changed** — both bundles differ from 0.4.3 only in the
+  `# Version:` banner `distlib` stamps. This changes what a consumer has to resolve, not the code
+  they get. `cyrius distlib` builds the sidecar from the
+  include scan of `src/lib.cyr` unioned with `[deps].stdlib`, so both were trimmed and the harness's
+  own leaves moved to a new `programs/prelude.cyr`, one hop outside the scan. `alloc` is not
+  padding: `lib/string.cyr` calls `alloc()` and declares no include for it, which distlib's
+  compile-verify pass found unaided. ⚠ MEASURED — re-adding one convenience `include "lib/fmt.cyr"`
+  to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
+  now pins the expected list. The positional nature of that fix is filed upstream
+  (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
 - **v0.4.x line — next, in order:**
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
   2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
@@ -103,8 +116,7 @@ shim, no external binaries.
   4. **WOFF2** — the container, the glyf/loca and hmtx transforms, tested on
      transformed-but-uncompressed tables; the Brotli stream decodes through sankoch's requested
      `[lib.brotli]` (`sankoch/docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md`).
-  5. **`[deps].stdlib` trim** — to what `src/` calls; released on its own, since it changes the
-     `dist/rekha.deps` sidecar consumers resolve.
+  5. ~~`[deps].stdlib` trim~~ — shipped in 0.4.4, above.
   6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
   7. **CFF `seac`** — the accented glyphs old CFF faces build from a base + an accent (none of the 405
@@ -170,13 +182,19 @@ document / UI text — anywhere scalable glyphs are needed.
   still compile (`warning: undefined function 'sd_alloc'`, printed either way)
   and fault at the first `rekha_font_open`, or be refused outright, depending
   on where the first call site sits (CHANGELOG 0.3.10). Wired via
-  `[deps.sadish]` (`tag = "0.5.5"`, commit-pinned in `cyrius.lock`; for
+  `[deps.sadish]` (`tag = "0.9.0"`, commit-pinned in `cyrius.lock`; for
   cross-repo dev add `path = "../sadish"` in an UNCOMMITTED copy — `path`
   wins over `tag`, skips the pin, and CI refuses a committed `path` line).
   A consumer vendoring `dist/rekha.cyr` next to its own `dist/sadish.cyr`
   must clear the same floor.
-- **Cyrius stdlib** — `string`, `fmt`, `alloc`, `io`, `vec`, `str`,
-  `syscalls`, `assert`, `bench`. Resolved by `cyrius deps` into `lib/`.
+- **Cyrius stdlib** — what a CONSUMER of `dist/rekha.cyr` must vendor is `string` and
+  `alloc`, and that is the whole list (0.4.4; `dist/rekha.deps`). `string` is there because
+  `src/` calls `strlen` + `memcpy`; `alloc` because `lib/string.cyr` itself calls `alloc()`
+  and declares no include for it. The WOFF bundle adds `sankoch` (`dist/rekha-woff.deps`).
+  ⚠ rekha's own test harness uses seven more (`fmt`, `vec`, `str`, `io`, `syscalls`, `assert`,
+  `bench`) — those are declared in `programs/prelude.cyr` and are deliberately NOT published,
+  because every leaf in the sidecar is one each consumer has to vendor. Resolved by
+  `cyrius deps` into `lib/`.
 - **sankoch** — only for WOFF, and only through `dist/rekha-woff.cyr`: `zlib_decompress_capped`
   (sankoch >= 2.7.13; the cyrius 6.6.4 stdlib ships 2.7.15). A consumer includes `lib/sync.cyr` and
   `lib/sankoch.cyr` before the bundle. ⚠ sankoch's lean `[lib.zlib]` profile does not link on its own

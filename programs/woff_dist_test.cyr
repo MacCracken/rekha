@@ -3,25 +3,28 @@
 #
 # ⭐ WHAT THIS EXISTS TO PROVE. programs/woff_test.cyr includes src/, so a `[lib.woff]` profile that
 # `cyrius distlib woff` folded wrong would pass it and fail the first consumer. This suite never
-# touches src/: the stdlib prelude as src/lib.cyr lists it, sadish, then what a WOFF consumer adds —
-# `sync` and the stdlib `sankoch` leaf — then dist/rekha-woff.cyr INSTEAD of dist/rekha.cyr, then the
-# embedded face. It wraps the face into a WOFF with sankoch's zlib_compress and opens it through the
-# bundle's public API, and measures what that open allocates.
+# touches src/ and never touches programs/prelude.cyr: the leaves dist/rekha-woff.deps NAMES,
+# sadish, then `sync` (which the sankoch leaf needs), then dist/rekha-woff.cyr INSTEAD of
+# dist/rekha.cyr, then the embedded face. It wraps the face into a WOFF with sankoch's
+# zlib_compress and opens it through the bundle's public API, and measures what that open
+# allocates.
+#
+# Since 0.4.4 the leaf list below is dist/rekha-woff.deps, by hand, instead of all nine leaves,
+# so the file documents the chain a WOFF consumer actually compiles. It does NOT enforce it:
+# cyrius auto-prepends every resolved leaf inside rekha's tree, so the suite builds whichever
+# lines are here. Sufficiency is distlib's compile-verify pass (`--check`, gated in CI).
 #
 # ⚠ The bundle must be CURRENT for this to mean anything: `cyrius distlib --check` (every profile) is
 # the companion gate. Exit code = failed checks; each failure prints its check number to fd 2.
 
-# ---- a WOFF consumer's include chain ----
+# ---- a WOFF consumer's include chain: dist/rekha-woff.deps, then sadish and sync ----
 include "lib/string.cyr"
-include "lib/fmt.cyr"
 include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/io.cyr"
-include "lib/syscalls.cyr"
-include "lib/assert.cyr"
-include "lib/bench.cyr"
+# harness-only, NOT in dist/rekha-woff.deps: fmt_int_fd for the failure lines.
+include "lib/fmt.cyr"
 include "lib/sadish.cyr"
+# `sync` is not in the sidecar either — it is the sankoch LEAF's own requirement, which a
+# consumer picks up from sankoch's sidecar, not from rekha's.
 include "lib/sync.cyr"
 include "lib/sankoch.cyr"
 include "dist/rekha-woff.cyr"

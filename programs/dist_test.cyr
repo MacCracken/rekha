@@ -4,9 +4,21 @@
 # ⭐ WHAT THIS EXISTS TO PROVE. Every other suite includes src/lib.cyr, so a bundle that
 # `cyrius distlib` folded wrong (a module dropped, an order swapped, an include left behind, a
 # helper that only src/ defines) would pass all of them and fail the first consumer. This suite
-# never touches src/: it includes the stdlib prelude exactly as src/lib.cyr lists it, then sadish,
-# then dist/rekha.cyr, then the embedded face — the consumer's include chain — and drives the
-# bundle end to end through the public API.
+# never touches src/ and never touches programs/prelude.cyr: it includes the leaves
+# dist/rekha.deps NAMES, then sadish, then dist/rekha.cyr, then the embedded face — the
+# consumer's include chain — and drives the bundle end to end through the public API.
+#
+# Since 0.4.4 the leaf list below is dist/rekha.deps, by hand, instead of all nine leaves —
+# so the file DOCUMENTS the chain a consumer actually compiles. Keep it matching the sidecar.
+#
+# ⛔ BUT IT DOES NOT ENFORCE IT, AND DO NOT WRITE THAT IT DOES. Inside rekha's tree cyrius
+# auto-prepends every resolved leaf into scope, so this suite compiles no matter which lines
+# are here — MEASURED: deleting `include "lib/alloc.cyr"` below still builds clean, and a
+# program with no includes at all can call alloc/strlen/vec_new. The sidecar's sufficiency is
+# proven instead by distlib's compile-verify pass, which splices the bundle with exactly the
+# leaves under test and dep auto-prepend OFF (_skip_deps = 1); `cyrius distlib --check` runs
+# it and CI gates it. The CI step "Pin the published leaf requirements" guards the other
+# direction — the sidecar silently GROWING.
 #
 # ⚠ The bundle must be CURRENT for this to mean anything: `cyrius distlib --check` compares
 # dist/rekha.cyr against src/ (read-only) and is the companion gate. This suite proves the bundle
@@ -16,16 +28,12 @@
 # of a bundle that calls something only src/ defines). Exit code = failed checks; each failure
 # prints its check number to fd 2.
 
-# ---- the consumer's include chain: the stdlib prelude of src/lib.cyr, sadish, the bundle ----
+# ---- the consumer's include chain: dist/rekha.deps, then sadish, then the bundle ----
 include "lib/string.cyr"
-include "lib/fmt.cyr"
 include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/io.cyr"
-include "lib/syscalls.cyr"
-include "lib/assert.cyr"
-include "lib/bench.cyr"
+# harness-only, NOT a bundle requirement and NOT in dist/rekha.deps: fmt_int_fd, for the
+# failure lines below. A consumer needs neither this nor anything else past the two above.
+include "lib/fmt.cyr"
 include "lib/sadish.cyr"
 include "dist/rekha.cyr"
 include "fonts/face_data.cyr"

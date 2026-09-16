@@ -44,23 +44,29 @@ modules = [
 ]
 
 [deps]
-# Stdlib base set — byte readers + struct alloc + smoke banner + the
-# assert/bench harness. sankoch is deliberately NOT here: declaring it would
-# union it into dist/rekha.deps and make every consumer of the base bundle
-# pull it. WOFF 1.0 (src/woff.cyr, [lib.woff]) resolves `sync` + `sankoch`
-# from the toolchain pin in its own test; WOFF2's Brotli decoder is requested
-# from sankoch (docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md).
-stdlib = [
-    "string",
-    "fmt",
-    "alloc",
-    "io",
-    "vec",
-    "str",
-    "syscalls",
-    "assert",
-    "bench",
-]
+# ⛔ THIS ARRAY IS A TAX ON EVERY CONSUMER — keep it at what `src/` CALLS.
+# `cyrius distlib` builds dist/rekha.deps from the include scan of src/lib.cyr
+# UNIONED with this array (_distlib_union_declared_stdlib), then compile-
+# verifies. A leaf named in either place is one a consumer of dist/rekha.cyr
+# must vendor, used or not. Through 0.4.3 this named nine and the umbrella
+# included nine; the bundle's whole stdlib appetite is `strlen` + `memcpy`,
+# so consumers were vendoring eight leaves of nothing (0.4.4).
+#
+# rekha's own harness DOES want the other eight (fmt_int_fd, arena_*,
+# str_same, assert_*, bench_*) — declared in programs/prelude.cyr, one hop
+# outside the scan. Dropping them here costs the harness nothing: an include
+# resolves from vendored lib/ first and from the pinned toolchain snapshot
+# otherwise, which is the same path programs/woff_test.cyr has always used
+# for sync + sankoch (lib/ has never held either). Measured in 0.4.4 against
+# a sadish sidecar trimmed to string+alloc: lib/ falls to 8 files and all 24
+# suites still build and pass.
+#
+# sankoch is deliberately NOT here either: declaring it would union it into
+# dist/rekha.deps and make every consumer of the base bundle pull it. WOFF 1.0
+# (src/woff.cyr, [lib.woff]) resolves `sync` + `sankoch` from the toolchain pin
+# in its own test; WOFF2's Brotli decoder is requested from sankoch
+# (docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md).
+stdlib = ["string"]
 
 # sadish — the rasterize target. rekha emits glyph-outline PATHS
 # (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT

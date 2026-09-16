@@ -18,7 +18,7 @@
 # rekha_char_to_glyph (mapping count + gid digest) and rekha_char_advance_px (digest). A change to
 # the loader, the cmap search or the metrics path that alters ONE value on this face fails here.
 # Every failure prints its check number to fd 2.
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 include "fonts/face_data.cyr"
 
 var g_fails = 0;

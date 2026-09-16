@@ -23,7 +23,7 @@
 # Font: head (long loca) + maxp + loca + glyf, assembled from the glyph bytes written below.
 # Exit code = failed checks; each failure prints its check number and case name to fd 2.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

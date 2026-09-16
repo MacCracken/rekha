@@ -17,7 +17,7 @@
 # hand-built outlines, since the loader never produces them.
 # Exit code = failed checks; each failure prints its check number and case name to fd 2.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

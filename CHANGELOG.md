@@ -5,6 +5,73 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] - 2026-09-16 — nine published leaves become two
+
+⭐ **Not one line of bundle CODE changed.** `dist/rekha.cyr` and `dist/rekha-woff.cyr` differ from
+0.4.3 in exactly one line each — the `# Version:` banner `distlib` stamps. This release changes
+what a consumer must *resolve*, not the code they get, which is why it ships on its own.
+
+### Changed — `dist/rekha.deps`: nine stdlib leaves → `string`, `alloc`
+
+- **The bundle's entire stdlib appetite is `strlen` + `memcpy`.** Through 0.4.3 the sidecar named
+  `string fmt alloc vec str io syscalls assert bench`, so every consumer of `dist/rekha.cyr`
+  vendored eight leaves it never called — for four releases. It now names **`string alloc`**.
+  `dist/rekha-woff.deps` goes **five → three** (`string alloc sankoch`; `assert` and `vec` were
+  never needed either).
+- **`alloc` is not padding.** `lib/string.cyr` calls `alloc()` and declares no include for it, so
+  `string` drags it in transitively. `distlib`'s compile-verify pass (`_distlib_verify_leaves`,
+  which splices the bundle with `_skip_deps = 1`) derived that unaided — a symbol scan of `src/`
+  alone would have wrongly published `string` and shipped a sidecar that does not link.
+- **Why two files had to change, not one.** `cyrius distlib` builds the sidecar from the include
+  scan of **`src/lib.cyr`** — the path is hardcoded at `cbt/commands.cyr:3903` — **unioned** with
+  the `[deps].stdlib` array, so a leaf named in either place is published. Both are now trimmed to
+  `string`.
+- **New `programs/prelude.cyr`** holds the eight leaves rekha's own harness uses (`fmt_int_fd`,
+  `arena_*`, `str_same`, `assert_*`, `bench_*`) and then includes `src/lib.cyr`; the 23 suites
+  include the prelude. One hop outside the scan is the whole mechanism.
+
+### Added — a CI pin, because `--check` cannot see the sidecar grow
+
+- ⚠ **MEASURED: adding one `include "lib/fmt.cyr"` to `src/lib.cyr` takes the sidecar from
+  `string alloc` to `string fmt alloc vec`** — three new leaves for every consumer, from a one-line
+  convenience edit, with `cyrius distlib --check` staying **green** throughout. `--check` verifies
+  the sidecar *matches* `src/`; it has no opinion on whether it has grown.
+- A new CI step pins both expected leaf lists, so a re-tax is a red build and a deliberate edit.
+
+### Fixed — three comments that claimed enforcement they do not have
+
+Found by mutation-testing the new gates rather than by reading; the first two were written earlier
+in this same release and were wrong.
+
+- ⛔ **`dist_test` / `woff_dist_test` do NOT gate the sidecar, and no suite in this repo can.**
+  Inside a resolved tree cyrius **auto-prepends** every leaf from every resolved sidecar into
+  scope, so a program compiles whether or not it includes what it calls — MEASURED: deleting
+  `include "lib/alloc.cyr"` from `dist_test` still builds clean, and a program with *no* includes
+  at all calls `alloc`/`strlen`/`vec_new` and builds clean. Their trimmed include lists are honest
+  documentation of a consumer's chain; sufficiency is proven only by `distlib --check`.
+- ⛔ **There is no coupling to sadish's sidecar.** An earlier note here claimed rekha's harness
+  leaves reach `lib/` only because sadish requires all nine, and would fail loudly if sadish
+  trimmed. Both halves are false: an include resolves from vendored `lib/` first and the **pinned
+  toolchain snapshot** otherwise. Proven twice — `lib/` has never contained `sync.cyr` or
+  `sankoch.cyr`, yet `woff_test` includes both and passes; and resolving rekha against a sadish
+  whose sidecar lists only `string alloc` cuts `lib/` to **8 files**, after which all 24 suites
+  still build and run green. A file in neither place is a hard `cannot open include file`.
+- README's `[deps.sadish]` line still read `tag = "0.5.5"` after 0.4.3 moved the floor to 0.9.0.
+
+### Filed upstream
+
+- `cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`
+  (+ roadmap P4). The fix works, but *which file an include sits in* decides what every downstream
+  consumer vendors, and the deciding filename appears nowhere in the manifest. Asks for a
+  declarative channel — and notes that trusting the compile-verify pass as the sole authority
+  would have produced the right answer with no declaration discipline at all.
+
+### Verified
+
+- **48/48** — all 24 suites build and run green under `CYRIUS_DCE=0` **and** `1`, zero warnings and
+  zero `undefined function` in every log; `lint --strict`, `fmt --check`, `vet`,
+  `distlib --all --check` and the dist/ porcelain gate all clean.
+
 ## [0.4.3] - 2026-09-16 — sadish 0.9.0, and a path sized to its glyph
 
 ### Changed — `[deps.sadish]` 0.5.5 → 0.9.0 (commit-pinned 9a51a05)

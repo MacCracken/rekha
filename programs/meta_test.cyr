@@ -4,7 +4,7 @@
 # format, glyph count, and glyph->span resolution incl. empty + out-of-range
 # glyphs. Exit code = failed checks.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 

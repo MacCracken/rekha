@@ -21,7 +21,7 @@
 # cmap (3,1) format 4: 'A'..'D' -> gid 0..3.
 # Exit code = failed checks; each failure prints its global check number, group, got and want.
 
-include "src/lib.cyr"
+include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;

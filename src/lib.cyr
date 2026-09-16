@@ -14,17 +14,22 @@
 # in individual src/*.cyr files.
 
 # ================================================================
-# Standard library
+# Standard library — ONLY what the BUNDLED modules call.
+# ⛔ EVERY INCLUDE HERE IS A TAX ON EVERY CONSUMER. `cyrius distlib` scans
+# this exact file (_distlib_scan_umbrella hardcodes "src/lib.cyr") and unions
+# the result with `[deps] stdlib` to produce dist/rekha.deps — the leaves a
+# consumer of dist/rekha.cyr must vendor. src/ calls `strlen` and `memcpy`
+# and nothing else from the stdlib, so `string` is the whole list. (The
+# sidecar reads `string` + `alloc` because lib/string.cyr itself calls
+# `alloc` and declares no include for it; distlib's compile-verify pass
+# finds that transitively. It is a real requirement, not padding.)
+#
+# rekha's own harness wants fmt/alloc/vec/str/io/syscalls/assert/bench —
+# those are in programs/prelude.cyr, one hop outside the scan. Adding one
+# back HERE silently re-taxes every consumer; .github/workflows/ci.yml
+# pins the expected sidecar so that cannot land unnoticed.
 # ================================================================
 include "lib/string.cyr"
-include "lib/fmt.cyr"
-include "lib/alloc.cyr"
-include "lib/vec.cyr"
-include "lib/str.cyr"
-include "lib/io.cyr"
-include "lib/syscalls.cyr"
-include "lib/assert.cyr"
-include "lib/bench.cyr"
 
 # sadish — the 2D vector rasterizer rekha emits glyph paths into (dep).
 # rekha is sadish's first consumer. src/ calls sd_path_* and sd_asr (glyf.cyr)
