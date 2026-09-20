@@ -5,6 +5,127 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] - 2026-09-20 — the toolchain moves, and the gates that could not see it
+
+A pin release: **`cyrius` 6.6.4 → 6.6.6**, **`[deps.sadish]` 0.9.0 → 0.11.2**, `lib/` re-resolved
+against both. ⭐ **Not one line of rekha source changed for the bump.** All 24 programs (23 RUN
+suites + smoke) build and run green under `CYRIUS_DCE=0` and `1` with no `warning`,
+`undefined function` or `refusing to emit` in any build log; `lint --strict`, `vet` and
+`distlib --check` are clean, and both bundles differ from 0.4.4 in exactly one line each — the
+`# Version:` banner.
+
+What the bump *did* do is move one consumer-visible number and expose **three CI gates that were
+not gating**. Those are the release.
+
+### Changed — `dist/rekha.deps`: two leaves become one, and the bundle did not move
+
+- **`dist/rekha.deps` now names `string` alone**; `dist/rekha-woff.deps` is `string sankoch`.
+- ⚠ **`alloc` left the sidecar because the TOOLCHAIN changed, not the bundle.** Through 6.6.4,
+  `lib/string.cyr` called `alloc()` (`strdup`/`strndup`) and declared no include for it, so
+  distlib's compile-verify pass had to re-add the leaf — which is what 0.4.4 published, correctly,
+  and documented as "not padding". 6.6.6 makes that file **self-sufficient**
+  (`include "lib/alloc.cyr"`; cyrius CHANGELOG [6.6.6] — without it, `include "lib/string.cyr"`
+  alone compiled with `warning: undefined function 'alloc'` and any `strdup` call trapped). alloc
+  now arrives **transitively** with `string`. It is still linked; only the name a consumer has to
+  resolve went away.
+- ⛔ **This ties the sidecar to the toolchain, and that is stated rather than discovered later.**
+  A consumer **below 6.6.6** that vendors only `string` gets `warning: undefined function 'alloc'`
+  and a `strdup`/`strndup` call traps (SIGILL). Consumers of `dist/rekha.cyr` 0.4.5 and up must be
+  on 6.6.6 or later — the pin rekha itself builds under.
+- `programs/dist_test.cyr` and `programs/woff_dist_test.cyr` dropped their `include "lib/alloc.cyr"`
+  to match. Their headers already said to keep the list equal to the sidecar; ⚠ neither ENFORCES it
+  (cyrius auto-prepends every resolved leaf inside the tree — 0.4.4 measured that), so this is
+  documentation being kept honest, not a gate. Both still pass under DCE 0 and 1.
+
+### Fixed — the format gate was reading an exit code that lies
+
+- ⛔ **`cyrius fmt <file> --check` is a FALSE NEGATIVE on 6.6.6**, and CI's "Format check" step
+  gated on exactly that exit code — so the gate could not catch the drift it exists to catch.
+  **MEASURED** against sadish's `programs/paint_focal_test.cyr` @0.9.0, the file sadish filed this
+  on: `--check` exits **0**, and formatting the same file in place rewrites it in **three** places
+  (continuation lines at 12 spaces where 6.6.6 wants 10).
+- ⇒ The step now formats in place on the clean checkout and lets `git diff --exit-code` report,
+  which cannot silently agree — the diff *is* the formatter's output. `lib/` and `/build/` are
+  gitignored, so only tracked source can dirty the tree at that point. The `--check` flag is left
+  unused rather than trusted.
+- ⚠ **rekha's own tree does not drift**, and the fix is not hiding a reformat: MEASURED by
+  formatting a COPY of every file in `src/` and `programs/` and diffing against the original —
+  **0 of 33 files move** under the 6.6.6 formatter, and `--check` agrees on all 33. The gate was
+  broken; the tree was not.
+
+### Fixed — the stale-`dist/` message sent you to a command that leaves the WOFF profile stale
+
+- ⛔ **MEASURED: a bare `cyrius distlib` regenerates the BASE bundle only.** With `dist/` stale it
+  rewrote `dist/rekha.cyr` + `dist/rekha.deps` and left `dist/rekha-woff.*` exactly as it found
+  them, so following CI's own remediation text left `--check` red and the next reader hunting.
+  cyrius's error says `--all`; CI's message now says it too.
+
+### Changed — `[deps.sadish]` 0.9.0 → 0.11.2
+
+- Three sadish releases ride along and **none of them reach rekha's code**: 0.10.0 (the
+  `SdPolyline` inline-points ABI break, plus `sd_path_transform` / `sd_path_bounds`), 0.11.0
+  (pattern paint, `SD_SPREAD_NONE`, `docs/api.md`) and 0.11.1 / 0.11.2 (an audit's correctness half,
+  then its optimization half — 8.5x on a styled stroke, byte-identical output).
+- ⚠ **0.10.0 IS an ABI break, and the check that it misses rekha is a real one, not an assumption.**
+  It moved `SdPolyline`'s points inline, so `sd_polyline_points` strides 16 and an open-coded
+  `load64(points + i * 8)` reads a **coordinate as an address** — an immediate SIGSEGV for any path
+  off the origin. VERIFIED: `grep -rn polyline src programs` is **empty**. rekha emits paths through
+  `sd_path_*` and never reads a flatten output, so the break has no surface here. A consumer that
+  does walk polylines must port to `sd_polyline_point_x` / `_y` before taking this pin. Recorded in
+  `cyrius.cyml` beside the floor note so the next bump does not re-derive it.
+- The floor stays **>= 0.9.0** — `sd_path_point_x` / `_y` are what rekha's suites read — and the
+  provenance check that does not rot is unchanged: `grep -c '^fn sd_path_point_x' lib/sadish.cyr`
+  is 1 at 0.9.0 and up.
+
+### Changed — both rekha filings against sankoch came back closed
+
+The 6.6.6 stdlib snapshot ships **sankoch 2.8.0** (6.6.4 shipped 2.7.15), and it carries both things
+rekha asked sankoch for. Nothing in rekha changes yet — this is the dependency picture being brought
+up to date, and two stale ⚠ notes in `README.md` / `cyrius.cyml` being retired.
+
+- ⭐ **The WOFF2 Brotli decoder SHIPPED.** `brotli_decompress` and `brotli_decompress_capped` are
+  decode-only RFC 7932 entry points mirroring the zlib pair rekha already uses, plus
+  `FORMAT_BROTLI = 9`. VERIFIED in the pinned leaf: `grep -ci brotli lib/sankoch.cyr` is **0** at
+  2.7.15 and **54** at 2.8.0. sankoch's `[lib.woff]` profile is deliberately the `[lib.zlib]` module
+  list **plus** Brotli, so one bundle covers WOFF 1.0 and WOFF2 — sankoch ADR
+  `0001-brotli-decoder-placement.md`, filed by rekha; the proposal is archived. ⚠ **WOFF2 is still
+  rekha's to write** (v0.4.x item 4); only the blocker is gone, and the roadmap entry now says so
+  instead of pointing at a proposal that has moved.
+- ⭐ **The lean `[lib.zlib]` profile links.** rekha's README carried this as an open filing: every
+  alloc-bearing sankoch profile bundle was unlinkable from 2.7.10 through 2.7.15, because
+  `runtime.cyr` called a `_sankoch_reset_tables` that only `lib.cyr` defined — *"refusing to emit
+  binary with 1 reachable undefined function(s)"*. Fixed in 2.8.0 (per-profile reset dispatch,
+  sankoch `docs/architecture/003-per-profile-reset-dispatch.md`); rekha's issue is archived.
+  ⚠ **rekha's own suites never exercised it** — `programs/woff_test.cyr` takes the full
+  `lib/sankoch.cyr` leaf from the toolchain pin, not a profile bundle — so this is a consumer's good
+  news, not a gate that was red here.
+
+### Changed — the toolchain pin, and the hashes that gate it
+
+- `[package].cyrius` **6.6.4 → 6.6.6**. `scripts/ci-install-cyrius.sh` carries the new committed
+  sha256s; the 6.6.4 entries are kept so a bisect or a revert still installs. Both hashes were
+  verified before committing: `install.sh` from the `6.6.6` tag ref is byte-equal to
+  `git show 6.6.6:scripts/install.sh` in a local clone
+  (`a468278154c7a77ef17d74277a6ec3402b4213373b383de89ee4803d144cb75a`), and the tarball hash
+  (`1866a671924b29b90e3e13333cf613cff55a107390ff5686699e1dc63e593e36`) equals the published
+  `.sha256` sidecar and its line in `SHA256SUMS`, whose Ed25519 signature `cyrsign verify` accepted
+  against `keys/cyrius-release.ed25519.pub`. The aarch64-linux tarball hash is committed too, from
+  the same signed manifest.
+- ⛔ **CVE-44**, fixed in 6.6.6's own installer: through 6.6.5 `install.sh` staged the tarball and
+  its signature inputs at **fixed `/tmp` names**, so a local user could swap them between download
+  and verify. This script's `CYRIUS_INSTALL_TARBALL` path never depended on that staging — it hands
+  install.sh a file already verified against a committed hash inside a `mktemp -d` — but it is
+  another reason not to pin below 6.6.6.
+- The 6.6.6 pre-flight the sadish 0.9.1 bump published was re-run here and held item for item: zero
+  `struct` declarations, no `async`/`operator` fns, no `ret2`/`rethi` pairs, no top-level `{ }`
+  blocks (6.6.6 gave those function scoping), no locally defined `vec_*`.
+- `lib/` goes **23 files → 25**: 6.6.6's snapshot adds `alloc_cx.cyr` and `args_agnos.cyr`, pulled in
+  by the `alloc` and `args` leaves. ⚠ Nothing in rekha includes either directly; they are the
+  resolver's transitive closure, and `cyrius.lock` records all 25 plus the sadish commit pin
+  (`d9f41f3e02011c48dcb10f0835a81cc847c670aa`, tag 0.11.2).
+- ⚠ The WOFF note in README moves with the snapshot: the 6.6.6 stdlib ships **sankoch 2.8.0**
+  (6.6.4 shipped 2.7.15). The floor for `zlib_decompress_capped` is still 2.7.13.
+
 ## [0.4.4] - 2026-09-16 — nine published leaves become two
 
 ⭐ **Not one line of bundle CODE changed.** `dist/rekha.cyr` and `dist/rekha-woff.cyr` differ from

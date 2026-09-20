@@ -5,7 +5,7 @@ description = "rekha (रेखा — line/outline) — pure-Cyrius vector/outl
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/rekha"
 language = "cyrius"
-cyrius = "6.6.4"
+cyrius = "6.6.6"
 
 # rekha is a library — no CLI binary. `cyrius build` targets a smoke
 # program that links the full include chain to prove lib.cyr parses clean.
@@ -52,6 +52,14 @@ modules = [
 # included nine; the bundle's whole stdlib appetite is `strlen` + `memcpy`,
 # so consumers were vendoring eight leaves of nothing (0.4.4).
 #
+# The published sidecar is ONE leaf as of 0.4.5 — `string`. It read `string` +
+# `alloc` through 0.4.4 because cyrius 6.6.4's own `lib/string.cyr` called
+# `alloc()` (strdup/strndup) while declaring no include for it, so distlib's
+# compile-verify had to re-add the leaf. 6.6.6 makes that file self-sufficient,
+# so alloc arrives TRANSITIVELY and stops being a name the consumer resolves.
+# ⛔ That ties the sidecar to the toolchain: below 6.6.6, vendoring only `string`
+# earns `warning: undefined function 'alloc'` and a trap at the first strdup.
+#
 # rekha's own harness DOES want the other eight (fmt_int_fd, arena_*,
 # str_same, assert_*, bench_*) — declared in programs/prelude.cyr, one hop
 # outside the scan. Dropping them here costs the harness nothing: an include
@@ -64,24 +72,33 @@ modules = [
 # sankoch is deliberately NOT here either: declaring it would union it into
 # dist/rekha.deps and make every consumer of the base bundle pull it. WOFF 1.0
 # (src/woff.cyr, [lib.woff]) resolves `sync` + `sankoch` from the toolchain pin
-# in its own test; WOFF2's Brotli decoder is requested from sankoch
-# (docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md).
+# in its own test. WOFF2's Brotli decoder, which rekha filed for, SHIPPED in sankoch 2.8.0 — the
+# release the 6.6.6 stdlib snapshot carries: `brotli_decompress` / `brotli_decompress_capped`, and
+# a `[lib.woff]` profile that is `[lib.zlib]` PLUS Brotli so one bundle covers WOFF 1.0 and WOFF2
+# (sankoch ADR 0001-brotli-decoder-placement.md; rekha's proposal is archived). Nothing here uses it
+# yet — WOFF2 is still rekha's to write.
 stdlib = ["string"]
 
 # sadish — the rasterize target. rekha emits glyph-outline PATHS
 # (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT
 # bundle its own Bézier rasterizer.
-# ⛔ FLOOR >= 0.9.0, HARD (0.4.3). Three sadish releases are load-bearing here: `sd_alloc` (0.5.5)
-# takes every allocation rekha makes, `sd_path_new_cap` (0.7.2) opens a path at the glyph's own size,
-# and 0.9.0 stores a path's points INLINE — rekha's tests read them through `sd_path_point_x` / `_y`,
-# which 0.8.0 and below do not define. ⛔ Against an older pin the build MAY still go green: cyrius
-# 6.6.4 judges an undefined name by its FIRST call site in code order, and rekha's is rekha_err_new
-# (src/error.cyr), dead in every suite — so a suite COMPILES with `warning: undefined function` and
-# dies (SIGILL, rc 132) at the first call, while a fold whose first site is live is refused outright.
-# MEASURED both ways; see CHANGELOG 0.3.10. Grep build output for `undefined function` — printed in
-# both cases. ⚠ The reverse mistake is silent: rekha builds against sadish's DIST, so a stale lib/
-# looks fine. The provenance check that does not rot is
-# `grep -c '^fn sd_path_point_x' lib/sadish.cyr` — 1 on 0.9.0, 0 below (sadish's filing, 2026-09-16).
+# ⛔ FLOOR >= 0.9.0, HARD (0.4.3); PINNED AT 0.11.2 (0.4.5). Three sadish releases are load-bearing
+# here: `sd_alloc` (0.5.5) takes every allocation rekha makes, `sd_path_new_cap` (0.7.2) opens a path
+# at the glyph's own size, and 0.9.0 stores a path's points INLINE — rekha's tests read them through
+# `sd_path_point_x` / `_y`, which 0.8.0 and below do not define. ⛔ Against an older pin the build MAY
+# still go green: cyrius judges an undefined name by its FIRST call site in code order, and rekha's is
+# rekha_err_new (src/error.cyr), dead in every suite — so a suite COMPILES with `warning: undefined
+# function` and dies (SIGILL, rc 132) at the first call, while a fold whose first site is live is
+# refused outright. MEASURED both ways on 6.6.4; see CHANGELOG 0.3.10. Grep build output for
+# `undefined function` — printed in both cases. ⚠ The reverse mistake is silent: rekha builds against
+# sadish's DIST, so a stale lib/ looks fine. The provenance check that does not rot is
+# `grep -c '^fn sd_path_point_x' lib/sadish.cyr` — 1 on 0.9.0 and up, 0 below (sadish's filing,
+# 2026-09-16).
+# ⚠ 0.10.0 IS AN ABI BREAK AND IT DOES NOT TOUCH REKHA: it moved `SdPolyline`'s points inline, so
+# `sd_polyline_points` now strides 16 and an open-coded `load64(points + i * 8)` reads a COORDINATE as
+# an address. VERIFIED at the 0.4.5 bump — `grep -rn polyline src programs` is empty; rekha consumes
+# `sd_path_*` and never a flatten output. A consumer that does walk polylines must port to
+# `sd_polyline_point_x` / `_y` before taking this pin.
 # dhancha vendors dist/rekha.cyr AND dist/sadish.cyr separately, so its own sadish pin must clear
 # the same floor.
 [deps.sadish]
@@ -92,7 +109,7 @@ git = "https://github.com/MacCracken/sadish.git"
 # 0.5.5 tag did not exist yet; it is published now (9760ead), so the tag is the source of truth.
 # For cross-repo dev, add `path = "../sadish"` in an UNCOMMITTED working copy — CI refuses a
 # manifest with a live `path =` line.
-tag = "0.9.0"
+tag = "0.11.2"
 modules = ["dist/sadish.cyr"]
 
 # fonts/face_data.cyr — the embedded DEFAULT FACE, a freestanding data module (no stdlib) a

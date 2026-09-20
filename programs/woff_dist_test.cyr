@@ -10,7 +10,9 @@
 # allocates.
 #
 # Since 0.4.4 the leaf list below is dist/rekha-woff.deps, by hand, instead of all nine leaves,
-# so the file documents the chain a WOFF consumer actually compiles. It does NOT enforce it:
+# so the file documents the chain a WOFF consumer actually compiles. 0.4.5 dropped
+# `include "lib/alloc.cyr"` with the 6.6.6 pin — that toolchain's lib/string.cyr includes alloc
+# itself, so it left the sidecar. It does NOT enforce it:
 # cyrius auto-prepends every resolved leaf inside rekha's tree, so the suite builds whichever
 # lines are here. Sufficiency is distlib's compile-verify pass (`--check`, gated in CI).
 #
@@ -19,7 +21,6 @@
 
 # ---- a WOFF consumer's include chain: dist/rekha-woff.deps, then sadish and sync ----
 include "lib/string.cyr"
-include "lib/alloc.cyr"
 # harness-only, NOT in dist/rekha-woff.deps: fmt_int_fd for the failure lines.
 include "lib/fmt.cyr"
 include "lib/sadish.cyr"

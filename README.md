@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.4
+Version: 0.4.5
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,13 +109,30 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.5 — the toolchain moves, and two leaves become one (shipped).** `cyrius` **6.6.4 → 6.6.6**
+  and `[deps.sadish]` **0.9.0 → 0.11.2**; `lib/` re-resolved against both. ⭐ **No rekha source
+  changed** — all 24 RUN suites build and pass under `CYRIUS_DCE=0` and `1` with no build-log
+  warning, and both bundles differ from 0.4.4 only in the `# Version:` banner. What the bump *did*
+  do is move one consumer-visible number and expose two blind CI gates, all three fixed here:
+  `dist/rekha.deps` now reads **`string`** alone (6.6.6's `lib/string.cyr` includes `lib/alloc.cyr`
+  itself, so `alloc` arrives transitively instead of being re-added by distlib's compile-verify);
+  the format gate stopped trusting `cyrius fmt --check`, which is a **measured false negative** on
+  6.6.6; and the stale-`dist/` message now says `--all`, without which the `[lib.woff]` profile is
+  left behind. ⚠ sadish **0.10.0 is an ABI break** — `SdPolyline` points went inline — and it does
+  not touch rekha, VERIFIED: rekha consumes `sd_path_*` and never a flatten output.
 - **v0.4.x line — next, in order:**
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
   2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
   3. ~~OpenType/CFF (`OTTO`) outlines~~ — shipped in 0.4.2, above.
   4. **WOFF2** — the container, the glyf/loca and hmtx transforms, tested on
-     transformed-but-uncompressed tables; the Brotli stream decodes through sankoch's requested
-     `[lib.brotli]` (`sankoch/docs/development/proposals/2026-09-15-brotli-decoder-for-woff2.md`).
+     transformed-but-uncompressed tables; the Brotli stream decodes through sankoch.
+     ⭐ **Its dependency LANDED in sankoch 2.8.0** (the 0.4.5 pin's stdlib snapshot), so this item
+     is no longer blocked on a filing: `brotli_decompress` / `brotli_decompress_capped` are decode-only
+     RFC 7932 entry points mirroring the zlib pair rekha already uses, and sankoch's `[lib.woff]`
+     profile is deliberately the `[lib.zlib]` module list **plus** Brotli, so one bundle serves WOFF 1.0
+     and WOFF2 both (sankoch ADR `0001-brotli-decoder-placement.md`, filed by rekha; the proposal is
+     archived). VERIFIED in the pinned leaf: 0 occurrences of `brotli` at 2.7.15, both functions plus
+     `FORMAT_BROTLI = 9` at 2.8.0. Writing WOFF2 is still rekha's work — only the blocker is gone.
   5. ~~`[deps].stdlib` trim~~ — shipped in 0.4.4, above.
   6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
@@ -182,27 +199,45 @@ document / UI text — anywhere scalable glyphs are needed.
   still compile (`warning: undefined function 'sd_alloc'`, printed either way)
   and fault at the first `rekha_font_open`, or be refused outright, depending
   on where the first call site sits (CHANGELOG 0.3.10). Wired via
-  `[deps.sadish]` (`tag = "0.9.0"`, commit-pinned in `cyrius.lock`; for
+  `[deps.sadish]` (`tag = "0.11.2"`, commit-pinned in `cyrius.lock`; for
   cross-repo dev add `path = "../sadish"` in an UNCOMMITTED copy — `path`
   wins over `tag`, skips the pin, and CI refuses a committed `path` line).
   A consumer vendoring `dist/rekha.cyr` next to its own `dist/sadish.cyr`
   must clear the same floor.
-- **Cyrius stdlib** — what a CONSUMER of `dist/rekha.cyr` must vendor is `string` and
-  `alloc`, and that is the whole list (0.4.4; `dist/rekha.deps`). `string` is there because
-  `src/` calls `strlen` + `memcpy`; `alloc` because `lib/string.cyr` itself calls `alloc()`
-  and declares no include for it. The WOFF bundle adds `sankoch` (`dist/rekha-woff.deps`).
+  ⚠ **sadish 0.10.0 is an ABI break that does not reach rekha.** It moved `SdPolyline`'s points
+  inline, so `sd_polyline_points` strides 16 and an open-coded `load64(points + i * 8)` now reads a
+  coordinate as an address. VERIFIED at the 0.4.5 pin bump: rekha names no polyline symbol anywhere
+  in `src/` or `programs/` — it emits paths and never reads a flatten output. A consumer that *does*
+  walk polylines must port to `sd_polyline_point_x` / `_y` before taking this pin.
+- **Cyrius stdlib** — what a CONSUMER of `dist/rekha.cyr` must vendor is **`string`**, and that is
+  the whole list (0.4.5; `dist/rekha.deps`). It is there because `src/` calls `strlen` + `memcpy`.
+  The WOFF bundle adds `sankoch` (`dist/rekha-woff.deps`).
+  ⚠ **`alloc` left that list in 0.4.5 and the bundle did not change — the toolchain did.** Through
+  6.6.4 `lib/string.cyr` called `alloc()` (`strdup`/`strndup`) and declared no include for it, so
+  distlib's compile-verify had to re-add the leaf; 6.6.6 makes that file self-sufficient, so `alloc`
+  now arrives transitively with `string`. It is still linked; only the name a consumer has to
+  resolve went away. ⛔ That ties the sidecar to the toolchain: a consumer **below 6.6.6** vendoring
+  only `string` gets `warning: undefined function 'alloc'` and traps (SIGILL) at a `strdup` call, so
+  consumers of `dist/rekha.cyr` 0.4.5 and up must be on 6.6.6 or later — rekha's own pin.
   ⚠ rekha's own test harness uses seven more (`fmt`, `vec`, `str`, `io`, `syscalls`, `assert`,
   `bench`) — those are declared in `programs/prelude.cyr` and are deliberately NOT published,
   because every leaf in the sidecar is one each consumer has to vendor. Resolved by
   `cyrius deps` into `lib/`.
 - **sankoch** — only for WOFF, and only through `dist/rekha-woff.cyr`: `zlib_decompress_capped`
-  (sankoch >= 2.7.13; the cyrius 6.6.4 stdlib ships 2.7.15). A consumer includes `lib/sync.cyr` and
-  `lib/sankoch.cyr` before the bundle. ⚠ sankoch's lean `[lib.zlib]` profile does not link on its own
-  today (filed: `sankoch/docs/development/issues/2026-09-15-profile-bundles-call-sankoch-reset-tables-outside-their-closure.md`).
-  WOFF2's Brotli decoder is requested from sankoch (see the v0.4.x line). `dist/rekha.cyr` needs no
-  sankoch.
+  (sankoch >= 2.7.13; the cyrius 6.6.6 stdlib ships 2.8.0). A consumer includes `lib/sync.cyr` and
+  `lib/sankoch.cyr` before the bundle.
+  ⭐ **Both rekha filings against sankoch are closed in 2.8.0**, which is what the 0.4.5 toolchain
+  snapshot brings. The lean `[lib.zlib]` profile **links now** — every alloc-bearing profile bundle
+  was unlinkable from 2.7.10 through 2.7.15 (`runtime.cyr` called a `_sankoch_reset_tables` that only
+  `lib.cyr` defined, so a program using one was refused with *"refusing to emit binary with 1
+  reachable undefined function(s)"*); rekha's issue is archived, and the rule that replaced it is
+  sankoch's `docs/architecture/003-per-profile-reset-dispatch.md`. The WOFF2 Brotli decoder rekha
+  requested **shipped** in the same release (item 4 of the v0.4.x line). ⚠ rekha does not exercise
+  either: `programs/woff_test.cyr` takes the full `lib/sankoch.cyr` leaf from the toolchain pin, not a
+  profile bundle, so the profile fix is a consumer's good news rather than a gate here.
+  `dist/rekha.cyr` needs no sankoch.
 
-The toolchain pin is `cyrius = "6.6.4"`.
+The toolchain pin is `cyrius = "6.6.6"`.
 
 ## Quick Start
 

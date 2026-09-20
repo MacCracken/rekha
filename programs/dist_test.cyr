@@ -10,6 +10,9 @@
 #
 # Since 0.4.4 the leaf list below is dist/rekha.deps, by hand, instead of all nine leaves —
 # so the file DOCUMENTS the chain a consumer actually compiles. Keep it matching the sidecar.
+# 0.4.5: `include "lib/alloc.cyr"` came OFF that list with the 6.6.6 pin. alloc is still
+# linked — 6.6.6's lib/string.cyr includes it itself, and includes are include-once — it is
+# simply no longer a line a consumer writes, so this file no longer writes it either.
 #
 # ⛔ BUT IT DOES NOT ENFORCE IT, AND DO NOT WRITE THAT IT DOES. Inside rekha's tree cyrius
 # auto-prepends every resolved leaf into scope, so this suite compiles no matter which lines
@@ -30,9 +33,8 @@
 
 # ---- the consumer's include chain: dist/rekha.deps, then sadish, then the bundle ----
 include "lib/string.cyr"
-include "lib/alloc.cyr"
 # harness-only, NOT a bundle requirement and NOT in dist/rekha.deps: fmt_int_fd, for the
-# failure lines below. A consumer needs neither this nor anything else past the two above.
+# failure lines below. A consumer needs neither this nor anything else past the one above.
 include "lib/fmt.cyr"
 include "lib/sadish.cyr"
 include "dist/rekha.cyr"

@@ -82,17 +82,27 @@ jobs:
           [ $fail -eq 0 ] || { echo "lint: warnings, deferrals or errors present"; exit 1; }
 
       - name: Format check
-        # cyrius fmt reports via EXIT CODE with --check (0 = clean); file goes
-        # BEFORE the flag.
+        # ⛔ `cyrius fmt <file> --check` IS A FALSE NEGATIVE ON 6.6.6, so this step no longer gates
+        # on its exit code. MEASURED at the 0.4.5 bump against sadish's `programs/paint_focal_test.cyr`
+        # @0.9.0 — the file sadish filed this on: `--check` exits **0**, and formatting the same file
+        # in place rewrites it in THREE places (continuation lines at 12 spaces where 6.6.6 wants 10).
+        # A gate reading that exit code cannot catch the drift it exists to catch.
+        # ⇒ Format in place on the clean checkout and let `git diff --exit-code` report. That cannot
+        # silently agree: the diff IS the formatter's own output. `lib/` and `/build/` are gitignored,
+        # so only tracked source can dirty the tree here.
+        # ⚠ rekha's own files do NOT drift — measured, 0 of 33 in src/ + programs/ under the 6.6.6
+        # formatter, and `--check` agrees on all 33. This is the gate being repaired, not the tree.
         run: |
-          fail=0
           for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do
             [ -e "$f" ] || continue
-            if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
-              echo "needs fmt: $f"; fail=1
-            fi
+            cyrius fmt "$f" > /dev/null 2>&1 || { echo "fmt: failed to format $f"; exit 1; }
           done
-          [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
+          if ! git diff --exit-code; then
+            echo "fmt: drift detected (the diff above is what 'cyrius fmt' rewrote)."
+            echo 'Run: for f in src/*.cyr programs/*.cyr; do cyrius fmt "$f"; done  -- and commit.'
+            exit 1
+          fi
+          echo "fmt: clean (formatted in place, tree unchanged)"
 
       - name: Vet
         run: cyrius vet programs/smoke.cyr
@@ -101,9 +111,12 @@ jobs:
         # `--check` verifies dist/rekha.cyr AND dist/rekha.deps (and every [lib.*] profile) without
         # writing; `git diff dist/rekha.cyr` after a regenerate missed a stale sidecar. The
         # porcelain test catches a bundle or leftover that is not committed at all.
+        # ⛔ `--all`, not a bare `cyrius distlib`: MEASURED at the 0.4.5 bump, a bare run regenerates
+        # the BASE bundle only and leaves the [lib.woff] profile exactly as it found it, so following
+        # the old message here left dist/rekha-woff.cyr stale and `--check` still red.
         run: |
           if ! cyrius distlib --check; then
-            echo "ERROR: dist/ is stale. Run 'cyrius distlib' and commit dist/."
+            echo "ERROR: dist/ is stale. Run 'cyrius distlib --all' and commit dist/."
             exit 1
           fi
           if [ -n "$(git status --porcelain -- dist/)" ]; then
@@ -119,13 +132,21 @@ jobs:
         # vendor, and the way it grows is quiet: one `include "lib/fmt.cyr"` added to src/lib.cyr
         # for convenience (distlib scans that exact file and unions `[deps] stdlib`), or a leaf
         # added back to that array. rekha 0.4.3 shipped nine leaves for a bundle whose entire
-        # stdlib appetite is strlen + memcpy; 0.4.4 cut it to two and this pins it there.
-        # `alloc` is not padding: lib/string.cyr calls alloc() and declares no include for it.
+        # stdlib appetite is strlen + memcpy; 0.4.4 cut it to two and 0.4.5 to ONE.
+        # ⚠ `alloc` LEFT this list in 0.4.5 and the BUNDLE did not change — the toolchain did.
+        # Through 6.6.4 `lib/string.cyr` called alloc() (strdup/strndup) and declared no include for
+        # it, so distlib's compile-verify had to re-add the leaf; 6.6.6 makes that file self-sufficient
+        # (`include "lib/alloc.cyr"`, cyrius CHANGELOG [6.6.6]), so alloc now arrives TRANSITIVELY
+        # with string and is no longer a leaf the consumer has to name. It is still linked, and
+        # nothing about what the bundle CALLS moved.
+        # ⛔ This makes the sidecar toolchain-dependent: a consumer BELOW 6.6.6 that vendors only
+        # `string` gets `warning: undefined function 'alloc'`, and a strdup/strndup call traps (SIGILL).
+        # Consumers of dist/rekha.cyr 0.4.5 and up must be on 6.6.6 or later — rekha's own pin.
         # CHANGING THIS LIST IS A DELIBERATE ACT — a consumer-visible change that belongs in its
         # own release with a CHANGELOG line, not a drive-by. Update it here when you mean it.
         run: |
-          expect_base="string alloc"
-          expect_woff="string alloc sankoch"
+          expect_base="string"
+          expect_woff="string sankoch"
           got_base="$(grep -v '^#' dist/rekha.deps | tr -s '\n' ' ' | sed 's/ *$//')"
           got_woff="$(grep -v '^#' dist/rekha-woff.deps | tr -s '\n' ' ' | sed 's/ *$//')"
           rc=0

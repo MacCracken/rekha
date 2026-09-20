@@ -19,10 +19,13 @@
 # this exact file (_distlib_scan_umbrella hardcodes "src/lib.cyr") and unions
 # the result with `[deps] stdlib` to produce dist/rekha.deps — the leaves a
 # consumer of dist/rekha.cyr must vendor. src/ calls `strlen` and `memcpy`
-# and nothing else from the stdlib, so `string` is the whole list. (The
-# sidecar reads `string` + `alloc` because lib/string.cyr itself calls
-# `alloc` and declares no include for it; distlib's compile-verify pass
-# finds that transitively. It is a real requirement, not padding.)
+# and nothing else from the stdlib, so `string` is the whole list — and as of
+# 0.4.5 the published sidecar says exactly that, one leaf. (It read `string` +
+# `alloc` through 0.4.4 because cyrius 6.6.4's lib/string.cyr called `alloc`
+# and declared no include for it, so distlib's compile-verify re-added the
+# leaf. 6.6.6 makes that file self-sufficient; alloc is still linked, it just
+# arrives with `string` instead of being named. ⛔ A consumer below 6.6.6 that
+# vendors only `string` gets `warning: undefined function 'alloc'`.)
 #
 # rekha's own harness wants fmt/alloc/vec/str/io/syscalls/assert/bench —
 # those are in programs/prelude.cyr, one hop outside the scan. Adding one
