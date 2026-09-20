@@ -77,3 +77,6 @@ include "src/name.cyr"
 # stat.cyr reads the style attributes a family is ordered and named by. It names ids in the
 # `name` table and depends on nothing else, so it follows name.cyr.
 include "src/stat.cyr"
+# post.cyr is the underline pair and the italic angle, both taking their MVAR deltas, so it
+# follows hvar.cyr. sfnt.cyr calls forward into hvar.cyr for hhea's caret for the same reason.
+include "src/post.cyr"

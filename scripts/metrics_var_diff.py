@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""metrics_var_diff.py — HVAR and MVAR against fontTools' own instancer (rekha 0.6.0, 0.6.1).
+"""metrics_var_diff.py — HVAR and MVAR against fontTools' own instancer (0.6.0, 0.6.1, 0.6.4).
 
 Builds a two-axis variable font with HVAR (a DeltaSetIndexMap over two ItemVariationDatas) and
 MVAR, writes it out, and hands THE SAME BYTES to both:
@@ -40,6 +40,10 @@ TASC, TDSC, TLGP = 750, -250, 0             # OS/2 sTypo — deliberately not hh
 WASC, WDSC = 900, 300                       # OS/2 usWin
 XHGT, CPHT = 500, 700
 STRS, STRO = 50, 260
+SUB = [70, 65, 0, 75]                       # OS/2 ySubscript X/Y size, X/Y offset
+SUP = [72, 68, 0, 480]                      # OS/2 ySuperscript X/Y size, X/Y offset
+CRS, CRN, COF = 1, 0, 0                     # hhea caretSlopeRise / Run / Offset
+UNDO, UNDS = -75, 50                        # post underlinePosition / underlineThickness
 
 # Two axes, so every region scalar is a product of two tents rather than one.
 AXES = [(b"wght", 100, 400, 900), (b"wdth", 50, 100, 200)]
@@ -51,6 +55,21 @@ REGIONS = [
     ((0, 0, 0), (0, 16384, 16384)),             # wdth up
     ((0, 16384, 16384), (0, 16384, 16384)),     # both up — the cross term
 ]
+
+# The rekha accessor for each MVAR field, in the same keying as MVAR_FIELDS.
+REKHA_ACCESSOR = {
+    b"cpht": "rekha_cap_height",           b"hasc": "rekha_typo_ascender",
+    b"hcla": "rekha_win_ascent",           b"hcld": "rekha_win_descent",
+    b"hcof": "rekha_caret_offset",         b"hcrn": "rekha_caret_slope_run",
+    b"hcrs": "rekha_caret_slope_rise",     b"hdsc": "rekha_typo_descender",
+    b"hlgp": "rekha_typo_line_gap",        b"sbxo": "rekha_subscript_x_offset",
+    b"sbxs": "rekha_subscript_x_size",     b"sbyo": "rekha_subscript_y_offset",
+    b"sbys": "rekha_subscript_y_size",     b"spxo": "rekha_superscript_x_offset",
+    b"spxs": "rekha_superscript_x_size",   b"spyo": "rekha_superscript_y_offset",
+    b"spys": "rekha_superscript_y_size",   b"stro": "rekha_strikeout_position",
+    b"strs": "rekha_strikeout_size",       b"undo": "rekha_underline_position",
+    b"unds": "rekha_underline_thickness",  b"xhgt": "rekha_x_height",
+}
 
 LOCATIONS = [
     {"wght": 400, "wdth": 100},
@@ -111,20 +130,36 @@ HVAR_ROWS = [
 ]
 HVAR_MAP = [(i % 2, i // 2) for i in range(NG)]
 
-# One row per tag, in the SORTED tag order the spec requires. (base value, MVAR tag) pairs are in
-# MVAR_FIELDS below; the rows are the deltas over the four regions.
-MVAR_TAGS = [b"cpht", b"hasc", b"hcla", b"hcld", b"hdsc", b"hlgp", b"stro", b"strs", b"xhgt"]
-MVAR_ROWS = [[
-    [35, -12, 9, 4],      # cpht -> sCapHeight
-    [30, -10, 12, 5],     # hasc -> sTypoAscender
-    [40, -14, 11, 6],     # hcla -> usWinAscent
-    [15, -6, 5, 2],       # hcld -> usWinDescent
-    [-20, 8, -9, -4],     # hdsc -> sTypoDescender
-    [10, -5, 6, 2],       # hlgp -> sTypoLineGap
-    [12, -4, 7, 3],       # stro -> yStrikeoutPosition
-    [5, -2, 3, 1],        # strs -> yStrikeoutSize
-    [25, -9, 8, 3],       # xhgt -> sxHeight
-]]
+# ⭐ EVERY MVAR TAG rekha CAN LAND, and as of 0.6.4 that is all of them but the four `vhea` ones.
+# Each entry is (tag, the fontTools object and attribute it targets, the deltas over the four
+# regions). The records are SORTED BY TAG below, which the spec requires.
+MVAR_FIELDS = [
+    (b"cpht", "OS/2", "sCapHeight", [35, -12, 9, 4]),
+    (b"hasc", "OS/2", "sTypoAscender", [30, -10, 12, 5]),
+    (b"hcla", "OS/2", "usWinAscent", [40, -14, 11, 6]),
+    (b"hcld", "OS/2", "usWinDescent", [15, -6, 5, 2]),
+    (b"hcof", "hhea", "caretOffset", [3, -1, 2, 1]),
+    (b"hcrn", "hhea", "caretSlopeRun", [7, -3, 4, 2]),
+    (b"hcrs", "hhea", "caretSlopeRise", [2, -1, 1, 1]),
+    (b"hdsc", "OS/2", "sTypoDescender", [-20, 8, -9, -4]),
+    (b"hlgp", "OS/2", "sTypoLineGap", [10, -5, 6, 2]),
+    (b"sbxo", "OS/2", "ySubscriptXOffset", [4, -2, 2, 1]),
+    (b"sbxs", "OS/2", "ySubscriptXSize", [9, -4, 5, 2]),
+    (b"sbyo", "OS/2", "ySubscriptYOffset", [6, -3, 3, 1]),
+    (b"sbys", "OS/2", "ySubscriptYSize", [8, -3, 4, 2]),
+    (b"spxo", "OS/2", "ySuperscriptXOffset", [5, -2, 3, 1]),
+    (b"spxs", "OS/2", "ySuperscriptXSize", [11, -5, 6, 3]),
+    (b"spyo", "OS/2", "ySuperscriptYOffset", [14, -6, 7, 3]),
+    (b"spys", "OS/2", "ySuperscriptYSize", [13, -5, 7, 3]),
+    (b"stro", "OS/2", "yStrikeoutPosition", [12, -4, 7, 3]),
+    (b"strs", "OS/2", "yStrikeoutSize", [5, -2, 3, 1]),
+    (b"undo", "post", "underlinePosition", [-9, 4, -5, -2]),
+    (b"unds", "post", "underlineThickness", [6, -2, 3, 1]),
+    (b"xhgt", "OS/2", "sxHeight", [25, -9, 8, 3]),
+]
+MVAR_FIELDS.sort(key=lambda e: e[0])
+MVAR_TAGS = [e[0] for e in MVAR_FIELDS]
+MVAR_ROWS = [[e[3] for e in MVAR_FIELDS]]
 
 
 def build_hvar():
@@ -188,16 +223,19 @@ def make_font():
     hhea = bytearray(36)
     struct.pack_into(">I", hhea, 0, 0x00010000)
     struct.pack_into(">hhh", hhea, 4, ASC, DSC, LGP)
+    struct.pack_into(">hhh", hhea, 18, CRS, CRN, COF)      # the caret, which DOES vary
     struct.pack_into(">H", hhea, 34, NG)
+    post = struct.pack(">IIhhI", 0x00030000, 0, UNDO, UNDS, 0) + b"\0" * 16
     hmtx = b"".join(struct.pack(">Hh", a, 0) for a in ADV)
     loca = b"".join(struct.pack(">I", 0) for _ in range(NG + 1))
-    post = struct.pack(">IIhhI", 0x00030000, 0, 0, 0, 0) + b"\0" * 16
     # ⭐ OS/2 IS THE POINT OF THE FIXTURE as of 0.6.1: every MVAR tag but the caret ones lands on
     # one of its fields, and its sTypo trio is deliberately not hhea's so a wrong target shows.
     os2 = bytearray(96)
     struct.pack_into(">H", os2, 0, 4)
     struct.pack_into(">HH", os2, 4, 700, 3)                # usWeightClass / usWidthClass
     struct.pack_into(">hh", os2, 26, STRS, STRO)           # yStrikeout size / position
+    struct.pack_into(">hhhh", os2, 10, SUB[0], SUB[1], SUB[2], SUB[3])
+    struct.pack_into(">hhhh", os2, 18, SUP[0], SUP[1], SUP[2], SUP[3])
     struct.pack_into(">hhh", os2, 68, TASC, TDSC, TLGP)    # sTypoAscender / Descender / LineGap
     struct.pack_into(">HH", os2, 74, WASC, WDSC)           # usWinAscent / usWinDescent
     struct.pack_into(">hh", os2, 86, XHGT, CPHT)           # sxHeight / sCapHeight
@@ -226,15 +264,7 @@ __LOCS__
     while (li < __NLOC__) {
         rekha_var_set_axis(f, 0, load64(&locs + li * 16) * 65536);
         rekha_var_set_axis(f, 1, load64(&locs + li * 16 + 8) * 65536);
-        fmt_int(rekha_typo_ascender(f)); sp();
-        fmt_int(rekha_typo_descender(f)); sp();
-        fmt_int(rekha_typo_line_gap(f)); sp();
-        fmt_int(rekha_win_ascent(f)); sp();
-        fmt_int(rekha_win_descent(f)); sp();
-        fmt_int(rekha_x_height(f)); sp();
-        fmt_int(rekha_cap_height(f)); sp();
-        fmt_int(rekha_strikeout_size(f)); sp();
-        fmt_int(rekha_strikeout_position(f)); sp();
+__FIELDS__
         fmt_int(rekha_ascender(f)); sp();
         fmt_int(rekha_descender(f)); sp();
         fmt_int(rekha_line_gap(f));
@@ -259,6 +289,8 @@ def rekha_metrics(path):
            .replace("__NLOC2__", str(len(LOCATIONS) * 2))
            .replace("__NLOC__", str(len(LOCATIONS)))
            .replace("__NG__", str(NG))
+           .replace("__FIELDS__", "\n".join(
+               "        fmt_int(%s(f)); sp();" % REKHA_ACCESSOR[e[0]] for e in MVAR_FIELDS))
            .replace("__LOCS__", "\n".join(
                "    store64(&locs + %d, %d);\n    store64(&locs + %d, %d);"
                % (i * 16, loc["wght"], i * 16 + 8, loc["wdth"])
@@ -312,10 +344,11 @@ def fonttools_metrics(path):
             else:
                 varidx = g
             advances.append(ADV[g] + otRound(inst[varidx]))
-        rows.append([o.sTypoAscender, o.sTypoDescender, o.sTypoLineGap,
-                     o.usWinAscent, o.usWinDescent, o.sxHeight, o.sCapHeight,
-                     o.yStrikeoutSize, o.yStrikeoutPosition,
-                     h.ascender, h.descender, h.lineGap] + advances)
+        tabs = {"OS/2": o, "hhea": h, "post": f["post"]}
+        # every varying field, in the order the dumper prints them, then the three hhea vertical
+        # metrics that must NOT move, then the advances
+        vals = [getattr(tabs[t], a) for _, t, a, _ in MVAR_FIELDS]
+        rows.append(vals + [h.ascender, h.descender, h.lineGap] + advances)
     return rows
 
 
@@ -325,8 +358,8 @@ def main():
     open(path, "wb").write(make_font())
     ft = fonttools_metrics(path)
     rk = rekha_metrics(path)
-    print("HVAR / MVAR vs fontTools — %d locations x (9 OS/2 fields + 3 hhea + %d advances)"
-          % (len(LOCATIONS), NG))
+    print("HVAR / MVAR vs fontTools — %d locations x (%d MVAR fields + 3 unvarying hhea + %d "
+          "advances)" % (len(LOCATIONS), len(MVAR_FIELDS), NG))
     total = same = 0
     bad = []
     for i, loc in enumerate(LOCATIONS):

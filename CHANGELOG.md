@@ -5,6 +5,62 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.4] - 2026-09-20 — `post`, and every MVAR tag lands
+
+`OS/2` gives the strikeout pair (0.6.1). `post` gives the **underline** pair, and it is the only
+place a font says where to draw a rule under its text — a consumer that has one and invents the
+other draws two rules of different weights.
+
+⭐ **AND `unds` / `undo` WERE THE LAST TWO MVAR TAGS WITH NOWHERE TO LAND.** Closing them turned
+this release into a completeness claim, so it takes in the eleven other tags whose fields rekha
+simply had no accessor for: OS/2's eight sub- and superscript fields and hhea's three caret ones.
+**Every tag in MVAR that names a table rekha reads now lands on it.** What is left of MVAR is the
+four `vhea` tags, which are the vertical-metrics item.
+
+⭐ **CHECKED AGAINST fontTools' INSTANCER, SAME BYTES, EVERY TAG** —
+`scripts/metrics_var_diff.py`, now **22 MVAR fields** plus three hhea fields that must not move and
+eight advances, over two axes and eight locations:
+
+| | metric values | identical |
+|---|---:|---|
+| **0.6.4** | 264 | **264** |
+
+### Added — `src/post.cyr`
+
+`rekha_post_version`, `rekha_italic_angle`, `rekha_underline_position` (+ `undo`),
+`rekha_underline_thickness` (+ `unds`), `rekha_is_fixed_pitch`.
+
+- ⚠ **The header is 32 bytes in EVERY version** and carries all of it; the versions differ only in
+  what follows. So a 2.0 table and a 3.0 table answer identically here, and
+  `rekha_post_version` tells a consumer whether glyph names would be there — not whether rekha read
+  any.
+- ⛔ **Glyph names are not read, and that is a scoping decision.** They serve tooling — PDF export,
+  a debugger naming the glyph that failed — and nothing rekha draws depends on one. Carrying them
+  means carrying the 258-name Macintosh standard order as data, a table the size of everything else
+  in that file put together. `docs/development/roadmap.md` pins it.
+- ⚠ `italicAngle` is in **degrees counter-clockwise from vertical**, so an oblique face is
+  NEGATIVE, and it has no MVAR tag: an italic angle does not vary.
+- ⚠ `isFixedPitch` is a u32 the spec only requires to be non-zero, so any non-zero value is 1 here
+  rather than passed through. -1 when the font does not say.
+
+### Added — the eleven fields that completed MVAR
+
+- **`OS/2`**: `rekha_subscript_x_size` / `_y_size` / `_x_offset` / `_y_offset` and the four
+  `rekha_superscript_*` twins. A renderer with no real superscript glyphs scales and shifts by
+  these rather than guessing a fraction of the em. ⚠ The offsets are from the BASELINE, so a
+  subscript's y offset is a positive distance DOWN.
+- **`hhea`**: `rekha_caret_slope_rise` / `_run` / `_offset` — the **only** thing in hhea that MVAR
+  has a tag for, which is what made 0.6.0's mistake findable. ⛔ A rise of 1 and a run of 0 is
+  upright: the caret is a vector, not an angle. ⚠ `rekha_italic_angle` says the same thing in
+  degrees, does not vary, and need not agree.
+
+`REKHA_FONT_SIZE` **536 -> 552**.
+
+⇒ `programs/os2_test.cyr` **85 -> 141 checks** and is now the whole metrics-metadata suite: its
+MVAR store carries all 22 tags in the sorted order the spec requires, two new groups cover `post`
+(both versions, absent, and a table below its 32-byte header) and the static sub/superscript boxes
+and caret, and the bit-flip sweep takes in `post` as well.
+
 ## [0.6.3] - 2026-09-20 — named instances and `STAT`: a font menu, at last
 
 An axis is a continuum. A **named instance** is a point on it the designer blessed and gave a name

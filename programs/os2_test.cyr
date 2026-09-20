@@ -58,13 +58,29 @@ var o_ver = 4;          # the version to write
 var o_len = 0;          # the DECLARED table length, or 0 for the version's natural one
 var o_typo = 0;         # set fsSelection bit 7, USE_TYPO_METRICS
 var o_nomvar = 1;       # omit MVAR (the default: most groups test the static table)
+var o_nopost = 0;       # omit post
+var o_postlen = 32;     # the DECLARED post length (below 32 loses the table)
+var o_postver = 0x00030000;
 var o_nofvar = 1;       # omit fvar
 
 var g_os2 = 0;
 var g_os2len = 0;
+var g_post = 0;
+var g_postlen = 0;
 var g_mvar = 0;
 var g_mvarlen = 0;
 var g_flen = 0;
+
+# ⚠ THE post HEADER IS 32 BYTES IN EVERY VERSION and carries every field rekha reads; the versions
+# differ only in what follows it, which is glyph names rekha does not read.
+fn put_post(at): i64 {
+    pu32(at, o_postver);
+    pu32(at + 4, 0 - (15 * 65536) & 0xFFFFFFFF);        # italicAngle -15 degrees
+    pu16(at + 8, 0 - 75 & 65535);                       # underlinePosition
+    pu16(at + 10, 50);                                  # underlineThickness
+    pu32(at + 12, 1);                                   # isFixedPitch
+    return o_postlen;
+}
 
 fn os2_natural(v): i64 {
     if (v == 0) { return 78; }
@@ -79,6 +95,10 @@ fn put_os2(at): i64 {
     pu16(at + 4, 700);                                  # usWeightClass
     pu16(at + 6, 3);                                    # usWidthClass
     pu16(at + 8, 8);                                    # fsType
+    pu16(at + 10, 70); pu16(at + 12, 65);               # ySubscript X / Y size
+    pu16(at + 14, 0);  pu16(at + 16, 75);               # ySubscript X / Y offset
+    pu16(at + 18, 72); pu16(at + 20, 68);               # ySuperscript X / Y size
+    pu16(at + 22, 0);  pu16(at + 24, 480);              # ySuperscript X / Y offset
     pu16(at + 26, 50);                                  # yStrikeoutSize
     pu16(at + 28, 260);                                 # yStrikeoutPosition
     var fs = 32;                                        # BOLD
@@ -96,34 +116,61 @@ fn put_os2(at): i64 {
     return n;
 }
 
-# One delta per OS/2 tag, over a single region peaking at +1.
+# ⭐ EVERY MVAR TAG rekha CAN LAND, in the SORTED order the spec requires, over a single region
+# peaking at +1. As of 0.6.4 that is all of them but the four `vhea` ones.
 fn mv_tag(i): i64 {
-    if (i == 0) { return 0x68617363; }                  # hasc
-    if (i == 1) { return 0x68647363; }                  # hdsc
-    if (i == 2) { return 0x686C6770; }                  # hlgp
-    if (i == 3) { return 0x68636C61; }                  # hcla
-    if (i == 4) { return 0x68636C64; }                  # hcld
-    if (i == 5) { return 0x63706874; }                  # cpht
-    if (i == 6) { return 0x7374726F; }                  # stro
-    if (i == 7) { return 0x73747273; }                  # strs
-    return 0x78686774;                                  # xhgt
+    if (i ==  0) { return 0x63706874; }              # cpht
+    if (i ==  1) { return 0x68617363; }              # hasc
+    if (i ==  2) { return 0x68636C61; }              # hcla
+    if (i ==  3) { return 0x68636C64; }              # hcld
+    if (i ==  4) { return 0x68636F66; }              # hcof
+    if (i ==  5) { return 0x6863726E; }              # hcrn
+    if (i ==  6) { return 0x68637273; }              # hcrs
+    if (i ==  7) { return 0x68647363; }              # hdsc
+    if (i ==  8) { return 0x686C6770; }              # hlgp
+    if (i ==  9) { return 0x7362786F; }              # sbxo
+    if (i == 10) { return 0x73627873; }              # sbxs
+    if (i == 11) { return 0x7362796F; }              # sbyo
+    if (i == 12) { return 0x73627973; }              # sbys
+    if (i == 13) { return 0x7370786F; }              # spxo
+    if (i == 14) { return 0x73707873; }              # spxs
+    if (i == 15) { return 0x7370796F; }              # spyo
+    if (i == 16) { return 0x73707973; }              # spys
+    if (i == 17) { return 0x7374726F; }              # stro
+    if (i == 18) { return 0x73747273; }              # strs
+    if (i == 19) { return 0x756E646F; }              # undo
+    if (i == 20) { return 0x756E6473; }              # unds
+    return 0x78686774;                             # xhgt
 }
 
 fn mv_delta(i): i64 {
-    if (i == 0) { return 30; }
-    if (i == 1) { return 0 - 20; }
-    if (i == 2) { return 10; }
-    if (i == 3) { return 40; }
-    if (i == 4) { return 15; }
-    if (i == 5) { return 35; }
-    if (i == 6) { return 12; }
-    if (i == 7) { return 5; }
+    if (i ==  0) { return 35; }
+    if (i ==  1) { return 30; }
+    if (i ==  2) { return 40; }
+    if (i ==  3) { return 15; }
+    if (i ==  4) { return 3; }
+    if (i ==  5) { return 7; }
+    if (i ==  6) { return 2; }
+    if (i ==  7) { return 0 - 20; }
+    if (i ==  8) { return 10; }
+    if (i ==  9) { return 4; }
+    if (i == 10) { return 9; }
+    if (i == 11) { return 6; }
+    if (i == 12) { return 8; }
+    if (i == 13) { return 5; }
+    if (i == 14) { return 11; }
+    if (i == 15) { return 14; }
+    if (i == 16) { return 13; }
+    if (i == 17) { return 12; }
+    if (i == 18) { return 5; }
+    if (i == 19) { return 0 - 9; }
+    if (i == 20) { return 6; }
     return 25;
 }
 
 # ⚠ THE RECORDS MUST BE SORTED BY TAG, which is why mv_tag is in that order and not a tidy one.
 fn put_mvar(at): i64 {
-    var nr = 9;
+    var nr = 22;
     pu16(at, 1);
     pu16(at + 6, 8);
     pu16(at + 8, nr);
@@ -162,6 +209,7 @@ fn build(): i64 {
     memset(FB, 0, FB_CAP);
     var ntab = 6;
     if (o_noos2 == 0) { ntab = ntab + 1; }
+    if (o_nopost == 0) { ntab = ntab + 1; }
     if (o_nofvar == 0) { ntab = ntab + 1; }
     if (o_nomvar == 0) { ntab = ntab + 1; }
     pu32(0, 0x00010000);
@@ -180,7 +228,11 @@ fn build(): i64 {
     var fvar_at = os2_at + ((g_os2len + 3) & (0 - 4));
     var fvlen = 0;
     if (o_nofvar == 0) { fvlen = 36; }
-    var mvar_at = fvar_at + fvlen;
+    var post_at = fvar_at + fvlen;
+    g_post = post_at;
+    g_postlen = 0;
+    if (o_nopost == 0) { g_postlen = put_post(post_at); }
+    var mvar_at = post_at + ((g_postlen + 3) & (0 - 4));
     g_mvar = mvar_at;
     g_mvarlen = 0;
     if (o_nomvar == 0) { g_mvarlen = put_mvar(mvar_at); }
@@ -192,6 +244,9 @@ fn build(): i64 {
     pu16(hhea_at + 4, 800);
     pu16(hhea_at + 6, 0 - 200 & 65535);
     pu16(hhea_at + 8, 90);
+    pu16(hhea_at + 18, 1);                              # caretSlopeRise
+    pu16(hhea_at + 20, 0);                              # caretSlopeRun
+    pu16(hhea_at + 22, 0);                              # caretOffset
     pu16(hhea_at + 34, NG);
     var i = 0;
     while (i < NG) {
@@ -228,6 +283,9 @@ fn build(): i64 {
     if (o_nofvar == 0) {
         pu32(d, 0x66766172); pu32(d + 8, fvar_at); pu32(d + 12, fvlen); d = d + 16;
     }
+    if (o_nopost == 0) {
+        pu32(d, REKHA_TAG_POST); pu32(d + 8, post_at); pu32(d + 12, g_postlen); d = d + 16;
+    }
     if (o_nomvar == 0) {
         pu32(d, REKHA_TAG_MVAR); pu32(d + 8, mvar_at); pu32(d + 12, g_mvarlen); d = d + 16;
     }
@@ -243,6 +301,9 @@ fn opts_reset(): i64 {
     o_typo = 0;
     o_nomvar = 1;
     o_nofvar = 1;
+    o_nopost = 0;
+    o_postlen = 32;
+    o_postver = 0x00030000;
     return 0;
 }
 
@@ -374,6 +435,21 @@ fn t_var(): i64 {
     check(rekha_cap_height(g_f), 735);                   # 700 + 35
     check(rekha_strikeout_size(g_f), 55);                # 50 + 5
     check(rekha_strikeout_position(g_f), 272);           # 260 + 12
+    check(rekha_subscript_x_size(g_f), 79);              # 70 + 9
+    check(rekha_subscript_y_size(g_f), 73);              # 65 + 8
+    check(rekha_subscript_x_offset(g_f), 4);             # 0 + 4
+    check(rekha_subscript_y_offset(g_f), 81);            # 75 + 6
+    check(rekha_superscript_x_size(g_f), 83);            # 72 + 11
+    check(rekha_superscript_y_size(g_f), 81);            # 68 + 13
+    check(rekha_superscript_x_offset(g_f), 5);           # 0 + 5
+    check(rekha_superscript_y_offset(g_f), 494);         # 480 + 14
+    check(rekha_caret_slope_rise(g_f), 3);               # 1 + 2
+    check(rekha_caret_slope_run(g_f), 7);                # 0 + 7
+    check(rekha_caret_offset(g_f), 3);                   # 0 + 3
+    check(rekha_underline_position(g_f), 0 - 84);        # -75 - 9
+    check(rekha_underline_thickness(g_f), 56);           # 50 + 6
+    # ⛔ ...and the italic angle does NOT move: MVAR has no tag for it.
+    check(sd_asr(rekha_italic_angle(g_f), 16), 0 - 15);
     check(rekha_ascender(g_f), 800);
     check(rekha_descender(g_f), 0 - 200);
     check(rekha_line_gap(g_f), 90);
@@ -397,15 +473,90 @@ fn t_var(): i64 {
     return 0;
 }
 
-# ── E) every byte of OS/2 and MVAR, flipped ───────────────────────
+# ── F) post: the underline, the lean, and the pitch ─────────────────────
+fn t_post(): i64 {
+    g_group = "F post";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_post_version(g_f), 0x00030000);
+    check(sd_asr(rekha_italic_angle(g_f), 16), 0 - 15);
+    check(rekha_underline_position(g_f), 0 - 75);
+    check(rekha_underline_thickness(g_f), 50);
+    check(rekha_is_fixed_pitch(g_f), 1);
+    # ⚠ THE HEADER IS THE SAME 32 BYTES IN EVERY VERSION, so a 2.0 table answers identically — the
+    # version says whether glyph NAMES would follow, not whether these six fields are there.
+    opts_reset();
+    o_postver = 0x00020000;
+    check(openf() != 0, 1);
+    check(rekha_post_version(g_f), 0x00020000);
+    check(rekha_underline_position(g_f), 0 - 75);
+    check(rekha_is_fixed_pitch(g_f), 1);
+    # absent, and the null handle
+    opts_reset();
+    o_nopost = 1;
+    check(openf() != 0, 1);
+    check(rekha_post_version(g_f), 0 - 1);
+    check(rekha_italic_angle(g_f), 0);
+    check(rekha_underline_position(g_f), 0);
+    check(rekha_underline_thickness(g_f), 0);
+    check(rekha_is_fixed_pitch(g_f), 0 - 1);
+    check(rekha_post_version(0), 0 - 1);
+    check(rekha_is_fixed_pitch(0), 0 - 1);
+    # ⛔ a table below the 32-byte header is not cached at all: every field it declares is in there
+    opts_reset();
+    o_postlen = 30;
+    check(openf() != 0, 1);
+    check(rekha_post_version(g_f), 0 - 1);
+    check(rekha_underline_thickness(g_f), 0);
+    # ...and hhea, a different table, is untouched by any of it
+    check(rekha_ascender(g_f), 800);
+    return 0;
+}
+
+# ── G) the static sub/superscript boxes and the caret ────────────────────
+fn t_boxes(): i64 {
+    g_group = "G boxes";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_subscript_x_size(g_f), 70);
+    check(rekha_subscript_y_size(g_f), 65);
+    check(rekha_subscript_x_offset(g_f), 0);
+    check(rekha_subscript_y_offset(g_f), 75);
+    check(rekha_superscript_x_size(g_f), 72);
+    check(rekha_superscript_y_size(g_f), 68);
+    check(rekha_superscript_x_offset(g_f), 0);
+    check(rekha_superscript_y_offset(g_f), 480);
+    # ⛔ A RISE OF 1 AND A RUN OF 0 IS UPRIGHT: the caret is a vector, not an angle.
+    check(rekha_caret_slope_rise(g_f), 1);
+    check(rekha_caret_slope_run(g_f), 0);
+    check(rekha_caret_offset(g_f), 0);
+    # ⚠ the sub/superscript boxes live at OS/2 +10..+24, inside even a version 0 table
+    opts_reset();
+    o_ver = 0;
+    check(openf() != 0, 1);
+    check(rekha_subscript_x_size(g_f), 70);
+    check(rekha_superscript_y_offset(g_f), 480);
+    # with no OS/2 they are 0, and the caret is hhea's and still answers
+    opts_reset();
+    o_noos2 = 1;
+    check(openf() != 0, 1);
+    check(rekha_subscript_x_size(g_f), 0);
+    check(rekha_superscript_y_size(g_f), 0);
+    check(rekha_caret_slope_rise(g_f), 1);
+    check(rekha_caret_slope_rise(0), 0);
+    return 0;
+}
+
+# ── H) every byte of OS/2, post and MVAR, flipped ─────────────────────
 fn t_guard(): i64 {
-    g_group = "E guard";
+    g_group = "H guard";
     opts_reset();
     o_nofvar = 0;
     o_nomvar = 0;
     build();
     var lo = g_os2;
     var hi = g_mvar + g_mvarlen;
+    if (hi < g_post + g_postlen) { hi = g_post + g_postlen; }
     var bad = 0;
     var at = lo;
     while (at < hi) {
@@ -422,6 +573,10 @@ fn t_guard(): i64 {
                 if (rekha_win_ascent(f) > 1100000) { bad = bad + 1; }
                 if (rekha_strikeout_size(f) < 0 - 1100000) { bad = bad + 1; }
                 if (rekha_weight_class(f) > 65535) { bad = bad + 1; }
+                if (rekha_underline_thickness(f) > 1100000) { bad = bad + 1; }
+                if (rekha_underline_position(f) < 0 - 1100000) { bad = bad + 1; }
+                if (rekha_caret_slope_run(f) > 1100000) { bad = bad + 1; }
+                if (rekha_subscript_y_size(f) > 1100000) { bad = bad + 1; }
                 # ⛔ hhea must be untouchable from here whatever these bytes say
                 if (rekha_ascender(f) != 800) { bad = bad + 1; }
                 if (rekha_line_gap(f) != 90) { bad = bad + 1; }
@@ -447,9 +602,11 @@ fn main(): i64 {
     t_absent();
     t_short();
     t_var();
+    t_post();
+    t_boxes();
     t_guard();
     if (g_fails == 0) {
-        var ok = "os2_test: PASS (version 4, absent, short tables, MVAR deltas, guard; ";
+        var ok = "os2_test: PASS (OS/2, post, the caret, every MVAR tag, refusals, guard; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);

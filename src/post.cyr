@@ -1,0 +1,91 @@
+# @internal — `post`: where the underline goes, and how far the face leans (0.6.4).
+#
+# post.cyr — a small table with one job a renderer cannot do without: `underlinePosition` and
+# `underlineThickness` are the only place a font says where to draw a rule under its text. OS/2
+# gives the STRIKEOUT pair (0.6.1) and this gives the underline; a consumer that has one and
+# invents the other draws two rules of different weights.
+#
+# ⭐ AND THEY ARE THE LAST TWO MVAR TAGS WITH NOWHERE TO LAND. `unds` and `undo` target exactly
+# these two fields, so with 0.6.4 every tag in MVAR that names a table rekha reads now lands on it.
+# What is left of MVAR after this is the four `vhea` tags, which are the vertical-metrics item.
+#
+# Table layout. ⚠ THE HEADER IS 32 BYTES IN EVERY VERSION and carries everything below; the
+# versions differ only in what follows it.
+#   +0 version Fixed · +4 italicAngle Fixed · +8 underlinePosition i16 ·
+#   +10 underlineThickness i16 · +12 isFixedPitch u32 · +16..+31 the Type 42 / Type 1 memory hints
+# 1.0 ends there and means "the 258 standard Macintosh glyph names, in order". 2.0 adds a per-glyph
+# name index and a pool of Pascal strings; 2.5 (deprecated) adds a per-glyph offset into that
+# standard order; 3.0 says there are no names; 4.0 (deprecated) is Apple's.
+#
+# ⛔ GLYPH NAMES ARE NOT READ, and that is a scoping decision rather than an omission. They serve
+# tooling — PDF export, a debugger printing which glyph failed — and nothing rekha draws depends on
+# one. Carrying them means carrying the 258-name Macintosh standard order as data, which is a table
+# the size of everything else in this file put together. docs/development/roadmap.md pins it.
+# ⚠ So `rekha_post_version` reports what the font says and rekha reads the same six fields from any
+# of them: the version tells a consumer whether names would be there, not whether rekha read any.
+
+var REKHA_TAG_POST = 0x706F7374;   # 'post'
+var REKHA_MVAR_UNDS = 0x756E6473;  # 'unds' — post.underlineThickness
+var REKHA_MVAR_UNDO = 0x756E646F;  # 'undo' — post.underlinePosition
+
+fn rekha_post_resolve(f): i64 {
+    store64(f + 536, 0);
+    store64(f + 544, 0);
+    var c: i64[1];
+    var t = rekha_find_table_len(f, REKHA_TAG_POST, &c);
+    if (t == 0) { return 0; }
+    if (load64(&c) < 32) { return 0; }
+    store64(f + 536, t);
+    store64(f + 544, t + load64(&c));
+    return 1;
+}
+
+# @public — the `post` version as its raw 16.16 Fixed (0x00010000 for 1.0, 0x00020000 for 2.0,
+# 0x00030000 for 3.0), or -1 when the font has no usable table. The probe to use before trusting a
+# 0 from anything below.
+fn rekha_post_version(font): i64 {
+    if (font == 0) { return 0 - 1; }
+    var t = load64(font + 536);
+    if (t == 0) { return 0 - 1; }
+    return rekha_rd_u32(load64(font), t);
+}
+
+# @public — italicAngle, in 16.16 DEGREES counter-clockwise from vertical, so an oblique face is
+# NEGATIVE. 0 when the font does not say, which is also what an upright face says.
+# ⚠ No MVAR tag exists for it: an italic angle does not vary.
+fn rekha_italic_angle(font): i64 {
+    if (font == 0) { return 0; }
+    var t = load64(font + 536);
+    if (t == 0) { return 0; }
+    var v = rekha_rd_u32(load64(font), t + 4);
+    if (v >= 0x80000000) { v = v - 0x100000000; }
+    return v;
+}
+
+# @public — where the underline sits, in design units: the TOP of the rule, relative to the
+# baseline and so normally NEGATIVE. Varies through MVAR's `undo`.
+fn rekha_underline_position(font): i64 {
+    if (font == 0) { return 0; }
+    var t = load64(font + 536);
+    if (t == 0) { return 0; }
+    return rekha_rd_i16(load64(font), t + 8) + rekha_mvar_delta(font, REKHA_MVAR_UNDO);
+}
+
+# @public — how thick that rule is, in design units. Varies through MVAR's `unds`.
+fn rekha_underline_thickness(font): i64 {
+    if (font == 0) { return 0; }
+    var t = load64(font + 536);
+    if (t == 0) { return 0; }
+    return rekha_rd_i16(load64(font), t + 10) + rekha_mvar_delta(font, REKHA_MVAR_UNDS);
+}
+
+# @public — 1 when every glyph has the same advance, 0 when not, -1 when the font does not say.
+# ⚠ The field is a u32 and the spec only requires it to be non-zero for monospaced, so any
+# non-zero value is 1 here rather than passed through.
+fn rekha_is_fixed_pitch(font): i64 {
+    if (font == 0) { return 0 - 1; }
+    var t = load64(font + 536);
+    if (t == 0) { return 0 - 1; }
+    if (rekha_rd_u32(load64(font), t + 12) != 0) { return 1; }
+    return 0;
+}

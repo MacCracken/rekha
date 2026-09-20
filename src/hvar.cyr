@@ -62,6 +62,17 @@ var REKHA_MVAR_XHGT = 0x78686774;  # 'xhgt' — OS/2.sxHeight
 var REKHA_MVAR_CPHT = 0x63706874;  # 'cpht' — OS/2.sCapHeight
 var REKHA_MVAR_STRS = 0x73747273;  # 'strs' — OS/2.yStrikeoutSize
 var REKHA_MVAR_STRO = 0x7374726F;  # 'stro' — OS/2.yStrikeoutPosition
+var REKHA_MVAR_SBXS = 0x73627873;  # 'sbxs' — OS/2.ySubscriptXSize
+var REKHA_MVAR_SBYS = 0x73627973;  # 'sbys' — OS/2.ySubscriptYSize
+var REKHA_MVAR_SBXO = 0x7362786F;  # 'sbxo' — OS/2.ySubscriptXOffset
+var REKHA_MVAR_SBYO = 0x7362796F;  # 'sbyo' — OS/2.ySubscriptYOffset
+var REKHA_MVAR_SPXS = 0x73707873;  # 'spxs' — OS/2.ySuperscriptXSize
+var REKHA_MVAR_SPYS = 0x73707973;  # 'spys' — OS/2.ySuperscriptYSize
+var REKHA_MVAR_SPXO = 0x7370786F;  # 'spxo' — OS/2.ySuperscriptXOffset
+var REKHA_MVAR_SPYO = 0x7370796F;  # 'spyo' — OS/2.ySuperscriptYOffset
+var REKHA_MVAR_HCRS = 0x68637273;  # 'hcrs' — hhea.caretSlopeRise
+var REKHA_MVAR_HCRN = 0x6863726E;  # 'hcrn' — hhea.caretSlopeRun
+var REKHA_MVAR_HCOF = 0x68636F66;  # 'hcof' — hhea.caretOffset
 # ⛔ HOW FAR A METRIC MAY MOVE, in design units. Nothing in the format bounds a delta: LONG_WORDS
 # makes each one a signed 32-bit value, and regionIndexCount is a u16, so a crafted store can ask
 # for a delta of 2^31 x 65535 — which both overflows the 16.16 accumulator and, short of that,

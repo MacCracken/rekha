@@ -129,6 +129,19 @@ fn rekha_win_descent(font): i64 { return rekha_os2_u16(font, 76, REKHA_MVAR_HCLD
 fn rekha_x_height(font): i64   { return rekha_os2_i16(font, 86, REKHA_MVAR_XHGT, 0); }
 fn rekha_cap_height(font): i64 { return rekha_os2_i16(font, 88, REKHA_MVAR_CPHT, 0); }
 
+# @public — the synthetic sub- and superscript boxes, in design units, all eight varying through
+# MVAR. A renderer with no real superscript glyphs scales and shifts by these rather than guessing
+# a fraction of the em. ⚠ The offsets are from the BASELINE, so a subscript's y offset is a
+# positive distance DOWN — the sign convention is the field's, not a mistake.
+fn rekha_subscript_x_size(font): i64   { return rekha_os2_i16(font, 10, REKHA_MVAR_SBXS, 0); }
+fn rekha_subscript_y_size(font): i64   { return rekha_os2_i16(font, 12, REKHA_MVAR_SBYS, 0); }
+fn rekha_subscript_x_offset(font): i64 { return rekha_os2_i16(font, 14, REKHA_MVAR_SBXO, 0); }
+fn rekha_subscript_y_offset(font): i64 { return rekha_os2_i16(font, 16, REKHA_MVAR_SBYO, 0); }
+fn rekha_superscript_x_size(font): i64   { return rekha_os2_i16(font, 18, REKHA_MVAR_SPXS, 0); }
+fn rekha_superscript_y_size(font): i64   { return rekha_os2_i16(font, 20, REKHA_MVAR_SPYS, 0); }
+fn rekha_superscript_x_offset(font): i64 { return rekha_os2_i16(font, 22, REKHA_MVAR_SPXO, 0); }
+fn rekha_superscript_y_offset(font): i64 { return rekha_os2_i16(font, 24, REKHA_MVAR_SPYO, 0); }
+
 # @public — the strikeout rule: its thickness, and its position above the baseline. Both vary.
 # ⚠ The UNDERLINE pair lives in `post`, which rekha does not read yet.
 fn rekha_strikeout_size(font): i64     { return rekha_os2_i16(font, 26, REKHA_MVAR_STRS, 0); }

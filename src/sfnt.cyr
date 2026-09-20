@@ -153,6 +153,9 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
 #                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
 #                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +536 post  +544 post_end (i64 — the `post` table, 0 = absent or under its 32-byte header.
+#                      Underline, italic angle and fixed pitch; its glyph names are not read.
+#                      0.6.4.)
 #   +496 fvar_inst +504 inst_count +512 inst_size (i64 — `fvar`'s named-instance array, which has
 #                      no offset field of its own: it follows the axes. 0 = none, or a stride the
 #                      spec does not allow. 0.6.3.)
@@ -197,7 +200,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 536;
+var REKHA_FONT_SIZE = 552;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -469,6 +472,33 @@ fn rekha_descender(font): i64 {
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
     return rekha_rd_i16(load64(font), hhea + 6);
+}
+
+# @public — the caret slope, as a rise over a run, and its offset from the caret's intersection
+# with the baseline. All three in hhea, all three varying through MVAR — which is the ONLY thing in
+# hhea that MVAR has a tag for. ⛔ A rise of 1 and a run of 0 is upright: the pair is a vector, not
+# an angle, and `run` is the one that carries the lean.
+# ⚠ They are hhea's, not OS/2's. `rekha_italic_angle` in post.cyr says the same thing in degrees
+# and does not vary; the two need not agree, and a font that leans says so in both.
+fn rekha_caret_slope_rise(font): i64 {
+    if (font == 0) { return 0; }
+    var hhea = load64(font + 96);
+    if (hhea == 0) { return 0; }
+    return rekha_rd_i16(load64(font), hhea + 18) + rekha_mvar_delta(font, REKHA_MVAR_HCRS);
+}
+
+fn rekha_caret_slope_run(font): i64 {
+    if (font == 0) { return 0; }
+    var hhea = load64(font + 96);
+    if (hhea == 0) { return 0; }
+    return rekha_rd_i16(load64(font), hhea + 20) + rekha_mvar_delta(font, REKHA_MVAR_HCRN);
+}
+
+fn rekha_caret_offset(font): i64 {
+    if (font == 0) { return 0; }
+    var hhea = load64(font + 96);
+    if (hhea == 0) { return 0; }
+    return rekha_rd_i16(load64(font), hhea + 22) + rekha_mvar_delta(font, REKHA_MVAR_HCOF);
 }
 
 fn rekha_line_gap(font): i64 {
