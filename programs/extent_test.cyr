@@ -630,7 +630,10 @@ fn t_null(): i64 {
 fn t_alloc(buf): i64 {
     g_group = "H alloc";
     build(buf, 1);
-    check(REKHA_FONT_SIZE, 240);
+    # ⚠ A LITERAL, deliberately: REKHA_FONT_SIZE is published in dist/rekha.cyr, so growing it is
+    # a consumer-visible change and this is the gate that makes it a decision. 240 -> 248 in 0.4.7,
+    # for the cached CFF charset that `seac` resolves through.
+    check(REKHA_FONT_SIZE, 248);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.6
+Version: 0.4.7
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,22 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.7 — CFF `seac` (shipped).** A four-argument `endchar` is an accented glyph built from two
+  others: base at the origin, accent displaced by (adx, ady), both named by **Standard Encoding
+  code** and resolved through the font's **charset** (formats 0 / 1 / 2 and the ISOAdobe default).
+  It was an EMPTY glyph through 0.4.6.
+  ⭐ **Checked against fontTools 4.65.0 on a font fontTools itself authored** — the composed outline
+  is identical, point for point, which is what settles the one semantic question here: Type 1's
+  `seac` had a fifth argument `asb`, Type 2's `endchar` form drops it and the accent goes at
+  (adx, ady) directly.
+  ⚠ **The dev-host corpus cannot check this one.** A re-survey found **0 of 406** CFF faces using
+  `seac` — so unlike 0.4.2's outline differential, the evidence here is the fontTools font above and
+  `programs/cff_test.cyr`'s group I (four charset shapes, the width form, and nine refusals), not a
+  sweep. Said plainly because the absence is the interesting part: `seac` is a Type 1 relic.
+  ⛔ Refused rather than guessed: an unassigned code, an SID no charset entry carries, the Expert /
+  ExpertSubset predefined charsets (which rekha does not carry), a CID-keyed font (whose charset
+  maps to CIDs, not SIDs), a component that is the glyph itself, and a component that is itself a
+  `seac`. `REKHA_FONT_SIZE` grows 240 → 248 for the cached charset.
 - **v0.4.6 — WOFF2 (shipped).** `rekha_font_open_woff2` opens a `.woff2` end to end: the container
   and its variable-length table directory, ONE Brotli stream through sankoch 2.8.0, the **glyf /
   loca** reverse transform (seven substreams, the triplet coordinate encoding, inferred and explicit
@@ -151,9 +167,7 @@ shim, no external binaries.
   5. ~~`[deps].stdlib` trim~~ — shipped in 0.4.4, above.
   6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
-  7. **CFF `seac`** — the accented glyphs old CFF faces build from a base + an accent (none of the 405
-     surveyed faces use it; they are EMPTY today), which needs the charset and standard-encoding
-     lookup.
+  7. ~~**CFF `seac`**~~ — shipped in 0.4.7, below.
   8. **TrueType Collections (`ttcf`)** and **CFF2** — a `.ttc` carries several faces in one file
      (CJK faces ship this way) and CFF2 is the variable-font charstring format.
 - **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small

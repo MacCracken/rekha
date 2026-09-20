@@ -185,6 +185,22 @@ jobs:
           fi
           echo "programs/woff2_vectors.cyr matches the W3C triplet table"
 
+      - name: Verify the CFF Standard Encoding vectors
+        # Same shape as the triplet gate above, for the other table rekha expresses as arithmetic:
+        # src/cff.cyr turns a `seac`'s bchar / achar code into an SID with fourteen contiguous
+        # ranges, and a wrong range picks the wrong accent SILENTLY.
+        # ⚠ `python3 scripts/cff_stdenc.py verify` cross-checks the embedded table against
+        # fontTools; fontTools is not a dependency of this repo and that mode is not run here.
+        run: |
+          regen="$RUNNER_TEMP/cff_stdenc.regen.cyr"
+          python3 scripts/cff_stdenc.py emit "$regen"
+          if ! cmp -s programs/cff_stdenc_vectors.cyr "$regen"; then
+            echo "ERROR: programs/cff_stdenc_vectors.cyr is stale."
+            echo "Run 'python3 scripts/cff_stdenc.py emit' and commit the result."
+            exit 1
+          fi
+          echo "programs/cff_stdenc_vectors.cyr matches the CFF Standard Encoding"
+
       - name: Verify the embedded default face is in sync with its source .ttf
         # fonts/face_data.cyr is GENERATED from fonts/LiberationSans-Regular.ttf by
         # scripts/face2cyr.py and lives outside src/ on purpose: cyrfmt refuses files over

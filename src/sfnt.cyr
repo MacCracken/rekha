@@ -124,6 +124,10 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +208 cff_fdsel   (i64 — its FDSelect; 0 otherwise)
 #   +216 cff_off     (i64 — the CFF table's start)    +224 cff_end (its declared end)
 #   +232 cff_count   (i64 — the CharStrings count: the glyph ids with an outline)
+#   +240 cff_charset  (i64 — what `seac` resolves a glyph NAME through: 0 = the ISOAdobe predefined
+#                      charset (and the CFF default, where SID i IS glyph i), 1 = Expert,
+#                      2 = ExpertSubset, -1 = present but unusable, anything else the ABSOLUTE
+#                      offset of a format 0 / 1 / 2 charset. 0.4.7.)
 #
 # ⭐ WHY A CACHE. Every reader used to re-walk the table directory per call — rekha_char_advance_px
 # walked it for head, cmap, hhea and hmtx on every character, rekha_char_to_sdpath for cmap, maxp,
@@ -137,7 +141,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 240;
+var REKHA_FONT_SIZE = 248;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -180,7 +184,7 @@ fn rekha_font_open(buf, len): i64 {
     return f;
 }
 
-# Fill the table cache (+40..+239) of a RekhaFont whose +0..+32 header fields are set.
+# Fill the table cache (+40..+247) of a RekhaFont whose +0..+32 header fields are set.
 # Every table goes through rekha_find_table_len (extent rule) and, where a fixed field is read,
 # a minimum declared length. Stack cell only — 0 B of heap.
 fn rekha_font_resolve(f): i64 {

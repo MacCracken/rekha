@@ -12,6 +12,7 @@
 # Exit code = failed checks; each failure prints its number, group, got and want.
 
 include "programs/prelude.cyr"
+include "programs/cff_stdenc_vectors.cyr"
 
 var g_fails = 0;
 var g_n = 0;
@@ -175,6 +176,12 @@ var o_major = 1;
 var o_offsize = 4;      # the CharStrings INDEX offSize (5 is written genuinely, and must be refused)
 var o_cid = 0;          # 0 = name-keyed; 3 = CID with FDSelect format 3; 10 = format 0
 var o_nocs = 0;         # omit CharStrings from the Top DICT
+# charset (Top DICT 15), for `seac`: 0 = omit the operator (the ISOAdobe default, where SID i IS
+# glyph i) · 1 / 2 = the Expert predefined charsets, which rekha does not carry · 10 / 11 / 12 = a
+# custom charset in format 0 / 1 / 2, one glyph per entry, SIDs from g_sids · 13 = format 1 as ONE
+# range covering every glyph, so nLeft > 0 and the range arithmetic is exercised.
+var o_charset = 0;
+var g_sids = 0;         # i64[ng]: the SID of each glyph, index 1..ng-1 (glyph 0 is always .notdef)
 
 # Build an OTTO font from charstrings `cs`, global subrs `gs`, local subrs `ls` (name-keyed), or for a
 # CID font: FD local subrs `ls` (FD 0) and `ls1` (FD 1). Returns the font length.
@@ -217,6 +224,7 @@ fn build(cs, gs, ls, ls1): i64 {
     tsz = tsz + 11;                                     # int int + 18 (Private)
     if (o_cstype != 0) { tsz = tsz + 7; }               # int + 12 6
     if (o_cid != 0) { tsz = tsz + 17 + 7 + 7; }         # ROS (3 ints + 12 30), FDArray, FDSelect
+    if (o_charset != 0) { tsz = tsz + 6; }              # int + 15
     put_u16(FB, p, 1);
     store8(FB + p + 2, 1);
     store8(FB + p + 3, 1);
@@ -295,6 +303,35 @@ fn build(cs, gs, ls, ls1): i64 {
         }
     }
 
+    # charset, when one is asked for: it goes after everything else, and the Top DICT below names it
+    var charset_at = 0;
+    if (o_charset >= 10) {
+        charset_at = p;
+        if (o_charset == 13) {                          # one range, nLeft = ng - 2
+            store8(FB + p, 1);
+            put_u16(FB, p + 1, load64(g_sids + 8));
+            store8(FB + p + 3, ng - 2);
+            p = p + 4;
+        } else {
+            store8(FB + p, o_charset - 10);
+            p = p + 1;
+            i = 1;
+            while (i < ng) {
+                put_u16(FB, p, load64(g_sids + i * 8));
+                if (o_charset == 10) { p = p + 2; }
+                if (o_charset == 11) {
+                    store8(FB + p + 2, 0);
+                    p = p + 3;
+                }
+                if (o_charset == 12) {
+                    put_u16(FB, p + 2, 0);
+                    p = p + 4;
+                }
+                i = i + 1;
+            }
+        }
+    }
+
     # Top DICT contents
     var q = top;
     if (o_nocs == 0) {
@@ -311,6 +348,13 @@ fn build(cs, gs, ls, ls1): i64 {
         store8(FB + q, 12);
         store8(FB + q + 1, 6);
         q = q + 2;
+    }
+    if (o_charset != 0) {
+        var cv = o_charset;
+        if (o_charset >= 10) { cv = charset_at - cff; }
+        q = q + d_int(FB, q, cv);
+        store8(FB + q, 15);
+        q = q + 1;
     }
     if (o_cid != 0) {
         q = q + d_int(FB, q, 391);
@@ -345,6 +389,7 @@ fn opts_reset(): i64 {
     o_offsize = 4;
     o_cid = 0;
     o_nocs = 0;
+    o_charset = 0;
     return 0;
 }
 
@@ -564,8 +609,12 @@ var B0 = 26;
 fn glyphs_b(): i64 {
     var cs = g_cst;
     var i = 0;
-    # B0 seac
-    cs_reset(); cs_n(0); cs_n(0); cs_n(65); cs_n(66); cs_op(14); tab_add(cs);
+    # B0 seac whose bchar code is UNASSIGNED in the Standard Encoding (128), so it has no SID and
+    # no glyph. ⚠ It read `65 66` until 0.4.7, and would now RESOLVE — this font has no charset, so
+    # the ISOAdobe default makes SID 34 glyph 34, which exists here. The check passed anyway, for a
+    # reason it did not state (glyph 34 is B8, itself a refusal), which is exactly the sort of green
+    # that hides a change. Group I is where seac is tested properly, both ways.
+    cs_reset(); cs_n(0); cs_n(0); cs_n(128); cs_n(66); cs_op(14); tab_add(cs);
     # B1 an arithmetic operator (12 10 add)
     cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(2); cs_op12(10); cs_op(14); tab_add(cs);
     # B2 49 arguments
@@ -917,8 +966,8 @@ fn t_kills(): i64 {
     var gs = tab_new();
     var ls = tab_new();
     var i = 0;
-    # 0 seac after a contour
-    cs_reset(); draw(); cs_n(0); cs_n(0); cs_n(65); cs_n(66); cs_op(14); tab_add(cs);
+    # 0 seac after a contour, with an unassigned bchar code (128) — see the note on B0
+    cs_reset(); draw(); cs_n(0); cs_n(0); cs_n(128); cs_n(66); cs_op(14); tab_add(cs);
     # 1 control: the same contour, plain endchar
     cs_reset(); draw(); cs_op(14); tab_add(cs);
     # 2 a lineto before the moveto, then a real contour
@@ -1079,6 +1128,162 @@ fn t_kills(): i64 {
     return n;
 }
 
+# ================================================================
+# I) seac — the four-argument endchar (0.4.7)
+#
+# The font: glyph 1 draws a two-point contour at the origin, glyph 2 a two-point contour of its own,
+# and glyph 3 is `adx ady bchar achar endchar`. So a resolved seac is glyph 1's points followed by
+# glyph 2's, displaced — asserted coordinate by coordinate, not by a digest.
+# SIDs 34 / 35 / 36 are Standard Encoding codes 65 / 66 / 67 ('A', 'B', 'C'), so code 67 names the
+# seac glyph ITSELF and is the self-reference case.
+# ================================================================
+var g_sidb = 0;
+
+fn ends2(e0, e1): i64 {
+    check(rekha_outline_n_contours(g_o), 2);
+    check(load64(rekha_outline_end_pts(g_o)), e0);
+    check(load64(rekha_outline_end_pts(g_o) + 8), e1);
+    return 0;
+}
+
+# mode: the o_charset value. bch / ach: the seac's codes. width: prepend a width argument.
+# nested: make glyph 1 a seac too. Returns the loaded glyph 3's point count.
+fn seac_load(mode, bch, ach, width, nested): i64 {
+    var cs = tab_new();
+    var gs = tab_new();
+    var ls = tab_new();
+    cs_reset(); cs_op(14); tab_add(cs);                              # 0 .notdef
+    cs_reset();                                                      # 1 base
+    if (nested != 0) {
+        cs_n(0); cs_n(0); cs_n(65); cs_n(66); cs_op(14);
+    } else {
+        cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
+    }
+    tab_add(cs);
+    cs_reset(); cs_n(1); cs_n(2); cs_op(21); cs_n(3); cs_n(0); cs_op(5); cs_op(14); tab_add(cs);
+    cs_reset();                                                      # 3 the seac
+    if (width != 0) { cs_n(500); }
+    cs_n(100); cs_n(200); cs_n(bch); cs_n(ach); cs_op(14); tab_add(cs);
+    store64(g_sidb + 8, 34);
+    store64(g_sidb + 16, 35);
+    store64(g_sidb + 24, 36);
+    opts_reset();
+    o_charset = mode;
+    g_sids = g_sidb;
+    var len = build(cs, gs, ls, 0);
+    g_f = rekha_font_open(FB, len);
+    check(g_f != 0, 1);
+    return load(3);
+}
+
+# The composed outline: glyph 1 at the origin, then glyph 2 displaced by (100, 200).
+fn seac_expect(): i64 {
+    check(load(3), 4);
+    pt(0, 0, 0, 1);
+    pt(1, 5, 0, 1);
+    pt(2, 101, 202, 1);
+    pt(3, 104, 202, 1);
+    ends2(1, 3);
+    return 0;
+}
+
+fn t_seac(): i64 {
+    g_group = "I seac";
+    g_sidb = alloc(64 * 8);
+
+    # every charset shape that can carry the mapping
+    var mode = 10;
+    while (mode <= 13) {
+        check(seac_load(mode, 65, 66, 0, 0), 4);
+        seac_expect();
+        mode = mode + 1;
+    }
+    # a leading width in front of the four arguments
+    check(seac_load(10, 65, 66, 1, 0), 4);
+    seac_expect();
+    # the components really are the glyphs named, not a coincidence: swap them and the output swaps
+    check(seac_load(10, 66, 65, 0, 0), 4);
+    check(load(3), 4);
+    pt(0, 1, 2, 1);
+    pt(1, 4, 2, 1);
+    pt(2, 100, 200, 1);
+    pt(3, 105, 200, 1);
+    ends2(1, 3);
+
+    # ── the refusals, each an EMPTY glyph ──
+    check(seac_load(10, 128, 66, 0, 0), 0);          # bchar unassigned in Standard Encoding
+    check(seac_load(10, 65, 128, 0, 0), 0);          # achar unassigned
+    check(seac_load(10, 68, 66, 0, 0), 0);           # SID 37 is in no charset entry
+    check(seac_load(10, 67, 66, 0, 0), 0);           # bchar names the seac glyph itself
+    check(seac_load(10, 65, 67, 0, 0), 0);           # achar does
+    check(seac_load(10, 65, 66, 0, 1), 0);           # the base is itself a seac
+    check(seac_load(1, 65, 66, 0, 0), 0);            # the Expert predefined charset
+    check(seac_load(2, 65, 66, 0, 0), 0);            # ExpertSubset
+    check(seac_load(0, 65, 66, 0, 0), 0);            # ISOAdobe: SID 34 is glyph 34, past this font
+
+    # ⭐ and the ISOAdobe default DOES resolve when the font is big enough — SID i is glyph i, so a
+    # 40-glyph font puts the base at 34 and the accent at 35. Without this the check above would
+    # only prove that a 4-glyph font is small.
+    var cs2 = tab_new();
+    var gs2 = tab_new();
+    var ls2 = tab_new();
+    var i = 0;
+    while (i < 40) {
+        cs_reset();
+        if (i == 34) { cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5); }
+        if (i == 35) { cs_n(1); cs_n(2); cs_op(21); cs_n(3); cs_n(0); cs_op(5); }
+        if (i == 36) { cs_n(100); cs_n(200); cs_n(65); cs_n(66); }
+        cs_op(14);
+        tab_add(cs2);
+        i = i + 1;
+    }
+    opts_reset();
+    var len2 = build(cs2, gs2, ls2, 0);
+    g_f = rekha_font_open(FB, len2);
+    check(load(36), 4);
+    pt(0, 0, 0, 1);
+    pt(1, 5, 0, 1);
+    pt(2, 101, 202, 1);
+    pt(3, 104, 202, 1);
+    ends2(1, 3);
+
+    # ⛔ a CID-keyed font has no Standard Encoding: its charset maps glyph ids to CIDs, so the same
+    # seac must be refused rather than resolved through the wrong table
+    var cs3 = tab_new();
+    var gs3 = tab_new();
+    var ls3 = tab_new();
+    cs_reset(); cs_op(14); tab_add(cs3);
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5); cs_op(14); tab_add(cs3);
+    cs_reset(); cs_n(1); cs_n(2); cs_op(21); cs_n(3); cs_n(0); cs_op(5); cs_op(14); tab_add(cs3);
+    cs_reset(); cs_n(100); cs_n(200); cs_n(65); cs_n(66); cs_op(14); tab_add(cs3);
+    store64(g_sidb + 8, 34);
+    store64(g_sidb + 16, 35);
+    store64(g_sidb + 24, 36);
+    opts_reset();
+    o_cid = 3;
+    o_charset = 10;
+    g_sids = g_sidb;
+    var len3 = build(cs3, gs3, ls3, tab_new());
+    g_f = rekha_font_open(FB, len3);
+    check(g_f != 0, 1);
+    check(load(3), 0);
+    check(rekha_outline_n_contours(g_o), 0);
+
+    # the Standard Encoding itself, against the table generated from fontTools
+    var vec = alloc(256 * 8);
+    cff_stdenc_fill(vec);
+    var bad = 0;
+    i = 0;
+    while (i < 256) {
+        if (rekha_cff_stdenc(i) != load64(vec + i * 8)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    check(bad, 0);
+    check(rekha_cff_stdenc(0 - 1), 0);
+    check(rekha_cff_stdenc(256), 0);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     FB = alloc(FB_CAP + GUARD);
@@ -1104,8 +1309,9 @@ fn main(): i64 {
     t_alloc();
     t_guard();
     t_kills();
+    t_seac();
     if (g_fails == 0) {
-        var ok = "cff_test: PASS (Type 2 operators, refusals, CID-keyed, resolve, cubic emit, guard; ";
+        var ok = "cff_test: PASS (Type 2 operators, refusals, CID-keyed, resolve, cubic emit, seac, guard; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);
