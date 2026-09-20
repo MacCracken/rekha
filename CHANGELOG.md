@@ -5,6 +5,71 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-09-20 — `FontMatrix`: charstring units are not always design units
+
+The last of the five conformance items, and **0.5.x closes with it**. Through 0.5.0 rekha never
+read Top DICT `12 7`: the DICT walker skipped the real-number operand format outright, and every
+CFF and CFF2 glyph was decoded as though one charstring unit were one design unit. That holds for
+all 405 CFF faces surveyed, every one of which carries `FontMatrix = 1 / unitsPerEm` — it is an
+assumption, not a guarantee, and a face that says otherwise **rendered at the wrong scale with no
+refusal**, which is a worse failure than an empty glyph.
+
+⭐ **CHECKED AGAINST fontTools ON TWELVE MATRICES**, the same bytes to both — `scripts/cff_fontmatrix_diff.py`:
+
+| | matrices agreeing |
+|---|---|
+| **0.5.1** | **12 of 12** |
+| 0.5.0, same harness | 5 of 12 — the other seven silently drew at the wrong scale or orientation |
+
+⚠ **What fontTools is the reference FOR.** It parses the Top DICT and exposes `FontMatrix` as six
+floats; that parse — of a format that is two nibbles a byte with its own `.`, `E`, `E-` and `-`
+codes — is the risky half and the half it settles. What fontTools does **not** do is apply the
+matrix: its CFF glyph set returns raw charstring coordinates. The fold is rekha's own and the
+script models it. rekha is never asked for its matrix and no accessor was added for the test: the
+probe glyph draws (0, 0), (1000, 0), (0, 1000), so its three decoded points **are** the matrix.
+
+### Added — `src/cff.cyr` reads and applies `FontMatrix`
+
+- The **real-number operand format**, which the DICT walker had only ever skipped over.
+- ⭐ **What is cached is not the matrix.** rekha keeps `M x unitsPerEm` in 16.16: the transform from
+  charstring units straight to the design units the rest of rekha already works in, so the sadish
+  seam's single divide by `upem` remains the only other scaling step. Precision is why — 0.001 in
+  16.16 is 65.536, which rounds to 66, **a 0.7% error before a single point is placed**; 0.001 x
+  1000 is exactly 1.0. For every font that agrees with its own `head` the product IS 1.0, the
+  transform is recorded as off, and the point store pays nothing.
+- Applied in the point store at 32.32 and rounded **once**, half up, exactly as the untouched path
+  does. CFF2 gets it through the same code.
+- ⛔ **ABSENT MEANS 0.001, NOT "the same units as head".** That is the CFF default and what FreeType
+  derives its own upem from. The two agree exactly when `unitsPerEm` is 1000, which is what an
+  OpenType CFF face carries; they differ only on a face already contradicting itself, and rekha
+  follows the spec rather than siding with `head`. At upem 2048 with no `FontMatrix`, a 100-unit
+  step is now 205 design units and was 100.
+- `REKHA_FONT_SIZE` **360 -> 416** for the flag and the six entries. `programs/extent_test.cyr`'s
+  literal gate is the place that makes that a decision.
+
+### Refused rather than approximated
+
+Each loses the CFF table, so the glyphs come back EMPTY — never a wrong scale. `head` is a
+different table and still reads, which is how these are told from a broken font.
+
+- an arity other than six; a scale past +-64 or a translation past +-16384 em; a real rekha cannot
+  represent; the reserved nibble `d`; a real with no terminator before the DICT ends;
+- ⛔ **a CID font whose FDArray Font DICT carries its own `FontMatrix`.** TN 5176 has that one and
+  the Top DICT's **multiply**, so honouring only one would scale that subfont wrong — the exact
+  failure this release exists to end. No surveyed face carries one; the day one does, rekha says so
+  by drawing nothing. The same CID font without it still draws, which `programs/cff_test.cyr` group
+  K checks immediately afterwards so the refusal cannot quietly widen.
+
+### Fixed — while writing the walker
+
+The operand counter was capped at six alongside the six-slot ring, so a **seven**-operand
+`FontMatrix` read as a six-operand one and silently used the last six. Caught by group K, which
+checks both arities; the ring stays capped and the count no longer is.
+
+⇒ `programs/cff_test.cyr` **697 -> 785 checks**: both encodings of the identity, half scale, a
+negative `d`, a skew, a translation in em units, the 0.001 default at upem 2048, and seven
+refusals.
+
 ## [0.5.0] - 2026-09-20 — conformance: the stack CFF2 asks for, and the target rekha is named for
 
 The 0.4.x line added formats. 0.5.x fixes the places rekha was **wrong or unproven** on a font it

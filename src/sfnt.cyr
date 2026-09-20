@@ -150,6 +150,14 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +336 gvar        (i64 — the 'gvar' table, 0 = the font has none)
 #   +344 gvar_scratch (i64 — the per-glyph delta / touched scratch, allocated on first use)
 #   +352 file_len     (again, so gvar's reads are bounded without another indirection). 0.4.12.
+#   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
+#                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
+#                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +368 .. +408     (i64 x 6 — that matrix as [a b c d e f] x unitsPerEm, in 16.16. It maps
+#                      charstring units straight to DESIGN units, so the sadish seam's divide by
+#                      upem remains the only other scaling step. See src/cff.cyr on why the product
+#                      rather than the matrix: 0.001 in 16.16 is 65.536 and rounds to a 0.7% error,
+#                      while 0.001 x 1000 is exactly 1.0.)
 #   +328 var_nregion (i64 — how many of them are live; 0 IS the default instance). 0.4.11.
 #   +248 min_table  (i64 — the lowest byte offset a table of THIS face may start at. For a plain
 #                      SFNT that is the end of its own directory, which is the rule rekha has always
@@ -173,7 +181,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 360;
+var REKHA_FONT_SIZE = 416;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }

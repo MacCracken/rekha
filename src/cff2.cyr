@@ -172,6 +172,7 @@ fn rekha_cff2_resolve(f): i64 {
         if (vstore + 2 + rekha_rd_u16(buf, vstore) > end) { return 0; }
     }
 
+    if (rekha_cff_matrix_store(f, buf, ta, tb, 27) == 0) { return 0; }
     store64(f + 176, cs);
     store64(f + 184, gs);
     store64(f + 192, 0);                                  # no Top DICT Private: it is per Font DICT

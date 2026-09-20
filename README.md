@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.5.0
+Version: 0.5.1
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -52,6 +52,7 @@ points are flagged, so an `OTTO` face draws through `sd_path_cubicto` with no co
 | `CFF ` Type 2 charstrings, name-keyed **and** CID-keyed | 0.4.2 | **all 405 CFF faces of the dev host — 5,093,070 glyphs, 415,584,832 points, identical** |
 | `seac` — the accented glyph built from two others | 0.4.7 | a font fontTools authored, point for point ⚠ **0 of 406** host faces use `seac`, so there is no corpus sweep behind this one |
 | `CFF2` | 0.4.9 | fontTools twice: a CFF→CFF2 conversion, and a variable CFF2 read from the same bytes |
+| `FontMatrix` — charstring units to design units, for both | 0.5.1 | **12 of 12 matrices** agree with the ones fontTools parses from the same bytes |
 
 ### Variations
 
@@ -107,7 +108,7 @@ The full list, with the evidence behind every item, is
 
 | milestone | what it closes |
 |---|---|
-| **0.5.x — conformance and the target** | Things that are wrong or unproven rather than missing. **0.5.0 shipped four of five**: the CFF2 argument stack is now the format's 513 and not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. Left: **`FontMatrix`**, assumed rather than read, which renders a legal CFF at the wrong scale with no refusal. |
+| ~~**0.5.x — conformance and the target**~~ | **Closed.** The CFF2 argument stack is the format's 513, not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; `FontMatrix` is read and applied instead of assumed; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. |
 | **0.6.x — the font's own answers** | The tables rekha transports and never reads — it resolves twelve, and a consumer cannot compute any of the rest from outlines. `HVAR` / `MVAR` first, because an instanced glyph's outline varies and its advance does not; then `OS/2`, `name`, `fvar` named instances + `STAT`, `post`, `kern`, and vertical metrics. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published, documented, and produced by nothing: every refusal collapses to a 0 or an empty glyph, so a caller cannot tell "not a font" from "truncated" from "over a cap". |
 | **0.8.x — hinting** | `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter, for small sizes. CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |

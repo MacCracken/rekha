@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.5.0**.
+> **Last updated:** 2026-09-20, at **0.5.1**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -16,9 +16,11 @@ out, for `sadish` to fill. 1.0.0 is that promise **complete, correct and frozen*
 surface, but no remaining place where a consumer has to reach around rekha to a byte rekha already
 holds, and no published name that does nothing.
 
+⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
+is done, and what remains is surface, not correctness.
+
 | milestone | what it closes |
 |---|---|
-| **0.5.x — conformance and the target** | Things that are *wrong or unproven*, not missing. Correctness before surface. **0.5.0 closed four of five**; `FontMatrix` is what is left. |
 | **0.6.x — the font's own answers** | The tables rekha transports and never reads. A consumer cannot compute any of them from outlines, so today it must parse the SFNT itself — the one thing rekha exists to stop. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published and has no producer. |
 | **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. |
@@ -29,32 +31,6 @@ Everything else is **pinned** (real, evidenced, unscheduled), **blocked on a sib
 explicit **non-goal**.
 
 ---
-
-## 0.5.x — conformance and the target
-
-Correctness work: claims rekha makes that the code does not keep. **0.5.0 closed four of the five**
-— the CFF2 argument stack, the aarch64 / AGNOS target and the syscall number that hid there,
-`avar` 2.0's segment maps, and the `tests/tcyr` tier that never existed — plus one the differential
-turned up on its own, `rekha_fx_div` truncating where `rekha_fx_mul` rounds. See CHANGELOG 0.5.0.
-One is left.
-
-### `FontMatrix` is assumed, never read
-
-`src/cff.cyr:27` — *"(charstring units — every CFF face surveyed has FontMatrix = 1 / unitsPerEm)"*.
-The Top DICT operator `12 7` is never looked up (`grep -rni fontmatrix src/` → that one comment).
-Charstring points go to the same scaling path as `glyf` outlines, which divides by
-`head.unitsPerEm`.
-
-A CFF whose `FontMatrix` is not `1 / unitsPerEm` — legal, and what a CID font with a per-Font-DICT
-matrix in its FDArray produces — **renders at the wrong scale with no refusal**. 405 surveyed faces
-is strong evidence it is rare, not that it is absent, and a silent wrong scale is a worse failure
-mode than an empty glyph.
-
-⚠ **It is its own release (0.5.1) because it is two pieces of work, not one.** Reading the operator
-needs the real-number operand format `rekha_cff_dict_op_max` currently skips over (`src/cff.cyr:183`,
-the `b0 == 30` branch discards the value); applying it needs the affine folded into the coordinate
-accumulation before each point is rounded, and composed with the per-Font-DICT matrix a CID font may
-also carry.
 
 ## 0.6.x — the font's own answers
 
@@ -228,9 +204,10 @@ quietly become permanent.
 
 - ⚠ **Every headline ⭐ differential is a dev-host one-off.** CFF (405 faces / 5,093,070 glyphs),
   WOFF2 (280 files / 111,732 glyphs), cmap (92 faces), CFF2 and `gvar` — none of it runs in CI.
-  ⭐ 0.5.0's wide-blend sweep (550 points over 100 glyph instances) is the exception and the model:
-  `scripts/cff2_wide_diff.py` builds its own font, so it needs fontTools and nothing else, and it
-  is committed. The remaining sweeps need corpora that are not. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
+  ⭐ 0.5.x's two sweeps are the exception and the model: `scripts/cff2_wide_diff.py` (550 points
+  over 100 glyph instances) and `scripts/cff_fontmatrix_diff.py` (12 matrices) each build their own
+  font, so they need fontTools and nothing else, and both are committed. The remaining sweeps need
+  corpora that are not. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
   in-repo fixtures are narrower by construction. A regression after 0.4.12 in any of those decoders
   would be caught only by the synthetic suites. Worth having: a scheduled workflow that installs
   fontTools and re-runs the sweeps, or a licence-clean mini-corpus with committed digests.

@@ -158,6 +158,107 @@ fn d_int(dst, at, v): i64 {
     return 5;
 }
 
+# ── a FontMatrix, written in the DICT real-number format (0.5.1) ───────────
+# ⭐ TWO NIBBLES A BYTE: 0-9 a digit, a '.', b 'E', c 'E-', d reserved, e '-', f the terminator.
+# The group below writes matrices in BOTH the dot form and the exponent form, because rekha's
+# parser has to take either and they run through different nibbles.
+var g_fm = 0;           # the FontMatrix DICT bytes for the next build
+var g_fmn = 0;
+var g_nib = 0 - 1;      # a high nibble waiting for its low half, -1 = none
+
+fn fm_reset(): i64 {
+    g_fmn = 0;
+    g_nib = 0 - 1;
+    return 0;
+}
+
+fn fm_b(v): i64 {
+    store8(g_fm + g_fmn, v & 255);
+    g_fmn = g_fmn + 1;
+    return 0;
+}
+
+fn fm_nib(n): i64 {
+    if (g_nib < 0) {
+        g_nib = n;
+        return 0;
+    }
+    fm_b(g_nib * 16 + n);
+    g_nib = 0 - 1;
+    return 0;
+}
+
+fn fm_digits(v): i64 {
+    if (v == 0) { return fm_nib(0); }
+    var d: i64[24];
+    var n = 0;
+    var m = v;
+    while (m > 0) {
+        store64(&d + n * 8, m % 10);
+        m = m / 10;
+        n = n + 1;
+    }
+    while (n > 0) {
+        n = n - 1;
+        fm_nib(load64(&d + n * 8));
+    }
+    return 0;
+}
+
+fn fm_end(): i64 {
+    fm_nib(15);
+    if (g_nib >= 0) { fm_b(g_nib * 16 + 15); }
+    g_nib = 0 - 1;
+    return 0;
+}
+
+# `neg` x `m` x 10^exp, in the EXPONENT form: 30 <digits> E[-] <digits> f
+fn fm_exp(neg, m, exp): i64 {
+    fm_b(30);
+    g_nib = 0 - 1;
+    if (neg != 0) { fm_nib(14); }
+    fm_digits(m);
+    if (exp != 0) {
+        var e = exp;
+        if (e < 0) {
+            fm_nib(12);
+            e = 0 - e;
+        } else {
+            fm_nib(11);
+        }
+        fm_digits(e);
+    }
+    return fm_end();
+}
+
+# `neg` x whole.frac, in the DOT form, with `fd` fraction digits: 30 <digits> . <digits> f
+fn fm_dot(neg, whole, frac, fd): i64 {
+    fm_b(30);
+    g_nib = 0 - 1;
+    if (neg != 0) { fm_nib(14); }
+    fm_digits(whole);
+    fm_nib(10);
+    var i = fd;
+    var f = frac;
+    var d: i64[24];
+    var k = 0;
+    while (k < fd) {
+        store64(&d + k * 8, f % 10);
+        f = f / 10;
+        k = k + 1;
+    }
+    while (i > 0) {
+        i = i - 1;
+        fm_nib(load64(&d + i * 8));
+    }
+    return fm_end();
+}
+
+fn fm_op(): i64 {
+    fm_b(12);
+    return fm_b(7);
+}
+
 # ================================================================
 # Font assembly. Tables: head @92/54 · maxp @148/6 · hhea @156/36 · hmtx @192/(ng*4) · CFF last.
 # ================================================================
@@ -183,6 +284,9 @@ var o_nocs = 0;         # omit CharStrings from the Top DICT
 # range covering every glyph, so nLeft > 0 and the range arithmetic is exercised.
 var o_charset = 0;
 var g_sids = 0;         # i64[ng]: the SID of each glyph, index 1..ng-1 (glyph 0 is always .notdef)
+var o_upem = 1000;      # head.unitsPerEm, which the FontMatrix is folded with
+var o_fmtx = 0;         # 1 = put the g_fm bytes in the Top DICT (a FontMatrix, or a broken one)
+var o_fdmtx = 0;        # 1 = put them in FD 0's Font DICT instead (CID; rekha must refuse)
 
 # Build an OTTO font from charstrings `cs`, global subrs `gs`, local subrs `ls` (name-keyed), or for a
 # CID font: FD local subrs `ls` (FD 0) and `ls1` (FD 1). Returns the font length.
@@ -200,7 +304,7 @@ fn build(cs, gs, ls, ls1): i64 {
     put_u32(FB, 28, REKHA_TAG_MAXP); put_u32(FB, 36, 148); put_u32(FB, 40, 6);
     put_u32(FB, 44, REKHA_TAG_HHEA); put_u32(FB, 52, 156); put_u32(FB, 56, 36);
     put_u32(FB, 60, REKHA_TAG_HMTX); put_u32(FB, 68, 192); put_u32(FB, 72, ng * 4);
-    put_u16(FB, 92 + 18, 1000);
+    put_u16(FB, 92 + 18, o_upem);
     put_u16(FB, 148 + 4, ng);
     put_u16(FB, 156 + 34, ng);
     var i = 0;
@@ -231,6 +335,7 @@ fn build(cs, gs, ls, ls1): i64 {
     if (o_cstype != 0) { tsz = tsz + 7; }               # int + 12 6
     if (o_cid != 0) { tsz = tsz + 17 + 7 + 7; }         # ROS (3 ints + 12 30), FDArray, FDSelect
     if (o_charset != 0) { tsz = tsz + 6; }              # int + 15
+    if (o_fmtx != 0) { tsz = tsz + g_fmn; }             # six reals + 12 7
     put_u16(FB, p, 1);
     store8(FB + p + 2, 1);
     store8(FB + p + 3, 1);
@@ -275,19 +380,22 @@ fn build(cs, gs, ls, ls1): i64 {
         store8(FB + priv1 + 16, 19);
         # FDArray: two Font DICTs, each Private (size, offset)
         fdarray = p;
+        var fdm = 0;
+        if (o_fdmtx != 0) { fdm = g_fmn; }
         put_u16(FB, p, 2);
         store8(FB + p + 2, 1);
         store8(FB + p + 3, 1);
-        store8(FB + p + 4, 12);
-        store8(FB + p + 5, 23);
+        store8(FB + p + 4, 12 + fdm);
+        store8(FB + p + 5, 23 + fdm);
         var fd0 = p + 6;
-        d_int(FB, fd0, psz);
-        d_int(FB, fd0 + 5, priv0 - cff);
-        store8(FB + fd0 + 10, 18);
-        d_int(FB, fd0 + 11, psz);
-        d_int(FB, fd0 + 16, priv1 - cff);
-        store8(FB + fd0 + 21, 18);
-        p = fd0 + 22;
+        if (fdm != 0) { memcpy(FB + fd0, g_fm, fdm); }
+        d_int(FB, fd0 + fdm, psz);
+        d_int(FB, fd0 + fdm + 5, priv0 - cff);
+        store8(FB + fd0 + fdm + 10, 18);
+        d_int(FB, fd0 + fdm + 11, psz);
+        d_int(FB, fd0 + fdm + 16, priv1 - cff);
+        store8(FB + fd0 + fdm + 21, 18);
+        p = fd0 + fdm + 22;
         fdselect = p;
         if (o_cid == 3) {                               # gid 0..1 -> FD 0, gid 2.. -> FD 1
             store8(FB + p, 3);
@@ -340,6 +448,10 @@ fn build(cs, gs, ls, ls1): i64 {
 
     # Top DICT contents
     var q = top;
+    if (o_fmtx != 0) {
+        memcpy(FB + q, g_fm, g_fmn);
+        q = q + g_fmn;
+    }
     if (o_nocs == 0) {
         q = q + d_int(FB, q, cs_at - cff);
         store8(FB + q, 17);
@@ -396,6 +508,10 @@ fn opts_reset(): i64 {
     o_cid = 0;
     o_nocs = 0;
     o_charset = 0;
+    o_upem = 1000;
+    o_fmtx = 0;
+    o_fdmtx = 0;
+    fm_reset();
     return 0;
 }
 
@@ -1347,9 +1463,214 @@ fn t_scaled(): i64 {
     return 0;
 }
 
+# ── K) FontMatrix: charstring units are not always design units ─────────────────
+# ⭐ WHAT THIS EXISTS TO PROVE. Through 0.5.0 rekha never read Top DICT 12 7 — the DICT walker
+# skipped the real-number operand format entirely — and assumed one charstring unit is one design
+# unit. That holds for every one of the 405 CFF faces surveyed, all of which carry
+# FontMatrix = 1 / unitsPerEm, and it is an ASSUMPTION rather than a guarantee: a face whose matrix
+# says otherwise rendered at the wrong scale with no refusal, which is a worse failure than an
+# empty glyph. rekha now folds the matrix with unitsPerEm and transforms every point.
+var K_UPEM = 0;
+
+fn k_build(): i64 {
+    var cs = tab_new();
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(100); cs_n(200); cs_op(5); cs_op(14); tab_add(cs);
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(10); cs_n(10); cs_op(5); cs_op(14); tab_add(cs);
+    var gs = tab_new();
+    var ls = tab_new();
+    build(cs, gs, ls, ls);
+    g_f = rekha_font_open(FB, g_font_len);
+    return g_f;
+}
+
+# six entries in the EXPONENT form, each `m x 10^e`
+fn k_exp6(m0, e0, m1, e1, m2, e2, m3, e3, m4, e4): i64 {
+    fm_reset();
+    fm_exp(0, m0, e0);
+    fm_exp(0, m1, e1);
+    fm_exp(0, m2, e2);
+    fm_exp(0, m3, e3);
+    fm_exp(0, m4, e4);
+    fm_exp(0, 0, 0);
+    fm_op();
+    return 0;
+}
+
+fn t_fontmatrix(): i64 {
+    g_group = "K FontMatrix";
+
+    # the identity, written 1E-3: a x upem is exactly 1.0, so the transform is OFF and the points
+    # are the ones every other group in this file expects
+    opts_reset();
+    o_fmtx = 1;
+    k_exp6(1, 0 - 3, 0, 0, 0, 0, 1, 0 - 3, 0, 0);
+    check(k_build() != 0, 1);
+    check(rekha_units_per_em(g_f), 1000);
+    check(load(0), 2);
+    pt(0, 0, 0, 1);
+    pt(1, 100, 200, 1);
+
+    # ⭐ THE SAME MATRIX IN THE DOT FORM. 0.001 and 1E-3 are different nibbles and must agree.
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_dot(0, 0, 1, 3);
+    fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0);
+    fm_dot(0, 0, 1, 3);
+    fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0);
+    fm_op();
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(1, 100, 200, 1);
+
+    # half scale: 5E-4 x 1000 = 0.5
+    opts_reset();
+    o_fmtx = 1;
+    k_exp6(5, 0 - 4, 0, 0, 0, 0, 5, 0 - 4, 0, 0);
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(0, 0, 0, 1);
+    pt(1, 50, 100, 1);
+
+    # ⭐ A TRANSLATION IS IN EM UNITS, NOT CHARSTRING UNITS: e = 0.05 moves every point 50 design
+    # units, and f = -0.02 moves it -20. The minus nibble (e) is exercised here.
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_exp(0, 1, 0 - 3);
+    fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0);
+    fm_exp(0, 1, 0 - 3);
+    fm_dot(0, 0, 5, 2);
+    fm_dot(1, 0, 2, 2);
+    fm_op();
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(0, 50, 0 - 20, 1);
+    pt(1, 150, 180, 1);
+
+    # a skew: c = 5E-4, so x' = x + y / 2 and the CROSS TERM has to be in the sum
+    opts_reset();
+    o_fmtx = 1;
+    k_exp6(1, 0 - 3, 0, 0, 5, 0 - 4, 1, 0 - 3, 0, 0);
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(0, 0, 0, 1);
+    pt(1, 200, 200, 1);
+
+    # d negative: the y axis flips
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_exp(0, 1, 0 - 3);
+    fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0);
+    fm_exp(1, 1, 0 - 3);
+    fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0);
+    fm_op();
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(1, 100, 0 - 200, 1);
+
+    # ⛔ ABSENT MEANS 0.001, NOT "whatever head says". At upem 2048 with no FontMatrix the CFF
+    # default puts 1000 charstring units in the em, so a 100-unit step is 100 x 2048 / 1000 = 204.8
+    # design units — 205 half up. Through 0.5.0 rekha answered 100, which is the file's head
+    # disagreeing with its own CFF and rekha silently siding with head.
+    opts_reset();
+    o_upem = 2048;
+    check(k_build() != 0, 1);
+    check(rekha_units_per_em(g_f), 2048);
+    check(load(0), 2);
+    pt(1, 205, 410, 1);
+
+    # and at upem 1000 the same absent matrix IS the identity, which is why nothing else moved
+    opts_reset();
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(1, 100, 200, 1);
+
+    # ⛔ REFUSALS. Each loses the CFF table, so every glyph is EMPTY — never a wrong scale. `head`
+    # is a different table and still reads, which is how these are told apart from a broken font.
+    # five operands, not six
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0); fm_exp(0, 0, 0); fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0);
+    fm_op();
+    check(k_build() != 0, 1);
+    check(rekha_units_per_em(g_f), 1000);
+    empty(0);
+    empty(1);
+
+    # seven operands
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0); fm_exp(0, 0, 0); fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0); fm_exp(0, 0, 0);
+    fm_op();
+    check(k_build() != 0, 1);
+    empty(0);
+
+    # a scale past +-64: [1 0 0 1 0 0] in INTEGERS is 1.0 x 1000 em, which is 1000.0 here
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_b(140); fm_b(139); fm_b(139); fm_b(140); fm_b(139); fm_b(139);   # 1 0 0 1 0 0
+    fm_op();
+    check(k_build() != 0, 1);
+    empty(0);
+
+    # the reserved nibble d
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_b(30); fm_b(0xdf);
+    fm_exp(0, 0, 0); fm_exp(0, 0, 0); fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0); fm_exp(0, 0, 0);
+    fm_op();
+    check(k_build() != 0, 1);
+    empty(0);
+
+    # a real with no terminator before the DICT ends
+    opts_reset();
+    o_fmtx = 1;
+    fm_reset();
+    fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0); fm_exp(0, 0, 0); fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0);
+    fm_b(30); fm_b(0x11);
+    fm_op();
+    check(k_build() != 0, 1);
+    empty(0);
+
+    # ⛔ A CID FONT WITH A PER-FONT-DICT FontMatrix. TN 5176 multiplies it with the Top DICT's, so
+    # honouring only one of the two would scale that subfont wrong — the very failure this group
+    # exists to end. Refused rather than half-applied.
+    opts_reset();
+    o_cid = 3;
+    o_fdmtx = 1;
+    fm_reset();
+    fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0); fm_exp(0, 0, 0); fm_exp(0, 1, 0 - 3); fm_exp(0, 0, 0);
+    fm_exp(0, 0, 0);
+    fm_op();
+    check(k_build() != 0, 1);
+    check(rekha_units_per_em(g_f), 1000);
+    empty(0);
+
+    # ...and the same CID font WITHOUT it still draws, so the refusal is the matrix and not the font
+    opts_reset();
+    o_cid = 3;
+    check(k_build() != 0, 1);
+    check(load(0), 2);
+    pt(1, 100, 200, 1);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     FB = alloc(FB_CAP + GUARD);
+    g_fm = alloc(256);
     g_gb = alloc(FB_CAP + GUARD);
     g_cs = alloc(BLOB_CAP);
     g_cst = tab_new();
@@ -1374,8 +1695,9 @@ fn main(): i64 {
     t_kills();
     t_seac();
     t_scaled();
+    t_fontmatrix();
     if (g_fails == 0) {
-        var ok = "cff_test: PASS (Type 2 operators, refusals, CID-keyed, resolve, cubic emit, seac, guard, upem; ";
+        var ok = "cff_test: PASS (Type 2 ops, refusals, CID, resolve, cubic, seac, guard, upem, FontMatrix; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);
