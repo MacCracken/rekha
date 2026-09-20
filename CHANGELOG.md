@@ -5,6 +5,91 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.9] - 2026-09-20 — CFF2, at the default instance
+
+An OpenType face carrying a `CFF2` table instead of `CFF ` now draws. Roadmap v0.4.x item 9.
+`src/cff2.cyr` parses the container; the charstrings go through cff.cyr's **same** Type 2
+interpreter in a CFF2 mode, because the drawing operators, the subroutine machinery, the hint
+operators and flex are all shared and a second interpreter would be a second thing to keep right.
+
+⭐ **CHECKED AGAINST fontTools TWICE, and the second one is the real test.**
+
+| | |
+|---|---|
+| a CFF font converted to CFF2 by fontTools | outlines IDENTICAL to the CFF it came from, cubics included |
+| a hand-built **variable** CFF2, read from the SAME bytes by both | identical point for point |
+
+The second font carries a two-subtable ItemVariationStore — one two regions wide, one one — a glyph
+that blends against the Private DICT's default subtable, and a glyph that sets `vsindex 1` first.
+fontTools and rekha agree on every coordinate.
+
+⚠ **The default instance, and only that.** At the default location every region's scalar is zero, so
+a blended value IS its default. Non-default axis coordinates need `fvar`, `avar` and the region
+scalars, which rekha does not read; that is now roadmap item 11.
+
+### Added — the container
+
+- A 5-byte header (major must be 2, headerSize >= 5, then a u16 topDictLength), a Top DICT that is
+  **raw bytes rather than an INDEX**, no Name or String INDEX, no charset, no encoding.
+- **Every INDEX counts in u32**, including a count-0 one, which is 4 bytes and not 2. cff.cyr's
+  readers took a count width (`rekha_cff_idx_next` / `_obj` / `_count_at`) so the bounds logic is
+  written once and CFF's behaviour is untouched — `programs/cff_test.cyr`'s 678 checks pass
+  unchanged across that refactor.
+- An FDArray is **required** (a CFF2 font's Private DICTs live nowhere else); an FDSelect is
+  optional, and `rekha_cff_fd` now answers 0 when there is none. ⛔ FDSelect **format 4** exists in
+  CFF2 and rekha refuses it rather than misreading its wider fields as format 3's.
+- The ItemVariationStore, read for exactly one thing: how many regions a subtable blends over.
+
+### Added — `blend` and `vsindex`
+
+⭐ **`blend` is three lines, and the reason is worth stating.** The stack holds n defaults, then
+n x k deltas, then n. At the default location each result is its default — already sitting in place
+below the deltas — so the operator is: drop the count, drop the deltas, leave the defaults.
+⛔ `vsindex` is refused after a `blend` or a second time (both spec MUSTs), and refused outright if
+it names a subtable the store does not have. ⚠ A `blend` in a font with **no** variation store keeps
+its defaults rather than refusing: there is nothing to drop, and that is the right rendering.
+
+### Fixed — two defects the fontTools differential found, neither of which a round trip would have
+
+- ⛔ **`rekha_cff_dict_op` treated only bytes <= 21 as operators, and CFF2's `vstore` is 24.** The
+  Top DICT scan hit byte 24, took it for a reserved operand prefix and **stopped** — so the variation
+  store was never found, every `blend` ran with k = 0, and `vsindex` refused. The damage was
+  positional and therefore quiet: `CharStrings` and `FDArray` were found because they happen to come
+  first. A DICT read now takes an operator ceiling — 21 for CFF, where 22..27 really are reserved,
+  and 27 for CFF2, where `vstore` (24), `vsindex` (22) and `blend` (23) live. CFF is bit-for-bit
+  unaffected.
+- ⛔ **The leading-width rule fired in CFF2, where there is no width.** A CFF charstring's first
+  stack-clearing operator may carry one; a CFF2 one never does. MEASURED: a blended `rmoveto` whose
+  two values had survived the blend correctly was then handed the *wrong pair*, because the width
+  logic saw a third operand and dropped the first.
+
+⚠ **Neither would have shown up in a round trip against our own encoder** — a test that built CFF2
+the way rekha reads it would have agreed with both mistakes. They were found by handing fontTools
+and rekha the same bytes.
+
+### Added — `programs/cff2_test.cyr` (144 checks)
+
+Every font is built in code: the container, one glyph per shape (including a cubic and a charstring
+that ends with no `endchar`), then `blend` and `vsindex` against a real two-subtable store — with
+deltas large enough that applying them would move the asserted points a long way. Group C is the
+refusals: six that stop the table resolving (a CFF-1 major, a short header, no CharStrings, no
+FDArray, FDSelect format 4) and six charstring-level ones (`endchar` in CFF2, `vsindex` out of
+range, twice, after a `blend`, `blend` on an empty stack, `blend` asking for more than the stack
+holds) — each beside a control glyph in the same font. Group D is a guard differential, a
+truncation sweep over every cut, and a 900-iteration byte-mutation sweep over the CFF2 table.
+
+⚠ **Noticed while writing it, and filed rather than fixed here:** `programs/cff_test.cyr`'s own
+fixture declares `head` at offset 76 with five directory entries, so it lies inside the directory
+(dir_end is 92) and rekha correctly reports it absent — every CFF fixture has `unitsPerEm` 0. No
+check there notices, because cff_test reads no upem-scaled reader at all, which is the coverage that
+hides it. `programs/cff2_test.cyr`'s builder lays its tables out past the directory and says why.
+
+### Changed — the record, and the bundles
+
+`REKHA_FONT_SIZE` **256 → 272**: `+256` says the outlines came from `CFF2`, `+264` is that table's
+variation store. `src/cff2.cyr` joins `[lib]` and `[lib.woff]` after `src/cff.cyr`, whose helpers it
+uses. ⚠ A font carrying BOTH `CFF ` and `CFF2` keeps the `CFF ` it had before 0.4.9.
+
 ## [0.4.8] - 2026-09-20 — TrueType Collections
 
 A `.ttc` / `.otc` carries several faces in one file, each with its own SFNT offset table, all of

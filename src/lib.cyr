@@ -55,3 +55,6 @@ include "src/sfnt.cyr"
 include "src/glyf.cyr"
 include "src/cmap.cyr"
 include "src/cff.cyr"
+# cff2.cyr sits atop cff.cyr: it parses the 'CFF2' container and the variation store, and the
+# charstrings themselves go through cff.cyr's interpreter in its CFF2 dialect. Order matters.
+include "src/cff2.cyr"

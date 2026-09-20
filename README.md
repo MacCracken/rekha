@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.8
+Version: 0.4.9
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,22 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.9 — CFF2, at the default instance (shipped).** An OpenType face carrying a `CFF2` table
+  instead of `CFF ` now draws. It is a different container — a 5-byte header, a Top DICT that is
+  **not** an INDEX, every INDEX counted in u32, a **required** FDArray, an optional FDSelect and an
+  ItemVariationStore — and a different charstring dialect: no leading width, **no `endchar`** (the
+  bytes simply run out), plus `vsindex` and `blend`. The charstrings themselves go through the same
+  Type 2 interpreter in a CFF2 mode, not a second copy.
+  ⭐ **Checked against fontTools twice.** A CFF font converted to CFF2 by fontTools decodes to
+  outlines identical to the CFF it came from, cubic control points and all. Then a hand-built
+  VARIABLE CFF2 — two variation-store subtables, one two regions wide and one one — which fontTools
+  and rekha read from the **same bytes** and agree on point for point.
+  ⚠ **The default instance, and only that.** At the default location every region's scalar is zero,
+  so a blended value IS its default and `blend` is: drop the count, drop the deltas, keep what was
+  already there. Non-default axis coordinates are item 11.
+  ⛔ `blend` in a font with no variation store keeps its defaults rather than refusing — there are no
+  deltas to drop and that is the right rendering. An explicit `vsindex` into a store that is not
+  there IS refused: it names something.
 - **v0.4.8 — TrueType Collections (shipped).** `rekha_ttc_count` and `rekha_font_open_index` open
   face *n* of a `.ttc` / `.otc`: several faces in one file, each with its own offset table, all of
   them SHARING table data. `rekha_font_open` opens face 0 of a collection, so an existing consumer
@@ -183,12 +199,14 @@ shim, no external binaries.
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
   7. ~~**CFF `seac`**~~ — shipped in 0.4.7, below.
   8. ~~**TrueType Collections (`ttcf`)**~~ — shipped in 0.4.8, below.
-  9. **CFF2** — the variable-font charstring format. ⚠ Split out of item 8 when the collection half
-     shipped: they were filed together but share nothing. CFF2 is a different container (no Name or
-     String INDEX, a Top DICT that is not an INDEX, a required FDArray, a 32-bit CharStrings INDEX)
-     and a different charstring dialect (`blend`, `vsindex`, no `endchar`) over an ItemVariationStore.
-     A default-instance decode — where `blend` reduces to its first k operands — is the tractable
-     first step and is what this item means.
+  9. ~~**CFF2**~~ — shipped in 0.4.9, below, at the **default instance**. What is left is applying
+     NON-default axis coordinates, which needs `fvar` / `avar` and the region scalars rekha does not
+     read — item 11.
+ 11. **Variable-font instancing** — 0.4.9 decodes a CFF2 at its default location, where every
+     region scalar is zero and a blended value is its default. Setting axis coordinates needs `fvar`
+     (the axes and their defaults), `avar` (the mapping), the ItemVariationStore's region list, and
+     the scalar product per region — at which point `blend` applies its deltas instead of dropping
+     them, and `gvar` would give TrueType outlines the same treatment.
  10. **WOFF2 collections** — `dist/rekha-woff.cyr` refuses a `ttcf`-flavoured WOFF2 (0.4.6). Now that
      rekha reads a plain `.ttc`, what is left is the CollectionDirectory that sits between the table
      directory and the compressed data, mapping each face to indices in the shared table directory.

@@ -26,3 +26,6 @@ Thumbs.db
 # Coverage
 *.profraw
 coverage/
+
+# Claude Code worktrees for spawned tasks — never part of the repo.
+/.claude/

@@ -1,0 +1,177 @@
+# @internal — CFF2: the variable-font charstring table (0.4.9).
+#
+# cff2.cyr — resolve a 'CFF2' table at rekha_font_open and let cff.cyr's Type 2 interpreter decode
+# its charstrings, so a CFF2 face draws through rekha_load_glyph / rekha_glyph_to_sdpath /
+# rekha_char_to_sdpath with no consumer change, exactly as an 'OTTO' CFF face does.
+#
+# ⭐ THE DEFAULT INSTANCE, AND ONLY THAT. A CFF2 font is a variable font: its charstrings carry
+# `blend` operators whose deltas move every point as the design axes move. rekha decodes the font at
+# its DEFAULT location, where every region's scalar is zero and each blended value is simply its
+# default — which is the instance a consumer that does not set axis coordinates wants, and the one
+# `fvar`'s defaults name. Applying non-default coordinates needs `fvar` / `avar` and the region
+# scalars, which rekha does not read; the roadmap carries that separately.
+#
+# WHAT IS DIFFERENT FROM CFF (Adobe TN 5176 vs the OpenType CFF2 chapter), and it is most of the
+# container:
+#   - Header is 5 bytes: major u8 (= 2) · minor u8 · headerSize u8 (>= 5) · topDictLength u16.
+#   - The Top DICT is NOT an INDEX. It is topDictLength raw bytes at cff + headerSize.
+#   - There is no Name INDEX, no String INDEX, no charset and no encoding.
+#   - Every INDEX counts in u32, not u16 — including a count-0 one, which is 4 bytes, not 2.
+#     cff.cyr's readers take the width (`rekha_cff_idx_next` / `_obj`), so the bounds logic is not
+#     duplicated here.
+#   - An FDArray is REQUIRED even for a single Font DICT; an FDSelect is omitted when there is one.
+#   - Top DICT `vstore` (24) points at the ItemVariationStore, and a Private DICT `vsindex` (22)
+#     names the subtable its glyphs blend against.
+#   - The charstring dialect drops the leading width and `endchar` entirely and adds `vsindex` (15)
+#     and `blend` (16). cff.cyr's interpreter carries that as a mode (RC_V2), not a second copy.
+#
+# ⛔ WHAT IS REFUSED (the table resolves to nothing, and the face opens with no outlines):
+#   - a major version other than 2, or a headerSize under 5;
+#   - a Top DICT that does not lie inside the table, or that names no CharStrings or no FDArray;
+#   - any INDEX whose u32 count, offSize, offset array or last offset does not fit;
+#   - an FDSelect in a format other than 0 or 3 — CFF2's format 4 exists and rekha does not read it;
+#   - an ItemVariationStore whose declared length, format, subtable count or subtable offset does
+#     not fit, once something actually asks it for a region count;
+#   - a `vsindex` naming a subtable the store does not have, or appearing after a `blend` or twice
+#     (both are spec MUSTs, enforced in cff.cyr).
+# ⚠ A `blend` in a font with NO variation store is a no-op that keeps its default values rather than
+# a refusal: there are no deltas to drop, and the rendered result is the one the default instance
+# asks for. An explicit `vsindex` into a store that is not there IS refused — it names something.
+
+var REKHA_TAG_CFF2 = 0x43464632;   # 'CFF2'
+
+# The number of regions ItemVariationData[idx] blends over — which is how many delta values one
+# `blend` drops per blended number. -1 when the store, the index or any bound does not hold.
+#
+# VariationStore: u16 length, then the ItemVariationStore it sizes.
+# ItemVariationStore: format u16 (= 1) · variationRegionListOffset u32 · itemVariationDataCount u16
+#   · itemVariationDataOffsets[count] u32, all offsets from the store's own start.
+# ItemVariationData: itemCount u16 · wordDeltaCount u16 · regionIndexCount u16 · the region indexes.
+# ⚠ Only regionIndexCount is read. The region list and the delta sets are what a NON-default
+# instance would need, and rekha never reaches for them.
+fn rekha_cff2_regions(buf, vstore, end, idx): i64 {
+    if (vstore == 0) { return 0 - 1; }
+    if (idx < 0) { return 0 - 1; }
+    if (vstore + 2 > end) { return 0 - 1; }
+    var ivs = vstore + 2;
+    var ivend = ivs + rekha_rd_u16(buf, vstore);
+    if (ivend > end) { return 0 - 1; }
+    if (ivs + 8 > ivend) { return 0 - 1; }
+    if (rekha_rd_u16(buf, ivs) != 1) { return 0 - 1; }
+    var cnt = rekha_rd_u16(buf, ivs + 6);
+    if (idx >= cnt) { return 0 - 1; }
+    if (ivs + 8 + cnt * 4 > ivend) { return 0 - 1; }
+    var ivd = ivs + rekha_rd_u32(buf, ivs + 8 + idx * 4);
+    if (ivd < ivs) { return 0 - 1; }
+    if (ivd + 6 > ivend) { return 0 - 1; }
+    return rekha_rd_u16(buf, ivd + 4);
+}
+
+# The region count a Font DICT's glyphs start from: its Private DICT's `vsindex` (22) resolved
+# through the store, or 0. -1 only when an explicit vsindex names something the store does not have.
+# ⚠ Lenient in two places, on purpose. No Private DICT, no vsindex operator, or no variation store
+# all give 0 — a `blend` then drops nothing and keeps its defaults, which is the right rendering for
+# the default instance. An index that IS written down and does not resolve is a refusal.
+fn rekha_cff2_priv_regions(buf, cff, end, a, b, vstore): i64 {
+    if (vstore == 0) { return 0; }
+    var d: i64[3];
+    if (rekha_cff_dict_op_max(buf, a, b, 18, &d, 27) == 0) { return 0; }
+    if (load64(&d) < 2) { return 0; }
+    var size = load64(&d + 16);
+    var poff = load64(&d + 8);
+    if (size < 0 || poff < 0) { return 0; }
+    var pa = cff + poff;
+    var pb = pa + size;
+    if (pb > end) { return 0; }
+    if (rekha_cff_dict_op_max(buf, pa, pb, 22, &d, 27) == 0) {
+        # No vsindex written down: subtable 0 by default, and a store with nothing in it is not an
+        # error — it simply means no deltas.
+        var r0 = rekha_cff2_regions(buf, vstore, end, 0);
+        if (r0 < 0) { return 0; }
+        return r0;
+    }
+    return rekha_cff2_regions(buf, vstore, end, load64(&d + 8));
+}
+
+# Validate an FDSelect at `sel` covering `n` glyphs. 1 when rekha can read it, 0 otherwise.
+# ⛔ Formats 0 and 3 only. CFF2 also defines format 4 (u32 ranges, for fonts past 65,535 glyphs);
+# rekha refuses it rather than mis-reading its wider fields as format 3's.
+fn rekha_cff2_fdselect_ok(buf, sel, end, n): i64 {
+    if (sel + 1 > end) { return 0; }
+    var fmt = load8(buf + sel);
+    if (fmt == 0) {
+        if (sel + 1 + n > end) { return 0; }
+        return 1;
+    }
+    if (fmt != 3) { return 0; }
+    if (sel + 3 > end) { return 0; }
+    var nr = rekha_rd_u16(buf, sel + 1);
+    if (nr < 1) { return 0; }
+    if (sel + 3 + nr * 3 + 2 > end) { return 0; }
+    return 1;
+}
+
+# Resolve the 'CFF2' table of `f` into the RekhaFont cache, the way rekha_cff_resolve does for
+# 'CFF '. 1 when the face has usable CFF2 outlines, 0 otherwise. Called only when 'CFF ' is absent,
+# so a font carrying both keeps the behaviour it had before 0.4.9.
+fn rekha_cff2_resolve(f): i64 {
+    var c: i64[1];
+    var cff = rekha_find_table_len(f, REKHA_TAG_CFF2, &c);
+    if (cff == 0) { return 0; }
+    var end = cff + load64(&c);
+    var buf = load64(f);
+    if (cff + 5 > end) { return 0; }
+    if (load8(buf + cff) != 2) { return 0; }             # major version 2 (CFF 1 is the other table)
+    var hs = load8(buf + cff + 2);
+    if (hs < 5) { return 0; }
+    var ta = cff + hs;
+    var tb = ta + rekha_rd_u16(buf, cff + 3);            # the Top DICT is raw bytes, not an INDEX
+    if (tb > end) { return 0; }
+    if (ta > tb) { return 0; }
+    var gs = tb;                                          # the Global Subr INDEX follows it
+    if (rekha_cff_idx_next(buf, gs, end, 4) == 0) { return 0; }
+
+    var d: i64[3];
+    if (rekha_cff_dict_op_max(buf, ta, tb, 17, &d, 27) == 0) { return 0; }        # CharStrings
+    if (load64(&d + 8) < 0) { return 0; }
+    var cs = cff + load64(&d + 8);
+    if (rekha_cff_idx_next(buf, cs, end, 4) == 0) { return 0; }
+    var n = rekha_cff_idx_count_at(buf, cs, 4);
+    if (n < 1) { return 0; }
+
+    # ⛔ REQUIRED, unlike CFF: a CFF2 font's Private DICTs live in Font DICTs and nowhere else, so
+    # without an FDArray there is no Private DICT, no local Subrs and no vsindex to find.
+    if (rekha_cff_dict_op_max(buf, ta, tb, 1236, &d, 27) == 0) { return 0; }      # FDArray
+    if (load64(&d + 8) < 0) { return 0; }
+    var fdarray = cff + load64(&d + 8);
+    if (rekha_cff_idx_next(buf, fdarray, end, 4) == 0) { return 0; }
+    if (rekha_cff_idx_count_at(buf, fdarray, 4) < 1) { return 0; }
+
+    var fdselect = 0;
+    if (rekha_cff_dict_op_max(buf, ta, tb, 1237, &d, 27) != 0) {                  # FDSelect, optional
+        if (load64(&d + 8) < 0) { return 0; }
+        fdselect = cff + load64(&d + 8);
+        if (rekha_cff2_fdselect_ok(buf, fdselect, end, n) == 0) { return 0; }
+    }
+
+    var vstore = 0;
+    if (rekha_cff_dict_op_max(buf, ta, tb, 24, &d, 27) != 0) {                    # vstore, optional
+        if (load64(&d + 8) < 0) { return 0; }
+        vstore = cff + load64(&d + 8);
+        if (vstore + 2 > end) { return 0; }
+        if (vstore + 2 + rekha_rd_u16(buf, vstore) > end) { return 0; }
+    }
+
+    store64(f + 176, cs);
+    store64(f + 184, gs);
+    store64(f + 192, 0);                                  # no Top DICT Private: it is per Font DICT
+    store64(f + 200, fdarray);
+    store64(f + 208, fdselect);
+    store64(f + 216, cff);
+    store64(f + 224, end);
+    store64(f + 232, n);
+    store64(f + 240, 0);                                  # no charset, so no seac
+    store64(f + 256, 1);
+    store64(f + 264, vstore);
+    return 1;
+}

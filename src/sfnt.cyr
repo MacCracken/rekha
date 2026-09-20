@@ -139,6 +139,9 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +208 cff_fdsel   (i64 — its FDSelect; 0 otherwise)
 #   +216 cff_off     (i64 — the CFF table's start)    +224 cff_end (its declared end)
 #   +232 cff_count   (i64 — the CharStrings count: the glyph ids with an outline)
+#   +256 cff2       (i64 — 1 when the outlines came from a 'CFF2' table rather than 'CFF ', which
+#                      is what puts cff.cyr's Type 2 interpreter into its CFF2 dialect. 0.4.9.)
+#   +264 cff2_vstore (i64 — that table's ItemVariationStore, 0 = none)
 #   +248 min_table  (i64 — the lowest byte offset a table of THIS face may start at. For a plain
 #                      SFNT that is the end of its own directory, which is the rule rekha has always
 #                      enforced; for a face inside a COLLECTION it is the end of the TTC header and
@@ -161,7 +164,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 256;
+var REKHA_FONT_SIZE = 272;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -252,7 +255,7 @@ fn rekha_font_open_index(buf, len, index): i64 {
     return f;
 }
 
-# Fill the table cache (+40..+255) of a RekhaFont whose +0..+32 header fields are set.
+# Fill the table cache (+40..+271) of a RekhaFont whose +0..+32 header fields are set.
 # Every table goes through rekha_find_table_len (extent rule) and, where a fixed field is read,
 # a minimum declared length. Stack cell only — 0 B of heap.
 fn rekha_font_resolve(f): i64 {
