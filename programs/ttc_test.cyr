@@ -1,0 +1,360 @@
+# programs/ttc_test.cyr — RUN test for TrueType Collections (src/sfnt.cyr): 'ttcf' files, the
+# per-face offset table, shared table data, and every refusal rule.
+#
+# ⭐ THE COLLECTIONS ARE BUILT HERE, FROM THE EMBEDDED FACE — no .ttc is committed, and there is not
+# one on the dev host to borrow. Group A builds a three-face collection in which every face shares
+# ONE copy of the table data and requires all three to decode to the same digest as the face opened
+# directly; group B is the layout that makes collections different from anything rekha opened
+# before; group C every refusal; group D a guard differential and a truncation sweep.
+#
+# ⛔ WHAT GROUP B EXISTS FOR. Face 0's directory sits above its tables, the way a plain .ttf is laid
+# out. Faces 1 and 2 have their directories BELOW the shared table data — which is what fontTools
+# produces and what every real collection looks like — so their tables start at offsets far under
+# their own dir_end. That is precisely the rule rekha enforced until 0.4.8, and a face laid out this
+# way would have opened with every table reported absent.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+include "fonts/face_data.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "ttc_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var g_face = 0;
+var g_face_len = 0;
+var g_t = 0;          # the collection under test
+var g_tlen = 0;
+var g_b = 0;          # a scratch copy for the one-defect variants
+var g_g = 0;          # the guard buffer
+var TCAP = 2097152;
+
+fn font_digest(f): i64 {
+    if (f == 0) { return 0; }
+    var h = 0xcbf29ce484222325;
+    var ng = rekha_glyph_count(f);
+    h = (h ^ ng) * 0x100000001b3;
+    h = (h ^ rekha_units_per_em(f)) * 0x100000001b3;
+    var gid = 0;
+    while (gid < ng) {
+        var o = rekha_load_glyph(f, gid);
+        h = (h ^ rekha_outline_n_contours(o)) * 0x100000001b3;
+        var np = rekha_outline_n_points(o);
+        h = (h ^ np) * 0x100000001b3;
+        h = (h ^ rekha_advance_width(f, gid)) * 0x100000001b3;
+        var k = 0;
+        while (k < np) {
+            h = (h ^ load64(rekha_outline_xs(o) + k * 8)) * 0x100000001b3;
+            h = (h ^ load64(rekha_outline_ys(o) + k * 8)) * 0x100000001b3;
+            k = k + 1;
+        }
+        gid = gid + 1;
+    }
+    var cp = 0;
+    while (cp < 65536) { h = (h ^ rekha_char_to_glyph(f, cp)) * 0x100000001b3; cp = cp + 1; }
+    return h;
+}
+
+fn wr_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn wr_u32(buf, off, v): i64 {
+    wr_u16(buf, off, (v >> 16) & 65535);
+    wr_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+# Write a face's offset table + directory at `at`, naming `cnt` of the source face's tables — the
+# ones whose index appears in `pick` (i64 per table, 1 = include) — at the offsets `newoff` records.
+fn face_dir(s, at, newoff, pick, cnt): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var pow2 = 1;
+    var sel = 0;
+    while (pow2 * 2 <= cnt) {
+        pow2 = pow2 * 2;
+        sel = sel + 1;
+    }
+    wr_u32(g_t, at, rekha_rd_u32(s, 0));
+    wr_u16(g_t, at + 4, cnt);
+    wr_u16(g_t, at + 6, pow2 * 16);
+    wr_u16(g_t, at + 8, sel);
+    wr_u16(g_t, at + 10, cnt * 16 - pow2 * 16);
+    var d = at + 12;
+    var i = 0;
+    while (i < n) {
+        if (load64(pick + i * 8) != 0) {
+            var e = 12 + i * 16;
+            wr_u32(g_t, d, rekha_rd_u32(s, e));
+            wr_u32(g_t, d + 4, rekha_rd_u32(s, e + 4));
+            wr_u32(g_t, d + 8, load64(newoff + i * 8));
+            wr_u32(g_t, d + 12, rekha_rd_u32(s, e + 12));
+            d = d + 16;
+        }
+        i = i + 1;
+    }
+    return d;
+}
+
+var g_newoff = 0;
+var g_pick_all = 0;
+var g_pick_sub = 0;
+var g_dir0 = 0;
+var g_dir1 = 0;
+var g_dir2 = 0;
+
+# Build a three-face collection over ONE copy of the source face's tables.
+#   header · face 0's directory · the table data · face 1's directory · face 2's directory
+# ⭐ So face 0 looks like a plain .ttf and faces 1 and 2 do not: their tables lie BELOW their own
+# directories, which is how every real collection is laid out.
+# Face 1 names only the seven tables rekha reads, so a subset face must still decode identically.
+fn ttc_build(s, nfaces): i64 {
+    memset(g_t, 0, TCAP);
+    var n = rekha_rd_u16(s, 4);
+    var cnt_sub = 0;
+    var i = 0;
+    while (i < n) {
+        var tag = rekha_rd_u32(s, 12 + i * 16);
+        var want = 0;
+        if (tag == REKHA_TAG_HEAD || tag == REKHA_TAG_MAXP || tag == REKHA_TAG_LOCA) { want = 1; }
+        if (tag == REKHA_TAG_GLYF || tag == REKHA_TAG_CMAP) { want = 1; }
+        if (tag == REKHA_TAG_HHEA || tag == REKHA_TAG_HMTX) { want = 1; }
+        store64(g_pick_all + i * 8, 1);
+        store64(g_pick_sub + i * 8, want);
+        cnt_sub = cnt_sub + want;
+        i = i + 1;
+    }
+    wr_u32(g_t, 0, REKHA_TAG_TTCF);
+    wr_u16(g_t, 4, 1);
+    wr_u32(g_t, 8, nfaces);
+    var at = 12 + nfaces * 4;
+    g_dir0 = at;
+    at = at + 12 + n * 16;
+    # one copy of every table, four-byte aligned, shared by all three faces
+    i = 0;
+    while (i < n) {
+        var e2 = 12 + i * 16;
+        var tl = rekha_rd_u32(s, e2 + 12);
+        memcpy(g_t + at, s + rekha_rd_u32(s, e2 + 8), tl);
+        store64(g_newoff + i * 8, at);
+        at = at + ((tl + 3) & (0 - 4));
+        i = i + 1;
+    }
+    g_dir1 = at;
+    at = at + 12 + cnt_sub * 16;
+    g_dir2 = at;
+    at = at + 12 + n * 16;
+    face_dir(s, g_dir0, g_newoff, g_pick_all, n);
+    face_dir(s, g_dir1, g_newoff, g_pick_sub, cnt_sub);
+    face_dir(s, g_dir2, g_newoff, g_pick_all, n);
+    wr_u32(g_t, 12, g_dir0);
+    if (nfaces > 1) { wr_u32(g_t, 16, g_dir1); }
+    if (nfaces > 2) { wr_u32(g_t, 20, g_dir2); }
+    return at;
+}
+
+# ── A) three faces, one copy of the tables ────────────────────────
+var g_want = 0;
+
+fn t_open(): i64 {
+    g_group = "A collection";
+    g_tlen = ttc_build(g_face, 3);
+    check(g_tlen > 0, 1);
+    check(rekha_ttc_count(g_t, g_tlen), 3);
+    var i = 0;
+    while (i < 3) {
+        var f = rekha_font_open_index(g_t, g_tlen, i);
+        check(f != 0, 1);
+        check(font_digest(f), g_want);
+        i = i + 1;
+    }
+    # face 0 is what a bare open gives, and what the container sniffer gives
+    check(font_digest(rekha_font_open(g_t, g_tlen)), g_want);
+    # ⛔ the faces really are distinct records over ONE buffer, not the same handle
+    var f0 = rekha_font_open_index(g_t, g_tlen, 0);
+    var f1 = rekha_font_open_index(g_t, g_tlen, 1);
+    check(f0 != f1, 1);
+    check(rekha_font_dir_off(f0) != rekha_font_dir_off(f1), 1);
+    check(rekha_font_num_tables(f0), rekha_rd_u16(g_face, 4));
+    check(rekha_font_num_tables(f1), 7);                  # the subset face names exactly seven
+    check(rekha_font_num_tables(f1) < rekha_font_num_tables(f0), 1);
+    # and they point into the SAME table bytes
+    check(rekha_find_table(f0, REKHA_TAG_GLYF), rekha_find_table(f1, REKHA_TAG_GLYF));
+    return 0;
+}
+
+# ── B) the layout that needed the change ────────────────────────
+fn t_layout(): i64 {
+    g_group = "B shared tables below the directory";
+    g_tlen = ttc_build(g_face, 3);
+    var f1 = rekha_font_open_index(g_t, g_tlen, 1);
+    var f2 = rekha_font_open_index(g_t, g_tlen, 2);
+    check(f1 != 0, 1);
+    # ⛔ THE POINT: faces 1 and 2 have their tables BELOW their own directories. Under the rule
+    # rekha enforced until 0.4.8 ("a table lies past its own directory") every one of these would
+    # be reported absent, and both faces would open with no glyphs at all.
+    check(rekha_find_table(f1, REKHA_TAG_GLYF) < rekha_font_dir_off(f1), 1);
+    check(rekha_find_table(f2, REKHA_TAG_HEAD) < rekha_font_dir_off(f2), 1);
+    check(rekha_glyph_count(f1) > 0, 1);
+    check(rekha_glyph_count(f1), rekha_glyph_count(rekha_font_open(g_face, g_face_len)));
+    check(rekha_units_per_em(f2), 2048);
+    # face 0 is the ordinary way round, and still is
+    var f0 = rekha_font_open_index(g_t, g_tlen, 0);
+    check(rekha_find_table(f0, REKHA_TAG_GLYF) > rekha_font_dir_off(f0), 1);
+    # ⛔ the floor is still a floor: a table claiming to start inside the TTC header is refused
+    check(rekha_font_open_index(g_t, g_tlen, 0) != 0, 1);
+    memcpy(g_b, g_t, g_tlen);
+    var ent = g_dir0 + 12;
+    var k = 0;
+    while (k < rekha_rd_u16(g_face, 4)) {
+        if (rekha_rd_u32(g_b, ent + k * 16) == REKHA_TAG_HEAD) {
+            wr_u32(g_b, ent + k * 16 + 8, 8);             # inside the TTC header
+        }
+        k = k + 1;
+    }
+    var fb = rekha_font_open_index(g_b, g_tlen, 0);
+    check(fb != 0, 1);                                    # a bad table never fails the open
+    check(rekha_units_per_em(fb), 0);                     # it is simply absent
+    # ⛔ and a table that RUNS THROUGH this face's own directory is refused too, which is what the
+    # lowered floor would otherwise have let past
+    memcpy(g_b, g_t, g_tlen);
+    ent = g_dir2 + 12;
+    k = 0;
+    while (k < rekha_rd_u16(g_face, 4)) {
+        if (rekha_rd_u32(g_b, ent + k * 16) == REKHA_TAG_HEAD) {
+            wr_u32(g_b, ent + k * 16 + 8, g_dir2 - 4);
+            wr_u32(g_b, ent + k * 16 + 12, 64);
+        }
+        k = k + 1;
+    }
+    var f2b = rekha_font_open_index(g_b, g_tlen, 2);
+    check(f2b != 0, 1);
+    check(rekha_units_per_em(f2b), 0);
+    return 0;
+}
+
+# ── C) refusals ─────────────────────────────────
+fn t_refuse(): i64 {
+    g_group = "C refusals";
+    g_tlen = ttc_build(g_face, 3);
+    memcpy(g_b, g_t, g_tlen);
+    check(rekha_font_open_index(g_b, g_tlen, 3), 0);        # past the collection
+    check(rekha_font_open_index(g_b, g_tlen, 99), 0);
+    check(rekha_font_open_index(g_b, g_tlen, 0 - 1), 0);
+    check(rekha_font_open_index(0, g_tlen, 0), 0);
+    check(rekha_font_open_index(g_b, 11, 0), 0);
+    wr_u32(g_b, 8, 0);                                      # numFonts 0
+    check(rekha_ttc_count(g_b, g_tlen), 0);
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u32(g_b, 8, 2000);         # past the cap
+    check(rekha_ttc_count(g_b, g_tlen), 0);
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u32(g_b, 8, 1000000);      # offset array past the file
+    check(rekha_ttc_count(g_b, g_tlen), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u32(g_b, 12, 8);           # a face inside the TTC header
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u32(g_b, 12, g_tlen - 4);  # a face offset table past the end
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u32(g_b, g_dir0, REKHA_TAG_TTCF);   # a member that is a collection
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u32(g_b, g_dir0, 0);       # and one with no sfnt version at all
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    memcpy(g_b, g_t, g_tlen); wr_u16(g_b, g_dir0 + 4, 60000);        # a directory past the file
+    check(rekha_font_open_index(g_b, g_tlen, 0), 0);
+    # ⚠ a plain SFNT is not a collection, and says so without failing to open
+    check(rekha_ttc_count(g_face, g_face_len), 0);
+    check(rekha_font_open_index(g_face, g_face_len, 1), 0);
+    check(font_digest(rekha_font_open_index(g_face, g_face_len, 0)), g_want);
+    # a one-face collection is a collection
+    g_tlen = ttc_build(g_face, 1);
+    check(rekha_ttc_count(g_t, g_tlen), 1);
+    check(font_digest(rekha_font_open_index(g_t, g_tlen, 0)), g_want);
+    check(rekha_font_open_index(g_t, g_tlen, 1), 0);
+    return 0;
+}
+
+# ── D) a guard differential, and every truncation ─────────────────────
+fn guarded(src, len, fill, index): i64 {
+    var p = g_g + 4096;
+    memset(p - 256, fill, 256);
+    memcpy(p, src, len);
+    memset(p + len, fill, 256);
+    var h = 0;
+    h = (h ^ rekha_ttc_count(p, len)) * 0x100000001b3;
+    var f = rekha_font_open_index(p, len, index);
+    h = (h ^ font_digest(f)) * 0x100000001b3;
+    if (f != 0) {
+        h = (h ^ rekha_font_num_tables(f)) * 0x100000001b3;
+        h = (h ^ rekha_font_dir_off(f)) * 0x100000001b3;
+    }
+    return h;
+}
+
+fn t_guard(): i64 {
+    g_group = "D guard + truncation";
+    g_tlen = ttc_build(g_face, 3);
+    var i = 0;
+    while (i < 3) {
+        check(guarded(g_t, g_tlen, 0xA5, i), guarded(g_t, g_tlen, 0x5A, i));
+        i = i + 1;
+    }
+    var cut = 0;
+    var bad = 0;
+    while (cut < g_tlen) {
+        memcpy(g_b, g_t, cut);
+        if (guarded(g_b, cut, 0xA5, 0) != guarded(g_b, cut, 0x5A, 0)) { bad = bad + 1; }
+        if (guarded(g_b, cut, 0xA5, 2) != guarded(g_b, cut, 0x5A, 2)) { bad = bad + 1; }
+        if (cut < 64) { cut = cut + 1; } else { cut = cut + 4093; }
+    }
+    check(bad, 0);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_face_len = rekha_face_default_len();
+    g_face = alloc(g_face_len);
+    rekha_face_default_copy(g_face, g_face_len);
+    check(rekha_face_default_verify(g_face, g_face_len), 1);
+    g_t = alloc(TCAP);
+    g_b = alloc(TCAP);
+    g_g = alloc(TCAP);
+    g_newoff = alloc(512 * 8);
+    g_pick_all = alloc(512 * 8);
+    g_pick_sub = alloc(512 * 8);
+    g_want = font_digest(rekha_font_open(g_face, g_face_len));
+    t_open();
+    t_layout();
+    t_refuse();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "ttc_test: PASS (three faces over one copy of the tables, layout, refusals, guard; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -5,6 +5,77 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.8] - 2026-09-20 — TrueType Collections
+
+A `.ttc` / `.otc` carries several faces in one file, each with its own SFNT offset table, all of
+them **sharing table data** — which is the whole point of the format and the reason CJK families
+ship this way. `rekha_ttc_count` says how many faces; `rekha_font_open_index` opens one.
+`rekha_font_open` opens face 0 of a collection, so an existing consumer handed a `.ttc` now gets a
+working font instead of nothing. Roadmap v0.4.x item 8, first half.
+
+⭐ **CHECKED AGAINST COLLECTIONS fontTools AUTHORED**, and the second file is the one that matters:
+
+| | faces | glyphs | result |
+|---|---:|---:|---|
+| three unrelated fonts in one `.ttc` | 3 | 948 | every face IDENTICAL to its source font |
+| two faces built from ONE font | 2 | 1,350 | every face IDENTICAL to its source font |
+
+In the second, face 1 shares **17 of its 18 tables** with face 0 — 135,624 bytes for what is 133,172
+bytes as a single font — and its `glyf` resolves to offset **320** while its own directory begins at
+**133,204**.
+
+### Changed — the bounds rule a collection breaks, and what replaced it
+
+⛔ **rekha's rule was "a table lies past its own directory"** (`off >= 12 + numTables * 16`). That is
+true of every `.ttf` ever written and **false of almost every collection face**: a table shared with
+an earlier face sits far below this face's directory, so the rule would have reported table after
+table absent and opened a face with no glyphs at all — silently, since a missing table has never
+failed an open.
+
+⇒ Each face now carries the floor that IS true of it, at `+248` (`REKHA_FONT_SIZE` **248 → 256**):
+
+- a plain SFNT keeps `12 + numTables * 16`, exactly the old rule, so nothing about opening a `.ttf`
+  moves;
+- a face inside a collection gets the end of the TTC header and its offset array, below which no
+  table can legitimately begin.
+
+⛔ **Lowering a floor loses something, so the check that the floor was also doing is now explicit:**
+a table whose span runs through this face's own offset table and directory is refused. For a plain
+SFNT that test is unreachable (the floor already covers it) and it changes no result; for a
+collection face it is the only thing left saying so. Both directions are gated —
+`programs/ttc_test.cyr` group B corrupts one directory entry to point into the TTC header and
+another to run through the face's own directory, and requires the table absent and the open to
+SUCCEED either way.
+
+### Added — `programs/ttc_test.cyr` (53 checks)
+
+No `.ttc` is committed and there is not one on the dev host to borrow, so the suite builds
+collections from the embedded face: three faces over ONE copy of the table data, laid out
+header · face 0's directory · the tables · face 1's directory · face 2's directory. So face 0 reads
+like a plain `.ttf` and faces 1 and 2 do not — their tables lie below their own directories, the
+real-world shape. Face 1 names only the seven tables rekha reads, and a subset face must still
+decode to the same digest.
+
+Group C is the refusals, each a one-defect copy: an index past the collection, a negative index,
+`numFonts` of 0 or past `REKHA_TTC_MAXFONTS`, an offset array past the file, a face offset inside
+the TTC header, a face offset table past the end, a member whose own sfntVersion is `ttcf`, and a
+member directory that overruns the file. Group D is a guard differential over three faces plus a
+truncation sweep.
+
+⚠ **A plain `.ttf` answers 0 to `rekha_ttc_count` and opens perfectly.** 0 means "not a collection",
+not "no font" — `rekha_font_open_index(buf, len, 0)` is the right call for either, and index 1 of a
+non-collection is refused.
+
+### Changed — the roadmap item split, because the two halves share nothing
+
+Item 8 was filed as "TrueType Collections **and** CFF2". The collection half is here; **CFF2 is now
+item 9** on its own. They have nothing in common beyond both being deferred: CFF2 is a different
+container (no Name or String INDEX, a Top DICT that is not an INDEX, a required FDArray, a 32-bit
+CharStrings INDEX) and a different charstring dialect (`blend`, `vsindex`, no `endchar`) over an
+ItemVariationStore. A new **item 10** records what is left for WOFF2 collections, which
+`dist/rekha-woff.cyr` still refuses: the CollectionDirectory between the table directory and the
+compressed data.
+
 ## [0.4.7] - 2026-09-20 — CFF `seac`, the accented glyph built from two others
 
 A four-argument `endchar` says: draw glyph `bchar` at the origin, then glyph `achar` displaced by

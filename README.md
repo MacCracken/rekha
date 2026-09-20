@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.7
+Version: 0.4.8
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,20 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.8 — TrueType Collections (shipped).** `rekha_ttc_count` and `rekha_font_open_index` open
+  face *n* of a `.ttc` / `.otc`: several faces in one file, each with its own offset table, all of
+  them SHARING table data. `rekha_font_open` opens face 0 of a collection, so an existing consumer
+  handed one gets a working font instead of nothing.
+  ⭐ **Checked against a collection fontTools authored, and the interesting one is the second file:**
+  two faces built from one font, so face 1 shares **17 of its 18 tables** with face 0 and its `glyf`
+  sits **132,884 bytes BELOW its own directory**. Both faces decode identically to the source font
+  (1,350 glyphs), as do all three faces of a 3-font collection (948 glyphs).
+  ⛔ **That layout is why this needed more than a header parse.** rekha's bounds rule was "a table
+  lies past its own directory", which is true of every `.ttf` and false of almost every collection
+  face. Each face now carries the floor that IS true of it (`REKHA_FONT_SIZE` 248 → 256) — the end
+  of the TTC header — plus an overlap test that still refuses a table running through the face's own
+  header and directory, which the lowered floor alone would let past.
+  ⚠ A `ttcf`-flavoured **WOFF2** is still refused; that needs the CollectionDirectory, item 10 above.
 - **v0.4.7 — CFF `seac` (shipped).** A four-argument `endchar` is an accented glyph built from two
   others: base at the origin, accent displaced by (adx, ady), both named by **Standard Encoding
   code** and resolved through the font's **charset** (formats 0 / 1 / 2 and the ISOAdobe default).
@@ -168,8 +182,16 @@ shim, no external binaries.
   6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
   7. ~~**CFF `seac`**~~ — shipped in 0.4.7, below.
-  8. **TrueType Collections (`ttcf`)** and **CFF2** — a `.ttc` carries several faces in one file
-     (CJK faces ship this way) and CFF2 is the variable-font charstring format.
+  8. ~~**TrueType Collections (`ttcf`)**~~ — shipped in 0.4.8, below.
+  9. **CFF2** — the variable-font charstring format. ⚠ Split out of item 8 when the collection half
+     shipped: they were filed together but share nothing. CFF2 is a different container (no Name or
+     String INDEX, a Top DICT that is not an INDEX, a required FDArray, a 32-bit CharStrings INDEX)
+     and a different charstring dialect (`blend`, `vsindex`, no `endchar`) over an ItemVariationStore.
+     A default-instance decode — where `blend` reduces to its first k operands — is the tractable
+     first step and is what this item means.
+ 10. **WOFF2 collections** — `dist/rekha-woff.cyr` refuses a `ttcf`-flavoured WOFF2 (0.4.6). Now that
+     rekha reads a plain `.ttc`, what is left is the CollectionDirectory that sits between the table
+     directory and the compressed data, mapping each face to indices in the shared table directory.
 - **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
   sizes.
 
