@@ -165,6 +165,26 @@ jobs:
           fi
           echo "leaf requirements pinned: base [$got_base], woff [$got_woff]"
 
+      - name: Verify the WOFF2 triplet vectors match the W3C table
+        # ⭐ WHY THIS GATE EXISTS. src/woff2.cyr decodes a point coordinate with ARITHMETIC where the
+        # spec gives a 128-row table (WOFF 2.0, 5.2) — no literal table in the library, at the cost
+        # of a closed form that a round-trip test CANNOT check, because programs/woff2_test.cyr's
+        # own encoder would share any mistake in it. programs/woff2_vectors.cyr is the independent
+        # half: the expected dx / dy for all 128 indices under two byte patterns, computed from the
+        # spec's table and from nothing in rekha. Same shape as the fonts/face_data.cyr gate below.
+        # ⚠ The table is TRANSCRIBED into scripts/woff2_triplet.py, so this gate needs no network;
+        # `python3 scripts/woff2_triplet.py verify <spec.html>` re-audits it against the W3C source
+        # when the spec moves, and is deliberately not run here.
+        run: |
+          regen="$RUNNER_TEMP/woff2_vectors.regen.cyr"
+          python3 scripts/woff2_triplet.py emit "$regen"
+          if ! cmp -s programs/woff2_vectors.cyr "$regen"; then
+            echo "ERROR: programs/woff2_vectors.cyr is stale."
+            echo "Run 'python3 scripts/woff2_triplet.py emit' and commit the result."
+            exit 1
+          fi
+          echo "programs/woff2_vectors.cyr matches the W3C triplet table"
+
       - name: Verify the embedded default face is in sync with its source .ttf
         # fonts/face_data.cyr is GENERATED from fonts/LiberationSans-Regular.ttf by
         # scripts/face2cyr.py and lives outside src/ on purpose: cyrfmt refuses files over

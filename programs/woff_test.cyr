@@ -17,6 +17,7 @@ include "programs/prelude.cyr"
 include "lib/sync.cyr"
 include "lib/sankoch.cyr"
 include "src/woff.cyr"
+include "src/woff2.cyr"
 include "fonts/face_data.cyr"
 
 var g_fails = 0;

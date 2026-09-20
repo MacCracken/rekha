@@ -28,11 +28,16 @@ modules = [
     "src/cff.cyr",
 ]
 
-# `[lib.woff]` (`cyrius distlib woff` -> dist/rekha-woff.cyr) is rekha PLUS src/woff.cyr, the WOFF 1.0
-# container reader. It calls sankoch's `zlib_decompress_capped` (sankoch >= 2.7.13), so it is a
-# separate bundle: `dist/rekha.cyr` must never require sankoch. A consumer that wants WOFF takes this
+# `[lib.woff]` (`cyrius distlib woff` -> dist/rekha-woff.cyr) is rekha PLUS the two web-container
+# readers: src/woff.cyr (WOFF 1.0, zlib per table) and src/woff2.cyr (WOFF2 — one Brotli stream and
+# the glyf / loca and hmtx transforms, 0.4.6). Both call into sankoch — `zlib_decompress_capped`
+# (>= 2.7.13) and `brotli_decompress_capped` (>= 2.8.0) — so this stays a separate bundle:
+# `dist/rekha.cyr` must never require sankoch. A consumer that wants either container takes this
 # bundle INSTEAD of dist/rekha.cyr and brings sankoch itself (the stdlib `sankoch` leaf + `sync`).
-# rekha's own programs/woff_test.cyr includes lib/sync.cyr and lib/sankoch.cyr from the toolchain pin.
+# ⭐ ONE bundle for both, deliberately: sankoch's ADR 0001 shaped its own `[lib.woff]` profile the
+# same way — the zlib module list PLUS Brotli — so a consumer links one sankoch and gets both.
+# ⚠ ORDER: woff2.cyr must FOLLOW woff.cyr, whose rekha_wr_u16 / rekha_wr_u32 / rekha_pad4 it uses.
+# rekha's own tests include lib/sync.cyr and lib/sankoch.cyr from the toolchain pin.
 [lib.woff]
 modules = [
     "src/error.cyr",
@@ -41,6 +46,7 @@ modules = [
     "src/cmap.cyr",
     "src/cff.cyr",
     "src/woff.cyr",
+    "src/woff2.cyr",
 ]
 
 [deps]

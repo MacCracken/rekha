@@ -5,6 +5,118 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] - 2026-09-20 — WOFF2
+
+`rekha_font_open_woff2` opens a `.woff2`. WOFF 1.0 unwraps a container and hands back the same
+bytes; WOFF2 concatenates every table into ONE Brotli stream and **transforms three of them**, so
+this is not a container reader — it reconstructs a font. `src/woff2.cyr`, 1,262 lines, in
+`[lib.woff]` beside WOFF 1.0. ⚠ **`dist/rekha.cyr` did not change by a line**: the base bundle is
+2,353 lines before and after, and its sidecar is still the single leaf `string`. Roadmap v0.4.x
+item 4, whose dependency landed in sankoch 2.8.0 one release ago.
+
+⭐ **MEASURED AGAINST AN INDEPENDENT DECODER, on every WOFF2 on this host.** 280 unique files —
+Liberation, KaTeX, Fira Sans / Mono, Source Serif 4, Source Code Pro, NanumBarunGothic and Xiaolai
+CJK — decompressed with **fontTools 4.65.0** to reference SFNTs, then both sides opened through
+rekha's own loader so the only variable is the reconstruction:
+
+| | |
+|---|---:|
+| files whose glyphs, advances and cmap are IDENTICAL to fontTools' | **280 of 280** |
+| glyphs compared | **111,732** |
+| failures to open | **0** |
+| rekha's rebuilt SFNTs, total | 32,483,072 B |
+| fontTools' rebuilt SFNTs, total | 32,334,048 B (**+0.46%**) |
+
+### Added — the container, the directory, and one Brotli stream
+
+- **`rekha_font_open_woff2(buf, len)`**, and the granular trio under it —
+  `rekha_woff2_block_size` / `_inflate` / `_sfnt_size` / `_decode`.
+- ⚠ **`rekha_font_open_any` MOVED from `src/woff.cyr` to `src/woff2.cyr`** and now sniffs all three
+  of `wOFF`, `wOF2` and a bare SFNT. Same name, same signature, same bundle — a consumer of
+  `dist/rekha-woff.cyr` sees nothing. A program that includes only `src/woff.cyr` must now also
+  include `src/woff2.cyr`; `programs/woff_test.cyr` does.
+- The variable-length table directory: the 63 **known table tags**, `UIntBase128` and `255UInt16`.
+  ⛔ UIntBase128 enforces all three of the spec's MUSTs — no leading `0x80`, no sequence past five
+  bytes, nothing above 2^32-1 — while 255UInt16 deliberately enforces NO canonical form, because
+  the spec requires a decoder to accept all three spellings of a value.
+- ⛔ **Two things WOFF 1.0's API could do that this one cannot, said plainly.** `rekha_woff2_sfnt_size`
+  cannot answer from the container alone — a transformed glyf's rebuilt size is a property of its
+  point data, and the spec says the `origLength` beside it "should be treated only as a reference" —
+  so it takes the inflated block. And an open costs **two** allocations where WOFF 1.0 needed one:
+  the inflated table data has to exist somewhere before it can be reconstructed, and rekha's seam
+  has no free, so that scratch stays charged. Open a WOFF2 once, outside a per-frame hook.
+
+### Added — the glyf / loca reverse transform
+
+Seven substreams walked in lockstep, one glyph at a time, with the offset each glyph lands at
+becoming the loca table. Simple glyphs, composites (records copied verbatim), empty glyphs, the
+bbox bitmap with both the explicit and the INFERRED path, instructions, and the optional
+`overlapSimpleBitmap`.
+
+- ⭐ **The 128-row "Triplet Encoding" table (spec 5.2) is ARITHMETIC, not a literal table** — six
+  ranges, a base, a nibble split and two signs. ⛔ **A round-trip test cannot check that**, because
+  `programs/woff2_test.cyr`'s own encoder would share any mistake in it. So
+  `programs/woff2_vectors.cyr` is generated from the W3C table by `scripts/woff2_triplet.py` and
+  gated in CI exactly as `fonts/face_data.cyr` is: **all 128 indices under two byte patterns, 256
+  vectors, every one agreeing** — plus that the off-curve bit changes no coordinate and that one
+  byte short of what an index needs is a refusal. The script's `verify` mode re-extracts the table
+  from the W3C HTML and required a byte-equal match before any of this was written.
+- ⛔ `>>` **is logical in Cyrius.** Every shift in the decoder is on a non-negative value for that
+  reason and the signs are applied afterwards as `0 - v` — the same class of defect sadish 0.11.0
+  caught in its own pattern sampler.
+- ⚠ **A rebuilt glyf is not byte-identical to the original and cannot be.** The spec is explicit
+  that several encodings of one outline are valid. rekha's is deterministic and plain: one flag byte
+  per point, no REPEAT run-length. Measured over the corpus, that costs **0.46%** against fontTools.
+- ⛔ A point delta or absolute coordinate outside Int16 is REFUSED, not truncated. The 16-bit
+  triplet forms can express ±65535, which no conforming font uses, and a silently misplaced point
+  is the worst failure a font parser has.
+
+### Added — the hmtx reverse transform
+
+Left side bearings rebuilt from each glyph's xMin, for the proportional run, the monospaced run or
+both. ⛔ hmtx is reconstructed **last**, after glyf and loca are written, because it reads those
+xMin values back out of them.
+
+### Added — `programs/woff2_test.cyr` (127 checks) and its two encoders
+
+- ⛔ **sankoch 2.8.0 decodes Brotli and does not encode it** (an encoder is its 2.8.1), so the suite
+  emits RFC 7932 **stored** meta-blocks by hand — which is what the roadmap meant by testing
+  "on transformed-but-uncompressed tables": the tables get the real transform, the Brotli layer
+  around them is stored. Group S proves the emitter against sankoch's own decoder at three sizes
+  spanning the 4-, 5- and 6-nibble MLEN forms before anything else trusts it.
+- A **WOFF2 encoder** for the glyf transform, picking the NARROWEST of the six triplet forms per
+  point so a round trip over a real face drives all six.
+- Group B round-trips the face through both transforms three ways (glyf+loca, and hmtx, and the
+  overlap bitmap forced present) and requires an identical font digest each time, with hmtx coming
+  back byte for byte. ⚠ The face's own left side bearings are first aligned to xMin, because the
+  hmtx transform is only *applicable* to a font where they already match — otherwise the
+  elimination path would silently never run.
+- Groups R and G: thirteen one-defect container copies, six one-defect copies of the table-data
+  block, a guard differential and a truncation sweep over every cut.
+
+### Fixed — a cursor the write pass left one varint short
+
+⛔ The glyph stream holds a glyph's coordinates and THEN its `instructionLength`. The write pass
+rewinds to re-walk the points and was landing back after the coordinates but before that varint, so
+every following glyph decoded its triplets from the wrong byte. Found by
+`rekha_w2_glyf_all`'s every-substream-exactly-consumed check, which exists for exactly this.
+
+### Changed — the bundle, and one new CI gate
+
+- `[lib.woff]` is now rekha plus `src/woff.cyr` **and** `src/woff2.cyr`; the bundle goes 2,554 →
+  3,819 lines and its sidecar is unchanged (`string sankoch`). ⚠ Order matters: woff2 uses woff's
+  `rekha_wr_u16` / `rekha_wr_u32` / `rekha_pad4`.
+- `programs/woff_dist_test.cyr` gained six checks that the WOFF2 half really folded into the
+  SHIPPED bundle. ⛔ `distlib --check` proves the bundle matches `src/`; it cannot prove the
+  `[lib.woff]` module list names `woff2.cyr` at all — drop that line and every other suite still
+  passes, because they include `src/` directly.
+- ⛔ **Font collections (`ttcf`) are refused**, at the directory parse rather than part-way: a
+  collection puts a CollectionDirectory between the table directory and the compressed data, so the
+  data offset would otherwise point into it and every table would decode from the wrong bytes.
+  Roadmap v0.4.x item 8.
+- sankoch's floor for `dist/rekha-woff.cyr` rises to **2.8.0** (Brotli). `dist/rekha.cyr` still
+  requires no sankoch at all.
+
 ## [0.4.5] - 2026-09-20 — the toolchain moves, and the gates that could not see it
 
 A pin release: **`cyrius` 6.6.4 → 6.6.6**, **`[deps.sadish]` 0.9.0 → 0.11.2**, `lib/` re-resolved

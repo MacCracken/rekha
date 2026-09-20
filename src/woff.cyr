@@ -190,12 +190,7 @@ fn rekha_font_open_woff(buf, len): i64 {
     return rekha_font_open(dst, size);
 }
 
-# @public — open font bytes of either container: a WOFF 1.0 file ('wOFF') goes through
-# rekha_font_open_woff, anything else through rekha_font_open. 0 as either would return.
-fn rekha_font_open_any(buf, len): i64 {
-    if (buf == 0) { return 0; }
-    if (len >= 4) {
-        if (rekha_rd_u32(buf, 0) == REKHA_WOFF_SIG) { return rekha_font_open_woff(buf, len); }
-    }
-    return rekha_font_open(buf, len);
-}
+# ⚠ `rekha_font_open_any`, the container-sniffing entry, MOVED TO src/woff2.cyr in 0.4.6 — it has to
+# know every container rekha reads, and WOFF2 is defined there. Both modules are in `[lib.woff]`, so
+# a consumer of that bundle sees no change; a program that includes only this file must now include
+# src/woff2.cyr too (programs/woff_test.cyr does).

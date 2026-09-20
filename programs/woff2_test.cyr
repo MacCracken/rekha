@@ -1,0 +1,1203 @@
+# programs/woff2_test.cyr — RUN test for WOFF2 (src/woff2.cyr): the container, the table directory,
+# the glyf / loca and hmtx transforms, the reconstructed SFNT, and every refusal rule.
+#
+# ⭐ THE CONTAINERS ARE BUILT HERE, FROM THE EMBEDDED FACE — no converted font is committed. That
+# takes two things sankoch cannot do for us:
+#   1. ⛔ sankoch 2.8.0 DECODES Brotli and does not encode it (an encoder is its 2.8.1). So this file
+#      emits RFC 7932 STORED meta-blocks — the uncompressed form — by hand, and group S proves the
+#      emitter against sankoch's own decoder before any of it is trusted. That is exactly what the
+#      roadmap meant by testing WOFF2 "on transformed-but-uncompressed tables": the TABLES get the
+#      real transform, the Brotli layer around them is stored rather than compressed.
+#   2. A WOFF2 ENCODER for the glyf transform, which group C builds: the seven substreams, the bbox
+#      bitmap, the triplet coordinate encoding and the hmtx lsb elimination.
+#
+# ⚠ THE ENCODER HERE SHARES A MODEL WITH THE DECODER IT TESTS, so an end-to-end round trip cannot
+# by itself prove the triplet table right — both halves would agree on the same mistake. That is
+# what group T is for: it drives rekha_w2_triplet with vectors DERIVED FROM THE W3C TABLE by
+# scripts/woff2_triplet_check.py, independently of any encoder here.
+#
+# Includes lib/sync.cyr + lib/sankoch.cyr from the toolchain pin. Exit code = failed checks; each
+# failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+include "lib/sync.cyr"
+include "lib/sankoch.cyr"
+include "src/woff.cyr"
+include "src/woff2.cyr"
+include "fonts/face_data.cyr"
+include "programs/woff2_vectors.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "woff2_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var g_face = 0;
+var g_face_len = 0;
+var WCAP = 2097152;
+
+# ================================================================
+# A bit writer, and the RFC 7932 stored-stream emitter built on it. Brotli packs bits LSB-first
+# within each byte.
+# ================================================================
+var g_w2bw_buf = 0;
+var g_w2bw_at = 0;
+var g_w2bw_bit = 0;
+
+fn w2bw_init(buf): i64 {
+    g_w2bw_buf = buf;
+    g_w2bw_at = 0;
+    g_w2bw_bit = 0;
+    store8(buf, 0);
+    return 0;
+}
+
+fn w2bw_bits(v, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (((v >> i) & 1) != 0) {
+            store8(g_w2bw_buf + g_w2bw_at, load8(g_w2bw_buf + g_w2bw_at) | (1 << g_w2bw_bit));
+        }
+        g_w2bw_bit = g_w2bw_bit + 1;
+        if (g_w2bw_bit == 8) {
+            g_w2bw_bit = 0;
+            g_w2bw_at = g_w2bw_at + 1;
+            store8(g_w2bw_buf + g_w2bw_at, 0);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Pad to the next byte with ZEROS — the spec requires exactly that before an uncompressed payload
+# and after the last meta-block, and sankoch's decoder enforces it.
+fn w2bw_align(): i64 {
+    if (g_w2bw_bit != 0) {
+        g_w2bw_bit = 0;
+        g_w2bw_at = g_w2bw_at + 1;
+        store8(g_w2bw_buf + g_w2bw_at, 0);
+    }
+    return 0;
+}
+
+# One complete Brotli stream carrying (src, slen) verbatim in stored meta-blocks. Returns its byte
+# length. ⚠ The ISUNCOMPRESSED bit only exists on a NON-last meta-block, so the stream always ends
+# with a separate empty last block rather than marking the payload block last.
+fn brotli_store(src, slen, out): i64 {
+    w2bw_init(out);
+    w2bw_bits(0, 1);                                  # WBITS = 16, the one-bit form
+    var done = 0;
+    while (done < slen) {
+        var chunk = slen - done;
+        if (chunk > 16777216) { chunk = 16777216; }
+        w2bw_bits(0, 1);                              # ISLAST = 0
+        # MNIBBLES must be the SHORTEST that holds MLEN-1: a leading zero nibble is "exuberant" and
+        # sankoch refuses it.
+        var nnib = 4;
+        if (chunk - 1 > 65535) { nnib = 5; }
+        if (chunk - 1 > 1048575) { nnib = 6; }
+        w2bw_bits(nnib - 4, 2);
+        w2bw_bits(chunk - 1, nnib * 4);
+        w2bw_bits(1, 1);                              # ISUNCOMPRESSED
+        w2bw_align();
+        memcpy(out + g_w2bw_at, src + done, chunk);
+        g_w2bw_at = g_w2bw_at + chunk;
+        store8(out + g_w2bw_at, 0);
+        done = done + chunk;
+    }
+    w2bw_bits(1, 1);                                  # ISLAST
+    w2bw_bits(1, 1);                                  # ISLASTEMPTY
+    w2bw_align();
+    return g_w2bw_at;
+}
+
+# ── S) the stored-stream emitter, against sankoch's decoder ──────────────────
+var g_s1 = 0;
+var g_s2 = 0;
+
+fn t_store(): i64 {
+    g_group = "S brotli stored";
+    # Three sizes across the nibble-count boundaries: one byte, one past 65536 (5 nibbles) and one
+    # past 1048576 (6 nibbles). Nothing else in this file is trustworthy until this is.
+    var sizes = 0;
+    var which = 0;
+    while (which < 3) {
+        if (which == 0) { sizes = 1; }
+        if (which == 1) { sizes = 70000; }
+        if (which == 2) { sizes = 1100000; }
+        var i = 0;
+        while (i < sizes) {
+            store8(g_s1 + i, (i * 31 + (i >> 8) * 7) & 255);
+            i = i + 1;
+        }
+        var clen = brotli_store(g_s1, sizes, g_s2);
+        check(clen > sizes, 1);
+        var back = g_s1 + 1200000;
+        check(brotli_decompress(g_s2, clen, back, 1200000), sizes);
+        var bad = 0;
+        i = 0;
+        while (i < sizes) {
+            if (load8(back + i) != load8(g_s1 + i)) { bad = bad + 1; }
+            i = i + 1;
+        }
+        check(bad, 0);
+        which = which + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# A WOFF2 encoder, enough of one to build the containers these groups read back.
+# ================================================================
+
+# UIntBase128, shortest form (the spec makes the shortest form mandatory and rekha refuses padded
+# ones). Returns the offset past what it wrote.
+fn put128(out, at, v): i64 {
+    var n = 1;
+    var t = v >> 7;
+    while (t != 0) {
+        n = n + 1;
+        t = t >> 7;
+    }
+    var i = 0;
+    while (i < n) {
+        var b = (v >> (7 * (n - 1 - i))) & 127;
+        if (i != n - 1) { b = b | 128; }
+        store8(out + at + i, b);
+        i = i + 1;
+    }
+    return at + n;
+}
+
+# 255UInt16, shortest form.
+fn put255(out, at, v): i64 {
+    if (v < 253) {
+        store8(out + at, v);
+        return at + 1;
+    }
+    if (v <= 508) {
+        store8(out + at, 255);
+        store8(out + at + 1, v - 253);
+        return at + 2;
+    }
+    if (v <= 761) {
+        store8(out + at, 254);
+        store8(out + at + 1, v - 506);
+        return at + 2;
+    }
+    store8(out + at, 253);
+    store8(out + at + 1, (v >> 8) & 255);
+    store8(out + at + 2, v & 255);
+    return at + 3;
+}
+
+# The "known tag" index for `tag`, or 63 when it is not one of the 63.
+fn known_index(tag): i64 {
+    var i = 0;
+    while (i < 63) {
+        if (rekha_w2_known_tag(i) == tag) { return i; }
+        i = i + 1;
+    }
+    return 63;
+}
+
+var g_blk = 0;         # the table-data block, before it is stored into a Brotli stream
+var g_tmp = 0;         # the transformed glyf under construction
+var g_out = 0;         # the rebuilt SFNT
+var g_w = 0;           # the WOFF2 container
+var g_wlen = 0;
+
+# Assemble a WOFF2 at `out` from: the SFNT at (s, slen) for its table list, a data block already
+# built at (g_blk, blklen), and a per-table description in `desc` — four i64 per table, in the order
+# the block holds them: tag · xform · origLength · dataLength. Returns the container's byte length.
+fn w2_assemble(s, out, ntab, desc, blklen, total_sfnt, use_known): i64 {
+    memset(out, 0, WCAP);
+    rekha_wr_u32(out, 0, REKHA_WOFF2_SIG);
+    rekha_wr_u32(out, 4, rekha_rd_u32(s, 0));               # flavor
+    rekha_wr_u16(out, 12, ntab);
+    rekha_wr_u32(out, 16, total_sfnt);
+    rekha_wr_u16(out, 24, 1);                               # majorVersion
+    var at = REKHA_WOFF2_HDR_LEN;
+    var i = 0;
+    while (i < ntab) {
+        var d = desc + i * 32;
+        var tag = load64(d);
+        var xf = load64(d + 8);
+        var idx = 63;
+        if (use_known != 0) { idx = known_index(tag); }
+        store8(out + at, (idx & 63) | ((xf & 3) << 6));
+        at = at + 1;
+        if (idx == 63) {
+            rekha_wr_u32(out, at, tag);
+            at = at + 4;
+        }
+        at = put128(out, at, load64(d + 16));
+        if (rekha_w2_has_tlen(tag, xf) == 1) { at = put128(out, at, load64(d + 24)); }
+        i = i + 1;
+    }
+    var clen = brotli_store(g_blk, blklen, out + at);
+    rekha_wr_u32(out, 20, clen);                            # totalCompressedSize
+    rekha_wr_u32(out, 8, at + clen);                        # length
+    return at + clen;
+}
+
+# Build a WOFF2 carrying the SFNT at (s, slen) with every table NULL-transformed — glyf and loca at
+# transform version 3, everything else at 0. Returns the container's byte length; `desc` is filled
+# in for the caller.
+fn w2_build_null(s, slen, out, desc, use_known): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var blk = 0;
+    var total = 12 + n * 16;
+    var i = 0;
+    while (i < n) {
+        var e = 12 + i * 16;
+        var tag = rekha_rd_u32(s, e);
+        var off = rekha_rd_u32(s, e + 8);
+        var olen = rekha_rd_u32(s, e + 12);
+        var xf = 0;
+        if (tag == REKHA_TAG_GLYF2 || tag == REKHA_TAG_LOCA2) { xf = 3; }
+        var d = desc + i * 32;
+        store64(d, tag);
+        store64(d + 8, xf);
+        store64(d + 16, olen);
+        store64(d + 24, olen);
+        memcpy(g_blk + blk, s + off, olen);
+        blk = blk + olen;
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    return w2_assemble(s, out, n, desc, blk, total, use_known);
+}
+
+# A digest over everything rekha can read out of a font: every glyph's contours, points and emitted
+# path, then every code point's mapping and advance. Two fonts with the same digest draw the same.
+fn font_digest(f): i64 {
+    if (f == 0) { return 0; }
+    var h = 0xcbf29ce484222325;
+    var ng = rekha_glyph_count(f);
+    h = (h ^ ng) * 0x100000001b3;
+    h = (h ^ rekha_units_per_em(f)) * 0x100000001b3;
+    var gid = 0;
+    while (gid < ng) {
+        var o = rekha_load_glyph(f, gid);
+        h = (h ^ rekha_outline_n_contours(o)) * 0x100000001b3;
+        var np = rekha_outline_n_points(o);
+        h = (h ^ np) * 0x100000001b3;
+        h = (h ^ rekha_advance_width(f, gid)) * 0x100000001b3;
+        var k = 0;
+        while (k < np) {
+            h = (h ^ load64(rekha_outline_xs(o) + k * 8)) * 0x100000001b3;
+            h = (h ^ load64(rekha_outline_ys(o) + k * 8)) * 0x100000001b3;
+            h = (h ^ load8(rekha_outline_on_curve(o) + k)) * 0x100000001b3;
+            k = k + 1;
+        }
+        h = (h ^ sd_path_verb_count(rekha_outline_to_sdpath(o, 4096, 0, 0))) * 0x100000001b3;
+        gid = gid + 1;
+    }
+    var cp = 0;
+    while (cp < 65536) {
+        h = (h ^ rekha_char_to_glyph(f, cp)) * 0x100000001b3;
+        cp = cp + 1;
+    }
+    return h;
+}
+
+# 1 when the SFNT at `s` carries a correct checksum for every table and a correct
+# checkSumAdjustment in head — both recomputed here, independently of the code that wrote them.
+# ⚠ head's OWN directory checksum is defined over the table with checkSumAdjustment ZEROED (OFF:
+# "set the checkSumAdjustment to 0... calculate the checksum for all the tables"), so this zeroes it
+# for the whole verification and puts it back. Checking head against its live adjustment instead is
+# a verifier bug that reports a correct font as wrong — which is exactly what it did first.
+fn checksums_ok(s, size): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var head_off = 0;
+    var i = 0;
+    while (i < n) {
+        var d0 = 12 + i * 16;
+        if (rekha_rd_u32(s, d0) == REKHA_TAG_HEAD2) { head_off = rekha_rd_u32(s, d0 + 8); }
+        i = i + 1;
+    }
+    var adj = 0;
+    if (head_off != 0) {
+        adj = rekha_rd_u32(s, head_off + 8);
+        rekha_wr_u32(s, head_off + 8, 0);
+    }
+    var ok = 1;
+    i = 0;
+    while (i < n) {
+        var d = 12 + i * 16;
+        var off = rekha_rd_u32(s, d + 8);
+        var len = rekha_rd_u32(s, d + 12);
+        var sum = 0;
+        var k = 0;
+        while (k * 4 < rekha_pad4(len)) {
+            sum = (sum + rekha_rd_u32(s, off + k * 4)) & 0xFFFFFFFF;
+            k = k + 1;
+        }
+        if (sum != rekha_rd_u32(s, d + 4)) { ok = 0; }
+        i = i + 1;
+    }
+    if (head_off != 0) {
+        var whole = 0;
+        var j = 0;
+        while (j * 4 < size) {
+            whole = (whole + rekha_rd_u32(s, j * 4)) & 0xFFFFFFFF;
+            j = j + 1;
+        }
+        if (((0xB1B0AFBA - whole) & 0xFFFFFFFF) != adj) { ok = 0; }
+        rekha_wr_u32(s, head_off + 8, adj);
+    }
+    return ok;
+}
+
+# 1 when every table of the SFNT at `a` equals the same-tag table of `b`, byte for byte. head is
+# compared with its checkSumAdjustment (bytes 8..12) masked out: rekha RECOMPUTES that field, and
+# the whole-font sum it summarises legitimately moves when the table order or padding does.
+fn tables_equal(a, b): i64 {
+    var n = rekha_rd_u16(a, 4);
+    if (rekha_rd_u16(b, 4) != n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var da = 12 + i * 16;
+        var tag = rekha_rd_u32(a, da);
+        var la = rekha_rd_u32(a, da + 12);
+        var j = 0;
+        var hit = 0;
+        while (j < n) {
+            var db = 12 + j * 16;
+            if (rekha_rd_u32(b, db) == tag) {
+                if (rekha_rd_u32(b, db + 12) != la) { return 0; }
+                var pa = a + rekha_rd_u32(a, da + 8);
+                var pb = b + rekha_rd_u32(b, db + 8);
+                var k = 0;
+                while (k < la) {
+                    var skip = 0;
+                    if (tag == REKHA_TAG_HEAD2) {
+                        if (k >= 8 && k < 12) { skip = 1; }
+                    }
+                    if (skip == 0) {
+                        if (load8(pa + k) != load8(pb + k)) { return 0; }
+                    }
+                    k = k + 1;
+                }
+                hit = 1;
+            }
+            j = j + 1;
+        }
+        if (hit == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# 1 when every table of the SFNT at `s` is followed by zero padding to a 4-byte boundary.
+fn pad_is_zero(s): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var i = 0;
+    while (i < n) {
+        var end = rekha_rd_u32(s, 12 + i * 16 + 8) + rekha_rd_u32(s, 12 + i * 16 + 12);
+        while ((end & 3) != 0) {
+            if (load8(s + end) != 0) { return 0; }
+            end = end + 1;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# ── A) the container, with every table null-transformed ───────────────────
+var g_desc = 0;
+
+fn t_null(): i64 {
+    g_group = "A null transform";
+    var f0 = rekha_font_open(g_face, g_face_len);
+    var want = font_digest(f0);
+    var mode = 0;
+    while (mode < 2) {
+        # mode 0 spells every tag out behind flag 63; mode 1 uses the known-tag indices. A decoder
+        # must accept both, and the two containers must rebuild the identical font.
+        g_wlen = w2_build_null(g_face, g_face_len, g_w, g_desc, mode);
+        check(g_wlen > 0, 1);
+        var blk = rekha_woff2_block_size(g_w, g_wlen);
+        check(blk > 0, 1);
+        var td = alloc(blk);
+        check(rekha_woff2_inflate(g_w, g_wlen, td, blk), blk);
+        var size = rekha_woff2_sfnt_size(g_w, g_wlen, td, blk);
+        check(size > 0, 1);
+        check(size & 3, 0);
+        memset(g_out, 0xEE, WCAP);
+        check(rekha_woff2_decode(g_w, g_wlen, td, blk, g_out, WCAP), size);
+        check(pad_is_zero(g_out), 1);
+        check(checksums_ok(g_out, size), 1);
+        check(tables_equal(g_out, g_face), 1);
+        check(tables_equal(g_face, g_out), 1);
+        check(rekha_rd_u32(g_out, 0), 0x00010000);
+        var fw = rekha_font_open_woff2(g_w, g_wlen);
+        check(fw != 0, 1);
+        check(font_digest(fw), want);
+        check(font_digest(rekha_font_open_any(g_w, g_wlen)), want);
+        mode = mode + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# The glyf / loca and hmtx transforms, encoded. This is the half a real WOFF2 encoder does, written
+# here because there is no other way to gate the reverse transform without committing a converted
+# font. Seven substreams, a bbox bitmap, and the triplet coordinate encoding.
+# ================================================================
+
+var g_snc = 0;
+var g_snp = 0;
+var g_sfl = 0;
+var g_sgl = 0;
+var g_scm = 0;
+var g_sbb = 0;
+var g_sin = 0;
+var g_sbm = 0;
+var g_sov = 0;
+var g_gx = 0;
+var g_hx = 0;
+var g_face2 = 0;
+var g_nc_at = 0;
+var g_np_at = 0;
+var g_fl_at = 0;
+var g_gl_at = 0;
+var g_cm_at = 0;
+var g_bb_at = 0;
+var g_in_at = 0;
+
+fn setbit(p, i): i64 {
+    store8(p + (i >> 3), load8(p + (i >> 3)) | (128 >> (i & 7)));
+    return 0;
+}
+
+# Encode one point's (dx, dy) as a spec triplet: the flag byte lands at `fl`, the coordinate bytes
+# at `bl`, and the byte count comes back. `oc` is 1 for an OFF-curve point.
+# ⭐ It picks the NARROWEST of the six forms that represents the pair exactly, so a round trip over
+# a real face drives all six — not just the 16-bit one an easier encoder would always reach for.
+fn tri_encode(dx, dy, oc, fl, bl): i64 {
+    var ax = dx;
+    if (ax < 0) { ax = 0 - ax; }
+    var ay = dy;
+    if (ay < 0) { ay = 0 - ay; }
+    var sx = 0;
+    if (dx >= 0) { sx = 1; }
+    var sy = 0;
+    if (dy >= 0) { sy = 1; }
+    var hi = 0;
+    if (oc != 0) { hi = 128; }
+
+    if (dx == 0 && ay <= 1279) {
+        var k = ay >> 8;
+        store8(fl, hi | (2 * k + sy));
+        store8(bl, ay - 256 * k);
+        return 1;
+    }
+    if (dy == 0 && ax <= 1279) {
+        var k2 = ax >> 8;
+        store8(fl, hi | (10 + 2 * k2 + sx));
+        store8(bl, ax - 256 * k2);
+        return 1;
+    }
+    if (ax >= 1 && ax <= 64 && ay >= 1 && ay <= 64) {
+        var a = (ax - 1) >> 4;
+        var b = (ay - 1) >> 4;
+        store8(fl, hi | (20 + a * 16 + b * 4 + sy * 2 + sx));
+        store8(bl, (((ax - 1) & 15) << 4) | ((ay - 1) & 15));
+        return 1;
+    }
+    if (ax >= 1 && ax <= 768 && ay >= 1 && ay <= 768) {
+        var a2 = (ax - 1) >> 8;
+        var b2 = (ay - 1) >> 8;
+        store8(fl, hi | (84 + (a2 * 3 + b2) * 4 + sy * 2 + sx));
+        store8(bl, ax - 1 - 256 * a2);
+        store8(bl + 1, ay - 1 - 256 * b2);
+        return 2;
+    }
+    if (ax <= 4095 && ay <= 4095) {
+        store8(fl, hi | (120 + sy * 2 + sx));
+        store8(bl, (ax >> 4) & 255);
+        store8(bl + 1, ((ax & 15) << 4) | ((ay >> 8) & 15));
+        store8(bl + 2, ay & 255);
+        return 3;
+    }
+    store8(fl, hi | (124 + sy * 2 + sx));
+    store8(bl, (ax >> 8) & 255);
+    store8(bl + 1, ax & 255);
+    store8(bl + 2, (ay >> 8) & 255);
+    store8(bl + 3, ay & 255);
+    return 4;
+}
+
+fn loca_at(s, loca_off, ifmt, i): i64 {
+    if (ifmt == 0) { return rekha_rd_u16(s, loca_off + i * 2) * 2; }
+    return rekha_rd_u32(s, loca_off + i * 4);
+}
+
+# Transform the glyf of the SFNT at `s` into the seven substreams. Returns the number of glyphs
+# whose bounding box had to be recorded explicitly (a fact the caller prints nowhere but which
+# proves the inferred-bbox path was actually taken). `force_ovl` emits the overlap bitmap even when
+# no glyph sets OVERLAP_SIMPLE, so that path is exercised too.
+fn glyf_transform(s, ng, ifmt, glyf_off, loca_off, force_ovl): i64 {
+    g_nc_at = 0;
+    g_np_at = 0;
+    g_fl_at = 0;
+    g_gl_at = 0;
+    g_cm_at = 0;
+    g_bb_at = 0;
+    g_in_at = 0;
+    var bmpn = 4 * ((ng + 31) / 32);
+    memset(g_sbm, 0, bmpn);
+    memset(g_sov, 0, (ng + 7) >> 3);
+    var explicit = 0;
+    var gid = 0;
+    while (gid < ng) {
+        var a = glyf_off + loca_at(s, loca_off, ifmt, gid);
+        var b = glyf_off + loca_at(s, loca_off, ifmt, gid + 1);
+        var nc = 0;
+        if (b > a) { nc = rekha_rd_i16(s, a); }
+        rekha_wr_u16(g_snc, g_nc_at, nc);
+        g_nc_at = g_nc_at + 2;
+        if (b > a) {
+            if (nc > 0) {
+                var eps = a + 10;
+                var np = rekha_rd_u16(s, eps + (nc - 1) * 2) + 1;
+                var prev = 0 - 1;
+                var j = 0;
+                while (j < nc) {
+                    var ep = rekha_rd_u16(s, eps + j * 2);
+                    g_np_at = put255(g_snp, g_np_at, ep - prev);
+                    prev = ep;
+                    j = j + 1;
+                }
+                var q = eps + nc * 2;
+                var ilen = rekha_rd_u16(s, q);
+                q = q + 2;
+                memcpy(g_sin + g_in_at, s + q, ilen);
+                g_in_at = g_in_at + ilen;
+                q = q + ilen;
+                # the face's own flags, expanded through REPEAT into g_tmp
+                var fi = 0;
+                while (fi < np) {
+                    var f0 = load8(s + q);
+                    q = q + 1;
+                    store8(g_tmp + fi, f0);
+                    fi = fi + 1;
+                    if ((f0 & 8) != 0) {
+                        var rep = load8(s + q);
+                        q = q + 1;
+                        var r0 = 0;
+                        while (r0 < rep) {
+                            store8(g_tmp + fi, f0);
+                            fi = fi + 1;
+                            r0 = r0 + 1;
+                        }
+                    }
+                }
+                # x then y deltas, into two i64 arrays past the flags
+                var xs = g_tmp + 70000;
+                var ys = xs + 70000 * 8;
+                var xi = 0;
+                while (xi < np) {
+                    var fx = load8(g_tmp + xi);
+                    var dxv = 0;
+                    if ((fx & 2) != 0) {
+                        dxv = load8(s + q);
+                        q = q + 1;
+                        if ((fx & 16) == 0) { dxv = 0 - dxv; }
+                    } else {
+                        if ((fx & 16) == 0) {
+                            dxv = rekha_rd_i16(s, q);
+                            q = q + 2;
+                        }
+                    }
+                    store64(xs + xi * 8, dxv);
+                    xi = xi + 1;
+                }
+                var yi = 0;
+                while (yi < np) {
+                    var fy = load8(g_tmp + yi);
+                    var dyv = 0;
+                    if ((fy & 4) != 0) {
+                        dyv = load8(s + q);
+                        q = q + 1;
+                        if ((fy & 32) == 0) { dyv = 0 - dyv; }
+                    } else {
+                        if ((fy & 32) == 0) {
+                            dyv = rekha_rd_i16(s, q);
+                            q = q + 2;
+                        }
+                    }
+                    store64(ys + yi * 8, dyv);
+                    yi = yi + 1;
+                }
+                # the triplets, and the bbox the outline implies
+                var cx = 0;
+                var cy = 0;
+                var x0 = 0;
+                var y0 = 0;
+                var x1 = 0;
+                var y1 = 0;
+                var k = 0;
+                while (k < np) {
+                    var ddx = load64(xs + k * 8);
+                    var ddy = load64(ys + k * 8);
+                    var oc = 0;
+                    if ((load8(g_tmp + k) & 1) == 0) { oc = 1; }
+                    store8(g_sfl + g_fl_at, 0);
+                    var used = tri_encode(ddx, ddy, oc, g_sfl + g_fl_at, g_sgl + g_gl_at);
+                    g_fl_at = g_fl_at + 1;
+                    g_gl_at = g_gl_at + used;
+                    cx = cx + ddx;
+                    cy = cy + ddy;
+                    if (k == 0) {
+                        x0 = cx;
+                        x1 = cx;
+                        y0 = cy;
+                        y1 = cy;
+                    }
+                    if (cx < x0) { x0 = cx; }
+                    if (cx > x1) { x1 = cx; }
+                    if (cy < y0) { y0 = cy; }
+                    if (cy > y1) { y1 = cy; }
+                    if (k == 0) {
+                        if ((load8(g_tmp) & 64) != 0) { setbit(g_sov, gid); }
+                    }
+                    k = k + 1;
+                }
+                g_gl_at = put255(g_sgl, g_gl_at, ilen);
+                # An explicit bbox only when the outline does not imply the one the face stores.
+                if (rekha_rd_i16(s, a + 2) != x0 || rekha_rd_i16(s, a + 4) != y0 ||
+                  rekha_rd_i16(s, a + 6) != x1 || rekha_rd_i16(s, a + 8) != y1) {
+                    setbit(g_sbm, gid);
+                    memcpy(g_sbb + g_bb_at, s + a + 2, 8);
+                    g_bb_at = g_bb_at + 8;
+                    explicit = explicit + 1;
+                }
+            }
+            if (nc < 0) {
+                # a composite: its records go through verbatim, and its bbox is always explicit
+                setbit(g_sbm, gid);
+                memcpy(g_sbb + g_bb_at, s + a + 2, 8);
+                g_bb_at = g_bb_at + 8;
+                explicit = explicit + 1;
+                var cq = a + 10;
+                var more = 1;
+                var wants_instr = 0;
+                while (more != 0) {
+                    var cf = rekha_rd_u16(s, cq);
+                    cq = cq + 2;
+                    var argb = 2;
+                    if ((cf & 1) != 0) { argb = 4; }
+                    var trb = 0;
+                    if ((cf & 8) != 0) { trb = 2; }
+                    if ((cf & 64) != 0) { trb = 4; }
+                    if ((cf & 128) != 0) { trb = 8; }
+                    cq = cq + 2 + argb + trb;
+                    if ((cf & 256) != 0) { wants_instr = 1; }
+                    more = cf & 32;
+                }
+                memcpy(g_scm + g_cm_at, s + a + 10, cq - (a + 10));
+                g_cm_at = g_cm_at + cq - (a + 10);
+                if (wants_instr != 0) {
+                    var cil = rekha_rd_u16(s, cq);
+                    cq = cq + 2;
+                    g_gl_at = put255(g_sgl, g_gl_at, cil);
+                    memcpy(g_sin + g_in_at, s + cq, cil);
+                    g_in_at = g_in_at + cil;
+                }
+            }
+        }
+        gid = gid + 1;
+    }
+    # assemble the transformed table: the 36-byte head, the seven streams, the overlap bitmap
+    var any_ovl = force_ovl;
+    var ob = 0;
+    while (ob < (ng + 7) >> 3) {
+        if (load8(g_sov + ob) != 0) { any_ovl = 1; }
+        ob = ob + 1;
+    }
+    var opt = 0;
+    if (any_ovl != 0) { opt = 1; }
+    rekha_wr_u16(g_gx, 0, 0);
+    rekha_wr_u16(g_gx, 2, opt);
+    rekha_wr_u16(g_gx, 4, ng);
+    rekha_wr_u16(g_gx, 6, ifmt);
+    rekha_wr_u32(g_gx, 8, g_nc_at);
+    rekha_wr_u32(g_gx, 12, g_np_at);
+    rekha_wr_u32(g_gx, 16, g_fl_at);
+    rekha_wr_u32(g_gx, 20, g_gl_at);
+    rekha_wr_u32(g_gx, 24, g_cm_at);
+    rekha_wr_u32(g_gx, 28, bmpn + g_bb_at);
+    rekha_wr_u32(g_gx, 32, g_in_at);
+    var w = REKHA_W2_GLYFHDR;
+    memcpy(g_gx + w, g_snc, g_nc_at);   w = w + g_nc_at;
+    memcpy(g_gx + w, g_snp, g_np_at);   w = w + g_np_at;
+    memcpy(g_gx + w, g_sfl, g_fl_at);   w = w + g_fl_at;
+    memcpy(g_gx + w, g_sgl, g_gl_at);   w = w + g_gl_at;
+    memcpy(g_gx + w, g_scm, g_cm_at);   w = w + g_cm_at;
+    memcpy(g_gx + w, g_sbm, bmpn);      w = w + bmpn;
+    memcpy(g_gx + w, g_sbb, g_bb_at);   w = w + g_bb_at;
+    memcpy(g_gx + w, g_sin, g_in_at);   w = w + g_in_at;
+    if (opt != 0) {
+        memcpy(g_gx + w, g_sov, (ng + 7) >> 3);
+        w = w + ((ng + 7) >> 3);
+    }
+    g_nc_at = w;                          # the transformed table's total length, for the caller
+    return explicit;
+}
+
+# Rewrite the hmtx of the SFNT copy at `s` so every left side bearing equals its glyph's xMin
+# (0 for an empty glyph). ⚠ The hmtx transform is only APPLICABLE to a font where that already
+# holds, so the test makes it hold rather than hoping a particular face does — otherwise the
+# elimination path would silently never be exercised. Advance widths are untouched, so nothing
+# rekha reads out of the font changes.
+fn hmtx_align(s, ng, nhm, hmtx_off, ifmt, glyf_off, loca_off): i64 {
+    var i = 0;
+    while (i < ng) {
+        var a = loca_at(s, loca_off, ifmt, i);
+        var b = loca_at(s, loca_off, ifmt, i + 1);
+        var xmin = 0;
+        if (b > a) { xmin = rekha_rd_i16(s, glyf_off + a + 2); }
+        if (i < nhm) { rekha_wr_u16(s, hmtx_off + i * 4 + 2, xmin); }
+        else { rekha_wr_u16(s, hmtx_off + nhm * 4 + (i - nhm) * 2, xmin); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Transform hmtx: the flags byte plus the advance widths, with both left-side-bearing arrays
+# eliminated. Returns the transformed byte length, written to g_hx.
+fn hmtx_transform(s, ng, nhm, hmtx_off): i64 {
+    store8(g_hx, 3);
+    var i = 0;
+    while (i < nhm) {
+        rekha_wr_u16(g_hx, 1 + i * 2, rekha_rd_u16(s, hmtx_off + i * 4));
+        i = i + 1;
+    }
+    return 1 + nhm * 2;
+}
+
+fn face_table(s, tag, want_len): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var i = 0;
+    while (i < n) {
+        var d = 12 + i * 16;
+        if (rekha_rd_u32(s, d) == tag) {
+            if (want_len != 0) { return rekha_rd_u32(s, d + 12); }
+            return rekha_rd_u32(s, d + 8);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Build a WOFF2 from the SFNT at `s` with glyf and loca TRANSFORMED, and hmtx too when `do_hmtx`.
+var g_explicit = 0;
+var g_gx_off = 0;      # where the transformed glyf sits in the table-data block
+var g_hx_off = 0;      # and the transformed hmtx — NOT adjacent to it (head and hhea intervene)
+var g_blklen = 0;
+
+fn w2_build_xform(s, out, desc, do_hmtx, force_ovl): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var glyf_off = face_table(s, REKHA_TAG_GLYF2, 0);
+    var loca_off = face_table(s, REKHA_TAG_LOCA2, 0);
+    var head_off = face_table(s, REKHA_TAG_HEAD2, 0);
+    var maxp_off = face_table(s, REKHA_TAG_MAXP2, 0);
+    var hhea_off = face_table(s, REKHA_TAG_HHEA2, 0);
+    var hmtx_off = face_table(s, REKHA_TAG_HMTX2, 0);
+    var ng = rekha_rd_u16(s, maxp_off + 4);
+    var ifmt = rekha_rd_u16(s, head_off + 50);
+    var nhm = rekha_rd_u16(s, hhea_off + 34);
+    g_explicit = glyf_transform(s, ng, ifmt, glyf_off, loca_off, force_ovl);
+    var gxlen = g_nc_at;
+    var hxlen = 0;
+    if (do_hmtx != 0) { hxlen = hmtx_transform(s, ng, nhm, hmtx_off); }
+
+    var blk = 0;
+    var total = 12 + n * 16;
+    var i = 0;
+    while (i < n) {
+        var e = 12 + i * 16;
+        var tag = rekha_rd_u32(s, e);
+        var off = rekha_rd_u32(s, e + 8);
+        var olen = rekha_rd_u32(s, e + 12);
+        var xf = 0;
+        var dlen = olen;
+        var src = s + off;
+        if (tag == REKHA_TAG_GLYF2) {
+            dlen = gxlen;
+            src = g_gx;
+        }
+        if (tag == REKHA_TAG_LOCA2) {
+            dlen = 0;
+        }
+        if (tag == REKHA_TAG_HMTX2) {
+            if (do_hmtx != 0) {
+                xf = 1;
+                dlen = hxlen;
+                src = g_hx;
+            }
+        }
+        var d = desc + i * 32;
+        store64(d, tag);
+        store64(d + 8, xf);
+        store64(d + 16, olen);
+        store64(d + 24, dlen);
+        if (tag == REKHA_TAG_GLYF2) { g_gx_off = blk; }
+        if (tag == REKHA_TAG_HMTX2) { g_hx_off = blk; }
+        if (dlen > 0) { memcpy(g_blk + blk, src, dlen); }
+        blk = blk + dlen;
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    g_blklen = blk;
+    g_w2_total = total;
+    return w2_assemble(s, out, n, desc, blk, total, 1);
+}
+
+var g_w2_total = 0;
+
+# ── B) the glyf / loca and hmtx transforms, end to end ────────────────────
+fn t_xform(): i64 {
+    g_group = "B transforms";
+    memcpy(g_face2, g_face, g_face_len);
+    var glyf_off = face_table(g_face2, REKHA_TAG_GLYF2, 0);
+    var loca_off = face_table(g_face2, REKHA_TAG_LOCA2, 0);
+    var head_off = face_table(g_face2, REKHA_TAG_HEAD2, 0);
+    var maxp_off = face_table(g_face2, REKHA_TAG_MAXP2, 0);
+    var hhea_off = face_table(g_face2, REKHA_TAG_HHEA2, 0);
+    var hmtx_off = face_table(g_face2, REKHA_TAG_HMTX2, 0);
+    var ng = rekha_rd_u16(g_face2, maxp_off + 4);
+    var ifmt = rekha_rd_u16(g_face2, head_off + 50);
+    var nhm = rekha_rd_u16(g_face2, hhea_off + 34);
+    hmtx_align(g_face2, ng, nhm, hmtx_off, ifmt, glyf_off, loca_off);
+    var want = font_digest(rekha_font_open(g_face2, g_face_len));
+
+    var mode = 0;
+    while (mode < 3) {
+        # 0: glyf + loca only · 1: and hmtx · 2: and the overlapSimpleBitmap forced present
+        var do_h = 0;
+        if (mode >= 1) { do_h = 1; }
+        var ovl = 0;
+        if (mode == 2) { ovl = 1; }
+        g_wlen = w2_build_xform(g_face2, g_w, g_desc, do_h, ovl);
+        check(g_wlen > 0, 1);
+        # both bbox paths ran: some glyphs carried one, most did not
+        check(g_explicit > 0, 1);
+        check(g_explicit < ng, 1);
+        var blk = rekha_woff2_block_size(g_w, g_wlen);
+        check(blk > 0, 1);
+        var td = alloc(blk);
+        check(rekha_woff2_inflate(g_w, g_wlen, td, blk), blk);
+        var size = rekha_woff2_sfnt_size(g_w, g_wlen, td, blk);
+        check(size > 0, 1);
+        memset(g_out, 0xEE, WCAP);
+        check(rekha_woff2_decode(g_w, g_wlen, td, blk, g_out, WCAP), size);
+        check(pad_is_zero(g_out), 1);
+        check(checksums_ok(g_out, size), 1);
+        # ⚠ glyf and loca are NOT byte-identical to the face and cannot be: rekha re-encodes every
+        # point with one flag byte and no REPEAT. Everything the transform did not touch IS.
+        check(rekha_rd_u32(g_out, 0), 0x00010000);
+        var f = rekha_font_open(g_out, size);
+        check(f != 0, 1);
+        check(font_digest(f), want);
+        check(font_digest(rekha_font_open_woff2(g_w, g_wlen)), want);
+        # hmtx came back byte for byte, left side bearings and all
+        var ho = face_table(g_out, REKHA_TAG_HMTX2, 0);
+        var hl = face_table(g_out, REKHA_TAG_HMTX2, 1);
+        check(hl, face_table(g_face2, REKHA_TAG_HMTX2, 1));
+        var bad = 0;
+        var k = 0;
+        while (k < hl) {
+            if (load8(g_out + ho + k) != load8(g_face2 + hmtx_off + k)) { bad = bad + 1; }
+            k = k + 1;
+        }
+        check(bad, 0);
+        # loca is rebuilt, and must still bound every glyph inside the rebuilt glyf
+        var lo = face_table(g_out, REKHA_TAG_LOCA2, 0);
+        var gl = face_table(g_out, REKHA_TAG_GLYF2, 1);
+        check(face_table(g_out, REKHA_TAG_LOCA2, 1), (ng + 1) * 4);
+        check(rekha_rd_u32(g_out, lo), 0);
+        check(rekha_rd_u32(g_out, lo + ng * 4), gl);
+        mode = mode + 1;
+    }
+    return 0;
+}
+
+# ── T) the triplet decoder against the W3C table, with no encoder of ours in the loop ──────
+fn t_triplet(): i64 {
+    g_group = "T triplet vs spec";
+    var vec = alloc(256 * 64);
+    w2_vectors_fill(vec);
+    var buf = alloc(16);
+    var out = alloc(16);
+    var bad_len = 0;
+    var bad_dx = 0;
+    var bad_dy = 0;
+    var bad_oc = 0;
+    var bad_trunc = 0;
+    var i = 0;
+    while (i < 128) {
+        var pat = 0;
+        while (pat < 2) {
+            var q = vec + (i * 2 + pat) * 64;
+            var nb = load64(q + 8);
+            store8(buf, load64(q + 16));
+            store8(buf + 1, load64(q + 24));
+            store8(buf + 2, load64(q + 32));
+            store8(buf + 3, load64(q + 40));
+            var r = rekha_w2_triplet(buf, 0, nb, i, out);
+            if (r != nb) { bad_len = bad_len + 1; }
+            if (load64(out) != load64(q + 48)) { bad_dx = bad_dx + 1; }
+            if (load64(out + 8) != load64(q + 56)) { bad_dy = bad_dy + 1; }
+            # Bit 7 of the flag is the on/off-curve bit and NOTHING else; the low seven bits are the
+            # whole index. Setting it must not move a single coordinate.
+            store64(out, 0);
+            store64(out + 8, 0);
+            if (rekha_w2_triplet(buf, 0, nb, i | 128, out) != nb) { bad_oc = bad_oc + 1; }
+            if (load64(out) != load64(q + 48)) { bad_oc = bad_oc + 1; }
+            if (load64(out + 8) != load64(q + 56)) { bad_oc = bad_oc + 1; }
+            # One byte short of what this index needs is a refusal, never a short read.
+            if (rekha_w2_triplet(buf, 0, nb - 1, i, out) != 0 - 1) { bad_trunc = bad_trunc + 1; }
+            pat = pat + 1;
+        }
+        i = i + 1;
+    }
+    check(bad_len, 0);
+    check(bad_dx, 0);
+    check(bad_dy, 0);
+    check(bad_oc, 0);
+    check(bad_trunc, 0);
+    # The byte counts the spec states in 5.1 as ranges, read back off the decoder itself.
+    check(rekha_w2_triplet(buf, 0, 4, 83, out), 1);
+    check(rekha_w2_triplet(buf, 0, 4, 84, out), 2);
+    check(rekha_w2_triplet(buf, 0, 4, 119, out), 2);
+    check(rekha_w2_triplet(buf, 0, 4, 120, out), 3);
+    check(rekha_w2_triplet(buf, 0, 4, 123, out), 3);
+    check(rekha_w2_triplet(buf, 0, 4, 124, out), 4);
+    return 0;
+}
+
+# ── R) every refusal rule, one defect at a time ──────────────────────
+# The pattern woff_test set: build a VALID container, copy it, break exactly one thing, and require
+# 0. A rule that is not reached by a one-defect copy is a rule the tree cannot claim to enforce.
+var g_b = 0;
+var g_g = 0;      # the guarded copy lives in a buffer of its own
+var g_t = 0;      # and so does the truncation source
+
+# Open the copy every way a consumer can; all four must agree on the refusal.
+fn refuse(len): i64 {
+    var blk = rekha_woff2_block_size(g_b, len);
+    if (blk > 0) {
+        var td = alloc(blk);
+        if (rekha_woff2_inflate(g_b, len, td, blk) == blk) {
+            if (rekha_woff2_sfnt_size(g_b, len, td, blk) != 0) { return 1; }
+        }
+    }
+    if (rekha_font_open_woff2(g_b, len) != 0) { return 1; }
+    if (rekha_font_open_any(g_b, len) != 0) { return 1; }
+    return 0;
+}
+
+fn copy_valid(): i64 {
+    memcpy(g_b, g_w, g_wlen);
+    return 0;
+}
+
+fn t_refuse(): i64 {
+    g_group = "R refusals";
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    # the container it is a copy of really is accepted, or every check below is vacuous
+    check(rekha_font_open_woff2(g_w, g_wlen) != 0, 1);
+
+    copy_valid(); rekha_wr_u32(g_b, 0, 0x774F4646);          check(refuse(g_wlen), 0);  # 'wOFF'
+    copy_valid(); rekha_wr_u32(g_b, 0, 0);                   check(refuse(g_wlen), 0);
+    copy_valid(); rekha_wr_u32(g_b, 4, 0x74746366);          check(refuse(g_wlen), 0);  # 'ttcf'
+    copy_valid(); rekha_wr_u32(g_b, 8, g_wlen + 1);          check(refuse(g_wlen), 0);  # length > bytes
+    copy_valid(); rekha_wr_u32(g_b, 8, 40);                  check(refuse(g_wlen), 0);  # length < header
+    copy_valid(); rekha_wr_u16(g_b, 12, 0);                  check(refuse(g_wlen), 0);  # numTables 0
+    copy_valid(); rekha_wr_u16(g_b, 12, 600);                check(refuse(g_wlen), 0);  # past the cap
+    copy_valid(); rekha_wr_u32(g_b, 20, 0);                  check(refuse(g_wlen), 0);  # no compressed data
+    copy_valid(); rekha_wr_u32(g_b, 20, g_wlen);             check(refuse(g_wlen), 0);  # past the file
+    copy_valid(); rekha_wr_u32(g_b, 28, g_wlen - 1);
+    rekha_wr_u32(g_b, 32, 64);                 check(refuse(g_wlen), 0);  # metadata off end
+    copy_valid(); rekha_wr_u32(g_b, 40, g_wlen - 1);
+    rekha_wr_u32(g_b, 44, 64);                 check(refuse(g_wlen), 0);  # private off end
+    # A UIntBase128 padded with a leading zero byte, which the spec makes a MUST-reject. The first
+    # entry is flags + an explicit 4-byte tag (the face opens with 'FFTM', not a known tag), so its
+    # origLength varint begins at +5 — at +1 the patch lands on the tag and refuses nothing.
+    copy_valid(); store8(g_b + REKHA_WOFF2_HDR_LEN + 5, 0x80);  check(refuse(g_wlen), 0);
+    # the first entry's transform version, on a table for which no transform is defined
+    copy_valid(); store8(g_b + REKHA_WOFF2_HDR_LEN, load8(g_b + REKHA_WOFF2_HDR_LEN) | 64);
+    check(refuse(g_wlen), 0);
+    # ⛔ the container is otherwise untouched: every refusal above is one field
+    copy_valid();                                            check(refuse(g_wlen), 1);
+    return 0;
+}
+
+# Defects INSIDE the compressed stream: patch the table-data block, then re-store and re-assemble.
+fn rebuild_from_block(): i64 {
+    return w2_assemble(g_face2, g_w, rekha_rd_u16(g_face2, 4), g_desc, g_blklen, g_w2_total, 1);
+}
+
+fn t_refuse_block(): i64 {
+    g_group = "R block refusals";
+    var base = 0;
+    var wl = 0;
+
+    # nContourStreamSize must be exactly two bytes per glyph
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    base = g_gx_off;
+    rekha_wr_u32(g_blk, base + 8, rekha_rd_u32(g_blk, base + 8) + 2);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 0);
+
+    # indexFormat past 1
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    rekha_wr_u16(g_blk, g_gx_off + 6, 2);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 0);
+
+    # numGlyphs 0
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    rekha_wr_u16(g_blk, g_gx_off + 4, 0);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 0);
+
+    # a substream size that makes the seven no longer fill the transformed table exactly
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    rekha_wr_u32(g_blk, g_gx_off + 32, rekha_rd_u32(g_blk, g_gx_off + 32) + 1);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 0);
+
+    # hmtx: a reserved flag bit, then no reconstruct bit at all
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    store8(g_blk + g_hx_off, 3 | 4);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 0);
+
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    store8(g_blk + g_hx_off, 0);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 0);
+
+    # the block is otherwise intact
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    wl = rebuild_from_block();
+    memcpy(g_b, g_w, wl);                                    check(refuse(wl), 1);
+    return 0;
+}
+
+# ── G) a guard differential, and every truncation ─────────────────────
+# The container is copied flush against 256 guard bytes filled A, then B. Any read past `len`
+# changes what the decoder sees, so the two runs would disagree.
+fn guarded(src, len, fill): i64 {
+    var p = g_g + 4096;
+    memset(p - 256, fill, 256);
+    memcpy(p, src, len);
+    memset(p + len, fill, 256);
+    var h = 0;
+    var blk = rekha_woff2_block_size(p, len);
+    h = (h ^ blk) * 0x100000001b3;
+    if (blk > 0) {
+        var td = alloc(blk);
+        var got = rekha_woff2_inflate(p, len, td, blk);
+        h = (h ^ got) * 0x100000001b3;
+        if (got == blk) {
+            var size = rekha_woff2_sfnt_size(p, len, td, blk);
+            h = (h ^ size) * 0x100000001b3;
+            if (size > 0) {
+                var dst = alloc(size);
+                h = (h ^ rekha_woff2_decode(p, len, td, blk, dst, size)) * 0x100000001b3;
+                var k = 0;
+                while (k < size) {
+                    h = (h ^ load8(dst + k)) * 0x100000001b3;
+                    k = k + 1;
+                }
+            }
+        }
+    }
+    return h;
+}
+
+fn t_guard(): i64 {
+    g_group = "G guard + truncation";
+    g_wlen = w2_build_xform(g_face2, g_w, g_desc, 1, 0);
+    check(guarded(g_w, g_wlen, 0xA5), guarded(g_w, g_wlen, 0x5A));
+    var cut = 0;
+    var bad = 0;
+    var dir_end = REKHA_WOFF2_HDR_LEN + 200;
+    while (cut < g_wlen) {
+        memcpy(g_t, g_w, cut);
+        rekha_wr_u32(g_t, 8, cut);
+        if (guarded(g_t, cut, 0xA5) != guarded(g_t, cut, 0x5A)) { bad = bad + 1; }
+        if (cut < dir_end) { cut = cut + 1; } else { cut = cut + 4093; }
+    }
+    check(bad, 0);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_face_len = rekha_face_default_len();
+    g_face = alloc(g_face_len);
+    rekha_face_default_copy(g_face, g_face_len);
+    check(rekha_face_default_verify(g_face, g_face_len), 1);
+    g_s1 = alloc(2500000);
+    g_s2 = alloc(1300000);
+    g_blk = alloc(WCAP);
+    g_tmp = alloc(WCAP);
+    g_out = alloc(WCAP);
+    g_w = alloc(WCAP);
+    g_desc = alloc(64 * 32);
+    g_face2 = alloc(g_face_len);
+    g_gx = alloc(WCAP);
+    g_hx = alloc(262144);
+    g_snc = alloc(262144);
+    g_snp = alloc(262144);
+    g_sfl = alloc(262144);
+    g_sgl = alloc(1048576);
+    g_scm = alloc(262144);
+    g_sbb = alloc(262144);
+    g_sin = alloc(262144);
+    g_sbm = alloc(8192);
+    g_sov = alloc(8192);
+    g_b = alloc(WCAP);
+    g_g = alloc(WCAP);
+    g_t = alloc(WCAP);
+    t_store();
+    t_triplet();
+    t_null();
+    t_xform();
+    t_refuse();
+    t_refuse_block();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "woff2_test: PASS (";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

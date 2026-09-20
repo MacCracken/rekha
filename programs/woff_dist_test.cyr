@@ -116,8 +116,25 @@ fn main(): i64 {
     check(arena_cost, ((total + 7) & (0 - 8)) + REKHA_FONT_SIZE);      # 10 — exactly the SFNT + the font
     check(heap_second < 4096, 1);                                      # 11 — the 410 KB SFNT is NOT here
 
+    # ── the WOFF2 half of the same bundle is really in it (0.4.6) ──
+    # ⭐ WHAT THIS CATCHES. `distlib --check` proves the bundle matches src/; it cannot prove the
+    # [lib.woff] MODULE LIST names woff2.cyr at all. Drop that line from cyrius.cyml and the bundle
+    # is still "current" and every other suite still passes, because they include src/ directly.
+    # These four calls only link if woff2.cyr folded in, and only answer if it folded in ORDER (it
+    # calls woff.cyr's rekha_wr_u32 / rekha_pad4).
+    # ⚠ The WOFF2 ROUND TRIP lives in programs/woff2_test.cyr, which needs a WOFF2 encoder; this is
+    # a presence-and-refusal check on the shipped bundle, not a second copy of it.
+    check(rekha_woff2_block_size(w, at), 0);                           # 12 — a WOFF 1.0 is not a WOFF2
+    check(rekha_font_open_woff2(w, at), 0);                            # 13
+    check(rekha_w2_known_tag(10), REKHA_TAG_GLYF2);                    # 14 — the known-tag table folded in
+    var tri = alloc(32);
+    memset(tri, 0x7F, 4);
+    check(rekha_w2_triplet(tri, 0, 4, 127, tri + 16), 4);              # 15 — index 127 consumes four
+    check(rekha_w2_triplet(tri, 0, 3, 127, tri + 16), 0 - 1);          # 16 — and refuses on three
+    check(rekha_font_open_any(face, n) != 0, 1);                       # 17 — the dispatcher moved here
+
     if (g_fails == 0) {
-        var ok = "woff_dist_test: PASS (dist/rekha-woff.cyr compiles, opens a WOFF, SFNT + font on the seam)\n";
+        var ok = "woff_dist_test: PASS (bundle compiles, opens a WOFF, WOFF2 folded in, SFNT + font on the seam)\n";
         syscall(1, 1, ok, strlen(ok));
     }
     return g_fails;

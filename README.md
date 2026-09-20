@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.5
+Version: 0.4.6
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,24 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.6 — WOFF2 (shipped).** `rekha_font_open_woff2` opens a `.woff2` end to end: the container
+  and its variable-length table directory, ONE Brotli stream through sankoch 2.8.0, the **glyf /
+  loca** reverse transform (seven substreams, the triplet coordinate encoding, inferred and explicit
+  bounding boxes, composites, the overlap bitmap) and the **hmtx** transform (left side bearings
+  rebuilt from glyf's xMin), then a reassembled SFNT with every checksum and `checkSumAdjustment`
+  RECOMPUTED, as the spec requires. `rekha_font_open_any` moved to `src/woff2.cyr` and now sniffs
+  all three of `wOFF`, `wOF2` and a bare SFNT.
+  ⭐ **MEASURED against an independent decoder on every WOFF2 on the dev host — 280 unique files
+  (Liberation, KaTeX, Fira, Source Serif / Code, NanumBarunGothic, Xiaolai CJK), 111,732 glyphs:
+  rekha's reconstruction and fontTools 4.65.0's are IDENTICAL for every glyph outline, advance and
+  cmap mapping, with 0 failures to open.** rekha's rebuilt SFNTs total 0.46% more bytes than
+  fontTools' (32,483,072 against 32,334,048).
+  ⚠ A rebuilt glyf is **not** byte-identical to the original and cannot be — the spec says several
+  encodings of one outline are valid. rekha's is deterministic and plain: one flag byte per point,
+  no REPEAT run-length.
+  ⚠ WOFF2 costs a consumer of `dist/rekha.cyr` **nothing**: it is in `[lib.woff]` only, beside
+  WOFF 1.0, and the base bundle did not change a line. ⛔ Font COLLECTIONS (`ttcf`) are refused —
+  item 8 below.
 - **v0.4.5 — the toolchain moves, and two leaves become one (shipped).** `cyrius` **6.6.4 → 6.6.6**
   and `[deps.sadish]` **0.9.0 → 0.11.2**; `lib/` re-resolved against both. ⭐ **No rekha source
   changed** — all 24 RUN suites build and pass under `CYRIUS_DCE=0` and `1` with no build-log
@@ -124,15 +142,7 @@ shim, no external binaries.
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
   2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
   3. ~~OpenType/CFF (`OTTO`) outlines~~ — shipped in 0.4.2, above.
-  4. **WOFF2** — the container, the glyf/loca and hmtx transforms, tested on
-     transformed-but-uncompressed tables; the Brotli stream decodes through sankoch.
-     ⭐ **Its dependency LANDED in sankoch 2.8.0** (the 0.4.5 pin's stdlib snapshot), so this item
-     is no longer blocked on a filing: `brotli_decompress` / `brotli_decompress_capped` are decode-only
-     RFC 7932 entry points mirroring the zlib pair rekha already uses, and sankoch's `[lib.woff]`
-     profile is deliberately the `[lib.zlib]` module list **plus** Brotli, so one bundle serves WOFF 1.0
-     and WOFF2 both (sankoch ADR `0001-brotli-decoder-placement.md`, filed by rekha; the proposal is
-     archived). VERIFIED in the pinned leaf: 0 occurrences of `brotli` at 2.7.15, both functions plus
-     `FORMAT_BROTLI = 9` at 2.8.0. Writing WOFF2 is still rekha's work — only the blocker is gone.
+  4. ~~**WOFF2**~~ — shipped in 0.4.6, below.
   5. ~~`[deps].stdlib` trim~~ — shipped in 0.4.4, above.
   6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
@@ -223,8 +233,10 @@ document / UI text — anywhere scalable glyphs are needed.
   `bench`) — those are declared in `programs/prelude.cyr` and are deliberately NOT published,
   because every leaf in the sidecar is one each consumer has to vendor. Resolved by
   `cyrius deps` into `lib/`.
-- **sankoch** — only for WOFF, and only through `dist/rekha-woff.cyr`: `zlib_decompress_capped`
-  (sankoch >= 2.7.13; the cyrius 6.6.6 stdlib ships 2.8.0). A consumer includes `lib/sync.cyr` and
+- **sankoch** — only for the web containers, and only through `dist/rekha-woff.cyr`:
+  `zlib_decompress_capped` for WOFF 1.0 (sankoch >= 2.7.13) and `brotli_decompress_capped` for
+  WOFF2 (**>= 2.8.0**, which is the floor for that bundle as of 0.4.6; the cyrius 6.6.6 stdlib ships
+  exactly 2.8.0). A consumer includes `lib/sync.cyr` and
   `lib/sankoch.cyr` before the bundle.
   ⭐ **Both rekha filings against sankoch are closed in 2.8.0**, which is what the 0.4.5 toolchain
   snapshot brings. The lean `[lib.zlib]` profile **links now** — every alloc-bearing profile bundle
