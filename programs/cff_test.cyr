@@ -6,7 +6,8 @@
 # control) and contour end BY HAND; group B the refusals (each an EMPTY glyph, never a partial one);
 # group C a CID-keyed font (FDArray + FDSelect formats 0 and 3, per-FD local Subrs); group D the resolve
 # refusals; group E cubic emission to sadish verbs + a fill; group F exact allocation; group G an A/B
-# guard differential over every cut of the CFF table and a seeded mutation loop over its bytes.
+# guard differential over every cut of the CFF table and a seeded mutation loop over its bytes;
+# group H the cases mutation testing asked for; group I `seac`; group J the upem-scaled readers.
 # The same decoder was checked against an independent Python reference on all 405 CFF faces of the dev
 # host (CHANGELOG 0.4.2); this suite is what CI can run.
 # Exit code = failed checks; each failure prints its number, group, got and want.
@@ -158,7 +159,7 @@ fn d_int(dst, at, v): i64 {
 }
 
 # ================================================================
-# Font assembly. Tables: head @76/54 · maxp @130/6 · hhea @136/36 · hmtx @172/(ng*4) · CFF last.
+# Font assembly. Tables: head @92/54 · maxp @148/6 · hhea @156/36 · hmtx @192/(ng*4) · CFF last.
 # ================================================================
 var FB = 0;
 var FB_CAP = 1048576;
@@ -190,19 +191,24 @@ fn build(cs, gs, ls, ls1): i64 {
     var ng = tab_count(cs);
     put_u32(FB, 0, 0x4F54544F);
     put_u16(FB, 4, 5);
-    put_u32(FB, 12, REKHA_TAG_HEAD); put_u32(FB, 20, 76);  put_u32(FB, 24, 54);
-    put_u32(FB, 28, REKHA_TAG_MAXP); put_u32(FB, 36, 130); put_u32(FB, 40, 6);
-    put_u32(FB, 44, REKHA_TAG_HHEA); put_u32(FB, 52, 136); put_u32(FB, 56, 36);
-    put_u32(FB, 60, REKHA_TAG_HMTX); put_u32(FB, 68, 172); put_u32(FB, 72, ng * 4);
-    put_u16(FB, 76 + 18, 1000);
-    put_u16(FB, 130 + 4, ng);
-    put_u16(FB, 136 + 34, ng);
+    # ⚠ EVERY TABLE STARTS PAST THE DIRECTORY. Five entries put dir_end at 12 + 5 * 16 = 92, and
+    # rekha refuses a table that begins below it (rekha_find_table_len's bounds invariant) — so a
+    # fixture laying head at 76, as this one did through 0.4.8, has an UNREADABLE head: it overlaps
+    # the fifth directory entry (CFF), rekha_units_per_em reports 0, and every upem-scaled reader
+    # silently answers 0 with no font here ever being rejected. Group J is the guard on that.
+    put_u32(FB, 12, REKHA_TAG_HEAD); put_u32(FB, 20, 92);  put_u32(FB, 24, 54);
+    put_u32(FB, 28, REKHA_TAG_MAXP); put_u32(FB, 36, 148); put_u32(FB, 40, 6);
+    put_u32(FB, 44, REKHA_TAG_HHEA); put_u32(FB, 52, 156); put_u32(FB, 56, 36);
+    put_u32(FB, 60, REKHA_TAG_HMTX); put_u32(FB, 68, 192); put_u32(FB, 72, ng * 4);
+    put_u16(FB, 92 + 18, 1000);
+    put_u16(FB, 148 + 4, ng);
+    put_u16(FB, 156 + 34, ng);
     var i = 0;
     while (i < ng) {
-        put_u16(FB, 172 + i * 4, 500 + i);
+        put_u16(FB, 192 + i * 4, 500 + i);
         i = i + 1;
     }
-    var cff = 172 + ng * 4;
+    var cff = 192 + ng * 4;
 
     # CFF: header
     var p = cff;
@@ -1284,6 +1290,60 @@ fn t_seac(): i64 {
     return 0;
 }
 
+# ================================================================
+# J) the upem-scaled readers on a CFF face — head has to be READABLE before any of them answers
+#
+# ⛔ THIS GROUP IS A REGRESSION GUARD ON THE FIXTURE, NOT ON src/. Through 0.4.8 build() declared
+# head at offset 76, which is INSIDE a five-entry table directory (dir_end 92), so sfnt.cyr refused
+# it — correctly — and every font this suite builds carried unitsPerEm 0. Nothing here read upem,
+# so 678 checks stayed green while the whole scaled path was dark on CFF. Keep a check on upem AND
+# one through a reader that divides by it: the first alone would pass on a head rekha reads but
+# never uses, and the second alone reports 0 rather than naming the cause.
+# ================================================================
+fn t_scaled(): i64 {
+    g_group = "J upem";
+    opts_reset();
+    var len = build(g_cst, g_gst, g_lst, 0);
+    g_f = rekha_font_open(FB, len);
+    check(g_f != 0, 1);
+    var upem = rekha_units_per_em(g_f);
+    check(upem, 1000);                              # head @92 is past dir_end, so it is read
+    check(rekha_advance_width(g_f, 3), 503);        # hmtx: glyph i advances 500 + i design units
+
+    # upem-scaled metrics: px = (adv * size + upem / 2) / upem, rounded half-up.
+    check(rekha_glyph_advance_px(g_f, 3, 1000), 503);       # em size == upem: units are pixels
+    check(rekha_glyph_advance_px(g_f, 3, 16), 8);           # (503 * 16 + 500) / 1000
+    check(rekha_glyph_advance_fx(g_f, 3, 16), 527434);      # the same in 16.16 pixels
+    # no cmap here, so every codepoint maps to .notdef — whose 500-unit advance is a real metric,
+    # which is the point of the fallback: unmapped text still moves the pen.
+    check(rekha_char_advance(g_f, 65), 500);
+    check(rekha_char_advance_px(g_f, 65, 16), 8);           # (500 * 16 + 500) / 1000
+
+    # the outline path a consumer actually asks for: a scale DERIVED from upem, not a magic number.
+    # 500 px on a 1000-unit em is half a pixel per design unit, so the scale is exactly SD_ONE / 2.
+    var scale = 0;
+    if (upem > 0) { scale = 500 * SD_ONE / upem; }      # 0 rather than a trap if upem regresses to 0
+    check(scale, SD_ONE / 2);
+    var p = rekha_glyph_to_sdpath(g_f, 1, scale, 0, 0);     # glyph 1: (10,20) (40,20) (40,60)
+    check(sd_path_verb_count(p), 4);                        # moveto, lineto, lineto, close
+    check(sd_path_point_count(p), 3);
+    check(sd_path_point_x(p, 0), 5 * SD_ONE);
+    check(sd_path_point_y(p, 0), 0 - 10 * SD_ONE);          # y-flip
+    check(sd_path_point_x(p, 1), 20 * SD_ONE);
+    check(sd_path_point_x(p, 2), 20 * SD_ONE);
+    check(sd_path_point_y(p, 2), 0 - 30 * SD_ONE);
+
+    # ⛔ AND THE OTHER HALF OF THE RULE: a head declared BELOW dir_end is still refused. Rebuild
+    # the old, broken layout by hand and assert rekha gives back exactly what it gave before — 0.
+    len = build(g_cst, g_gst, g_lst, 0);
+    put_u32(FB, 20, 76);
+    g_f = rekha_font_open(FB, len);
+    check(g_f != 0, 1);
+    check(rekha_units_per_em(g_f), 0);
+    check(rekha_glyph_advance_px(g_f, 3, 16), 0);           # upem 0 => "unknown", not a wrong number
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     FB = alloc(FB_CAP + GUARD);
@@ -1310,8 +1370,9 @@ fn main(): i64 {
     t_guard();
     t_kills();
     t_seac();
+    t_scaled();
     if (g_fails == 0) {
-        var ok = "cff_test: PASS (Type 2 operators, refusals, CID-keyed, resolve, cubic emit, seac, guard; ";
+        var ok = "cff_test: PASS (Type 2 operators, refusals, CID-keyed, resolve, cubic emit, seac, guard, upem; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);

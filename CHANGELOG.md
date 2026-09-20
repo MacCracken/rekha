@@ -33,8 +33,8 @@ scalars, which rekha does not read; that is now roadmap item 11.
   **raw bytes rather than an INDEX**, no Name or String INDEX, no charset, no encoding.
 - **Every INDEX counts in u32**, including a count-0 one, which is 4 bytes and not 2. cff.cyr's
   readers took a count width (`rekha_cff_idx_next` / `_obj` / `_count_at`) so the bounds logic is
-  written once and CFF's behaviour is untouched — `programs/cff_test.cyr`'s 678 checks pass
-  unchanged across that refactor.
+  written once and CFF's behaviour is untouched — every one of `programs/cff_test.cyr`'s checks
+  passes unchanged across that refactor.
 - An FDArray is **required** (a CFF2 font's Private DICTs live nowhere else); an FDSelect is
   optional, and `rekha_cff_fd` now answers 0 when there is none. ⛔ FDSelect **format 4** exists in
   CFF2 and rekha refuses it rather than misreading its wider fields as format 3's.
@@ -78,11 +78,38 @@ range, twice, after a `blend`, `blend` on an empty stack, `blend` asking for mor
 holds) — each beside a control glyph in the same font. Group D is a guard differential, a
 truncation sweep over every cut, and a 900-iteration byte-mutation sweep over the CFF2 table.
 
-⚠ **Noticed while writing it, and filed rather than fixed here:** `programs/cff_test.cyr`'s own
-fixture declares `head` at offset 76 with five directory entries, so it lies inside the directory
-(dir_end is 92) and rekha correctly reports it absent — every CFF fixture has `unitsPerEm` 0. No
-check there notices, because cff_test reads no upem-scaled reader at all, which is the coverage that
-hides it. `programs/cff2_test.cyr`'s builder lays its tables out past the directory and says why.
+⚠ **Its builder lays every table out past the directory, and says why** — which is how the defect
+in `programs/cff_test.cyr`'s own fixture, fixed below, was found.
+
+### Fixed — `programs/cff_test.cyr` built every font with `head` INSIDE the table directory
+
+⛔ **THE FIXTURE WAS WRONG, NOT REKHA.** `build()` writes five directory entries — dir_end is
+`12 + 5 * 16` = **92** — and declared `head` at **76**, where it overlaps the fifth entry, the
+`CFF ` one. `rekha_find_table_len` refuses a table that begins below dir_end, so it did exactly
+what it should: every font this suite has built since **0.4.2**, the release that added it, has had
+an unreadable `head` and reported `rekha_units_per_em()` **0**.
+
+⚠ **What that hid is the upem-scaled half of the API, on CFF faces entirely.** A zero upem does not
+fail an open and does not crash a reader — `rekha_glyph_advance_px`, `rekha_glyph_advance_fx` and
+`rekha_char_advance_px` all return 0, which means "unknown", and a consumer deriving a scale from it
+divides by zero. 678 checks stayed green because `units_per_em`, `char_to_sdpath` and `char_advance`
+appeared **nowhere** in the suite: the coverage gap and the defect were the same fact, and each is
+why the other survived. `rekha_advance_width` WAS checked and passed throughout — it reads hmtx in
+design units and never touches `head`, so metrics coverage looked complete.
+
+⇒ Tables now start past the directory, the layout `programs/cff2_test.cyr` already uses — `head`
+@92/54 · `maxp` @148/6 · `hhea` @156/36 · `hmtx` @192/(ng*4) · `CFF ` after that — with the rule
+written on the lines that would otherwise be wrong again.
+
+### Added — `programs/cff_test.cyr` group J, the guard on that (678 → **697 checks**)
+
+`rekha_units_per_em` must be 1000 on a built font, and the readers that divide by it are now
+exercised on a CFF face: `rekha_glyph_advance_px` / `_fx` and `rekha_char_advance_px` against
+hand-computed half-up rounding, and `rekha_glyph_to_sdpath` at a scale **derived from upem** (500 px
+on a 1000-unit em is exactly `SD_ONE / 2`) asserting 16.16 points. ⭐ **Neither half would do alone:**
+a upem check passes on a `head` rekha reads but no reader consults, and a scaled reader that returns
+0 does not name its cause. The group closes on the other direction — rebuild the old layout by hand
+and require upem 0 and a 0 advance back, so the refusal that was right all along stays gated too.
 
 ### Changed — the record, and the bundles
 
