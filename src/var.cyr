@@ -6,9 +6,10 @@
 # of the region it belongs to. At the default location every scalar is zero, which is why 0.4.9
 # could decode a CFF2 without any of this.
 #
-# ⛔ WHAT THIS DOES NOT DO. Only the CFF2 charstring `blend` consumes these scalars today. `gvar`
-# (TrueType outline deltas), `HVAR` (metrics) and `MVAR` are separate delta formats over the same
-# region machinery — the roadmap carries them.
+# ⛔ WHAT THIS DOES NOT DO. The region-scalar ARRAY built here is the CFF2 variation store's, and
+# the CFF2 charstring `blend` is its only consumer. `gvar` (0.4.12) shares the tent maths instead —
+# `rekha_var_axis_factor`, `rekha_var_live` — and derives its own scalar per tuple. `HVAR` and
+# `MVAR` are METRICS deltas over the same machinery and are not read: docs/development/roadmap.md.
 #
 # fvar (OpenType): majorVersion u16 · minorVersion u16 · axesArrayOffset u16 · reserved u16 ·
 #   axisCount u16 · axisSize u16 · instanceCount u16 · instanceSize u16; then axisCount
@@ -17,8 +18,10 @@
 # avar: majorVersion u16 · minorVersion u16 · reserved u16 · axisSegmentMapCount u16; then one
 #   SegmentMap per axis: positionMapCount u16 · that many (fromCoordinate, toCoordinate) F2Dot14
 #   pairs, both in normalized space.
-# ⚠ avar 2.0 adds a variation store on top of the segment maps. rekha reads the maps, which 2.0
-# keeps and which are the whole of avar 1.0; a 2.0 table's extra mapping is NOT applied.
+# ⛔ avar 2.0 adds a variation store on top of the segment maps, and rekha takes majorVersion 1
+# ONLY — `rekha_var_resolve` caches the table just for version 1, so a 2.0 table is dropped WHOLE,
+# the segment maps it keeps unchanged from 1.0 included. That leaves such an axis UNMAPPED rather
+# than half-mapped. Accepting 2.0's maps is roadmap work: docs/development/roadmap.md.
 #
 # ⚠ FIXED POINT. Axis values and normalized coordinates are 16.16 here, because that is what fvar's
 # own Fixed fields are and what the charstring interpreter already works in. A region's coordinates

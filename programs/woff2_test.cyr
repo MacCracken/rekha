@@ -14,7 +14,7 @@
 # ⚠ THE ENCODER HERE SHARES A MODEL WITH THE DECODER IT TESTS, so an end-to-end round trip cannot
 # by itself prove the triplet table right — both halves would agree on the same mistake. That is
 # what group T is for: it drives rekha_w2_triplet with vectors DERIVED FROM THE W3C TABLE by
-# scripts/woff2_triplet_check.py, independently of any encoder here.
+# `scripts/woff2_triplet.py`, independently of any encoder here.
 #
 # Includes lib/sync.cyr + lib/sankoch.cyr from the toolchain pin. Exit code = failed checks; each
 # failure prints its number, group, got and want.

@@ -4,12 +4,12 @@
 # its charstrings, so a CFF2 face draws through rekha_load_glyph / rekha_glyph_to_sdpath /
 # rekha_char_to_sdpath with no consumer change, exactly as an 'OTTO' CFF face does.
 #
-# ⭐ THE DEFAULT INSTANCE, AND ONLY THAT. A CFF2 font is a variable font: its charstrings carry
-# `blend` operators whose deltas move every point as the design axes move. rekha decodes the font at
-# its DEFAULT location, where every region's scalar is zero and each blended value is simply its
-# default — which is the instance a consumer that does not set axis coordinates wants, and the one
-# `fvar`'s defaults name. Applying non-default coordinates needs `fvar` / `avar` and the region
-# scalars, which rekha does not read; the roadmap carries that separately.
+# ⭐ THE DEFAULT INSTANCE, AND SINCE 0.4.11 EVERY OTHER ONE. A CFF2 font is a variable font: its
+# charstrings carry `blend` operators whose deltas move every point as the design axes move. Left
+# alone, rekha decodes the font at its DEFAULT location, where every region's scalar is zero and a
+# blended value is simply its default — the instance a consumer that sets no axis wants, and the
+# one `fvar`'s defaults name. `rekha_var_set_axis` (src/var.cyr, 0.4.11) reads `fvar` / `avar` and
+# builds the region scalars `blend` then weights its deltas by.
 #
 # WHAT IS DIFFERENT FROM CFF (Adobe TN 5176 vs the OpenType CFF2 chapter), and it is most of the
 # container:

@@ -16,257 +16,102 @@ shim, no external binaries.
 
 ## Scope
 
-- **v0.1.0 — scaffold.** Buildable compiling skeleton (error codes, struct
-  layouts, SFNT byte readers, stub bodies). Superseded below.
-- **v0.2.0 — real TrueType, end to end (shipped).** Font bytes → filled
-  glyph, RUN-tested:
-  - **SFNT container** — `rekha_font_open` (validated) + `rekha_find_table`
-    (bounds-checked table directory).
-  - **Metadata** — `rekha_units_per_em`, `rekha_loca_format`,
-    `rekha_glyph_count`.
-  - **loca → glyf** — `rekha_glyf_span` (glyph id → its glyf byte range).
-  - **glyf decode** — `rekha_load_glyph` (contours, run-length flags,
-    delta-encoded coords → `RekhaOutline`); reads bounded by the file (tightened
-    to each table's own extent in 0.3.11).
-  - **sadish seam** — `rekha_outline_to_sdpath` / `rekha_glyph_to_sdpath`
-    convert TrueType quadratic contours (implied midpoints, off-curve
-    starts) into a sadish `SdPath`, y-flipped + scaled to pixel space.
-    **`sadish` is wired as a dependency; rekha is its first consumer.**
-- **v0.3.0 — text (shipped).** Characters → glyphs, and composite glyphs:
-  - **cmap format 4** — `rekha_char_to_glyph` (Unicode BMP codepoint → glyph
-    id) + `rekha_char_to_sdpath` (one call: character → positioned sadish path).
-  - **Composite glyphs** — `rekha_load_glyph` decodes numberOfContours < 0
-    (recursive component load, F2Dot14 transform + offset, merged outline).
-- **v0.3.6 — horizontal metrics (shipped).** `hhea`/`hmtx`: `rekha_advance_width`,
-  `rekha_char_advance` / `rekha_char_advance_px` (rounded half-up), the `hhea`
-  line-box fields; the `hmtx` left-side-bearing tail handled.
-- **v0.3.10 — one allocation knob (shipped).** Every byte rekha allocates goes
-  through sadish's seam (`sd_alloc`, sadish >= 0.5.5), so a consumer that scopes
-  `sd_alloc_set` around a text draw gets the outlines, the paths and the coverage
-  from the same arena: 20 `rekha_char_to_sdpath` calls under an arena hook cost
-  the global heap **exactly 0 bytes** (MEASURED; 4,328 B each on the arena).
-  ⚠ Open fonts OUTSIDE a scoped hook — `rekha_font_open` follows the seam too.
-- **v0.3.11 — hardened against hostile fonts, and faster (shipped).** An
-  audit found four out-of-bounds reads reachable from `rekha_char_to_sdpath`
-  with crafted bytes, plus composite fan-out that could demand gigabytes;
-  all are fixed and each has a regression suite. The invariant now enforced:
-  every table lies after the directory and inside the file, a fixed field is
-  read only when its table's DECLARED length covers it, variable arrays stay
-  inside their own table, and every outline's `end_pts` strictly increase and
-  stay `< n_points`. Load caps (not read from the font): 4,096 points / 128
-  contours per outline, 64 glyph loads and 16,384 decoded points per
-  `rekha_load_glyph`, nesting depth 5, no component cycles — tripping one
-  yields an EMPTY glyph, never a partial one. Table offsets are cached at open
-  (`RekhaFont` 40 → 160 B, once): a 54-character label draws **2.7× faster**
-  (205 → 76 µs MEASURED) and an accented composite loads in 1.6 KB instead of
-  71.6 KB. Composite point matching and scaled component offsets now decode;
-  new `rekha_glyph_advance_px` / `_fx` and `rekha_char_advance_fx` (16.16).
-  ⚠ The font buffer is borrowed and its metadata snapshotted at open — do not
-  mutate it afterwards.
-- **v0.4.0 — every Unicode cmap (shipped).** `rekha_char_to_glyph` reads formats 4, **12**
-  (the whole Unicode range), **13**, **6** and **0**; the best-ranked valid subtable wins —
-  (3,10) > (0,4)/(0,6) > a wide table under any other Unicode record > (3,1) > (0,3) > other (0,x)
-  > (3,0) — and a broken record is skipped instead of blanking the map. (3,0) **symbol** faces map,
-  with U+00xx retried at U+F0xx. MEASURED on 92 system faces against an independent reference: every
-  codepoint U+0000..U+10FFFF identical; the 80 with a format-12 map keep 0.3.11's BMP mapping exactly
-  and gain the planes past it (Iosevka Nerd Fonts: 9,442 icon codepoints).
-- **v0.4.1 — WOFF 1.0 (shipped).** `rekha_font_open_woff` / `rekha_font_open_any` open a `.woff`
-  (the W3C WOFF 1.0 container: per-table zlib) by rebuilding its SFNT into one `sd_alloc` and opening
-  that; `rekha_woff_sfnt_size` validates without inflating, `rekha_woff_decode` rebuilds into a
-  caller's buffer. Every declared size is checked before anything is allocated or inflated (tag
-  order, table extents, DEFLATE's 1,032:1 ratio, the exact totalSfntSize, no stream shared between
-  entries) and each table must inflate to exactly its origLength. **Opt-in:** it lives in
-  `dist/rekha-woff.cyr` (`[lib.woff]`), which a WOFF consumer takes instead of `dist/rekha.cyr` and
-  pairs with sankoch (the stdlib `sankoch` leaf + `sync`); the base bundle never requires sankoch.
-  MEASURED: all 29 real `.woff` files on the dev host (Lato, Roboto Slab, KaTeX, FontAwesome, Qt
-  icons) rebuild byte-identical to an independent Python/zlib decoder and open.
-- **v0.4.2 — CFF outlines: OpenType `OTTO` faces (shipped).** `rekha_font_open` accepts the `OTTO`
-  sfntVersion and resolves the `CFF ` table; `rekha_load_glyph` runs the glyph's **Type 2 charstring**
-  (all the drawing, hint, subroutine and flex operators, name-keyed and **CID-keyed** fonts) into the
-  same `RekhaOutline` glyf produces, with **cubic** control points flagged 2 — so
-  `rekha_char_to_sdpath` draws an OTTO face through `sd_path_cubicto` with no consumer change. One
-  decode is bounded: 65,536 operators, nesting 10, a 48-argument stack, 4,096 points. MEASURED against
-  an independent reference on **all 405 CFF faces of the dev host — 5,093,070 glyphs, 415,584,832
-  points, identical**. ⚠ Accented glyphs built with `seac`, CFF2 and TrueType Collections are on the
-  list below; a WOFF wrapping an OTTO face now works end to end.
-- **v0.4.3 — sadish 0.9.0, and a path sized to its glyph (shipped).** `[deps.sadish]` moves
-  **0.5.5 → 0.9.0**, whose `SdPath` stores point coordinates INLINE (rekha filed the measurement that
-  asked for it); five test programs move to `sd_path_point_x` / `_y` / `sd_path_verb_at`.
-  `rekha_outline_to_sdpath` now counts a glyph's verbs and points first and opens the path at exactly
-  that (`sd_path_new_cap`), so nothing grows: MEASURED, the printable-ASCII set **433,648 B → 59,784 B**
-  of paths and a 54-character label **231,928 B → 55,320 B** of arena. A consumer hook that refuses now
-  yields 0, never a glyph missing verbs — rekha checks every `sd_path_*` status.
-- **v0.4.4 — nine leaves become two (shipped).** `dist/rekha.deps` told every consumer to vendor
-  nine stdlib leaves for a bundle whose entire stdlib appetite is `strlen` + `memcpy`; it now says
-  **`string`, `alloc`** and the WOFF sidecar says **`string`, `alloc`, `sankoch`** (was five).
-  ⭐ **Not one line of bundle code changed** — both bundles differ from 0.4.3 only in the
-  `# Version:` banner `distlib` stamps. This changes what a consumer has to resolve, not the code
-  they get. `cyrius distlib` builds the sidecar from the
-  include scan of `src/lib.cyr` unioned with `[deps].stdlib`, so both were trimmed and the harness's
-  own leaves moved to a new `programs/prelude.cyr`, one hop outside the scan. `alloc` is not
-  padding: `lib/string.cyr` calls `alloc()` and declares no include for it, which distlib's
-  compile-verify pass found unaided. ⚠ MEASURED — re-adding one convenience `include "lib/fmt.cyr"`
-  to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
-  now pins the expected list. The positional nature of that fix is filed upstream
-  (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
-- **v0.4.12 — `gvar`: instancing for TrueType outlines (shipped).** The other half of variable
-  fonts. 0.4.11 gave CFF2 outlines their axes; `gvar` does the same for TrueType, over a completely
-  different delta format — a per-glyph tuple store, packed point numbers, packed deltas, and IUP to
-  infer the points a tuple does not name.
-  ⭐ **Checked against fontTools' own glyph set, point for point: 1,027 points across 29 glyph
-  instances, all identical** — 508 over 20 simple-glyph instances at four weights (including a
-  sparse tuple that only IUP can complete) and 519 over 9 composite instances, where the deltas move
-  the component OFFSETS rather than any outline.
-  ⛔ IUP is **per contour**, and a contour a tuple names nothing in keeps zero deltas rather than
-  inheriting its neighbour's. That is what `programs/gvar_test.cyr` group C exists to pin.
-  ⚠ Phantom-point deltas are decoded and not applied: they are METRICS variations, which is item 13.
-- **v0.4.11 — variable-font instancing, for CFF2 (shipped).** `rekha_var_set_axis` puts an axis at
-  a user value; every later `rekha_load_glyph` draws the font there. 0.4.9 decoded a CFF2 at its
-  default location because every region scalar is zero there and a `blend` keeps its defaults; this
-  reads `fvar` and `avar`, normalizes the setting, and turns it into one scalar per region of the
-  variation store — at which point the same `blend` adds its deltas, each weighted by its region.
-  ⭐ **Checked against fontTools at every location tested, on a font it instanced too**, including
-  an interior point and an `avar`-mapped one: axis defaults, both extremes, the peak of a region
-  tent, halfway up one, the negative half, and a kinked `avar` map — identical coordinates each
-  time.
-  ⛔ The axis API is deliberately coarse: `rekha_var_set_axis` normalizes, runs `avar` and rebuilds
-  every region scalar, so it is a set-the-axes-then-draw call and not a per-glyph one.
-  ⚠ Only CFF2's `blend` consumes the scalars today. `gvar` is item 12 — the axis machinery is done
-  and shared, but its deltas are a different format.
-- **v0.4.10 — WOFF2 collections, and the fixture that hid the scaled readers (shipped).** A
-  `ttcf`-flavoured WOFF2 — refused since 0.4.6 — now rebuilds to a real `.ttc`:
-  `rekha_woff2_face_count` says how many faces, `rekha_font_open_woff2_index` opens one, and
-  `rekha_woff2_decode` produces the whole collection with **one copy of each shared table** for
-  `rekha_font_open_index` (0.4.8) to walk.
-  ⭐ **Checked against the collections it was built from**: a 2-face `.ttc` whose faces share 17 of
-  18 tables and a 3-face one of unrelated fonts, each compressed to WOFF2 with real Brotli and
-  decoded back — every face identical to its source face (2,298 glyphs), and the rebuilt files the
-  same byte length as the originals. In the 2-face one both faces resolve `glyf` to the **same
-  offset**, so the sharing survives the round trip.
-  ⚠ **There is no independent WOFF2-collection decoder to check against**: fontTools has no
-  collection support in its WOFF2 reader or writer at all (no `ttcf`, no `numFonts`, no
-  CollectionHeader), so the encoder above is rekha's own. What anchors it is the *outcome* — the
-  rebuilt `.ttc` must match a `.ttc` fontTools authored, face for face — not the WOFF2 layer itself.
-  ⛔ The decoder MUSTs the spec spells out are enforced: one entry per tag **within a face** (though
-  duplicate tags across a collection are correct, since the table directory holds one entry per
-  unique *table*), each `loca` immediately following its `glyf`, and every face's `glyf`/`loca`
-  indices naming that same pair.
-  **Also in 0.4.10, and unrelated: the fixture that hid the scaled readers.** No library code
-  changed for this half. `programs/cff_test.cyr` declared `head` at offset 76 with five directory
-  entries, so it lay INSIDE the directory (dir_end is 92); rekha refused the table — correctly —
-  and every CFF fixture the suite built reported `unitsPerEm` **0**.
-  ⚠ **The defect and the coverage gap were the same fact.** No check noticed, because
-  `units_per_em`, `char_to_sdpath` and `char_advance` appeared nowhere in the suite; 678 checks
-  stayed green with the whole upem-scaled path dark on CFF faces. `rekha_advance_width` passed
-  throughout — it reads hmtx in design units and never touches `head` — so metrics coverage looked
-  complete. Found while writing `programs/cff2_test.cyr`.
-  ⇒ Tables now start past the directory, and new **group J** (678 → **697 checks**) pins
-  `unitsPerEm` at 1000 and drives the readers that divide by it, then rebuilds the old layout by
-  hand and requires upem 0 back — so the refusal that was right all along stays gated too.
-- **v0.4.9 — CFF2, at the default instance (shipped).** An OpenType face carrying a `CFF2` table
-  instead of `CFF ` now draws. It is a different container — a 5-byte header, a Top DICT that is
-  **not** an INDEX, every INDEX counted in u32, a **required** FDArray, an optional FDSelect and an
-  ItemVariationStore — and a different charstring dialect: no leading width, **no `endchar`** (the
-  bytes simply run out), plus `vsindex` and `blend`. The charstrings themselves go through the same
-  Type 2 interpreter in a CFF2 mode, not a second copy.
-  ⭐ **Checked against fontTools twice.** A CFF font converted to CFF2 by fontTools decodes to
-  outlines identical to the CFF it came from, cubic control points and all. Then a hand-built
-  VARIABLE CFF2 — two variation-store subtables, one two regions wide and one one — which fontTools
-  and rekha read from the **same bytes** and agree on point for point.
-  ⚠ **The default instance, and only that.** At the default location every region's scalar is zero,
-  so a blended value IS its default and `blend` is: drop the count, drop the deltas, keep what was
-  already there. Non-default axis coordinates are item 11.
-  ⛔ `blend` in a font with no variation store keeps its defaults rather than refusing — there are no
-  deltas to drop and that is the right rendering. An explicit `vsindex` into a store that is not
-  there IS refused: it names something.
-- **v0.4.8 — TrueType Collections (shipped).** `rekha_ttc_count` and `rekha_font_open_index` open
-  face *n* of a `.ttc` / `.otc`: several faces in one file, each with its own offset table, all of
-  them SHARING table data. `rekha_font_open` opens face 0 of a collection, so an existing consumer
-  handed one gets a working font instead of nothing.
-  ⭐ **Checked against a collection fontTools authored, and the interesting one is the second file:**
-  two faces built from one font, so face 1 shares **17 of its 18 tables** with face 0 and its `glyf`
-  sits **132,884 bytes BELOW its own directory**. Both faces decode identically to the source font
-  (1,350 glyphs), as do all three faces of a 3-font collection (948 glyphs).
-  ⛔ **That layout is why this needed more than a header parse.** rekha's bounds rule was "a table
-  lies past its own directory", which is true of every `.ttf` and false of almost every collection
-  face. Each face now carries the floor that IS true of it (`REKHA_FONT_SIZE` 248 → 256) — the end
-  of the TTC header — plus an overlap test that still refuses a table running through the face's own
-  header and directory, which the lowered floor alone would let past.
-  ⚠ A `ttcf`-flavoured **WOFF2** is still refused; that needs the CollectionDirectory, item 10 above.
-- **v0.4.7 — CFF `seac` (shipped).** A four-argument `endchar` is an accented glyph built from two
-  others: base at the origin, accent displaced by (adx, ady), both named by **Standard Encoding
-  code** and resolved through the font's **charset** (formats 0 / 1 / 2 and the ISOAdobe default).
-  It was an EMPTY glyph through 0.4.6.
-  ⭐ **Checked against fontTools 4.65.0 on a font fontTools itself authored** — the composed outline
-  is identical, point for point, which is what settles the one semantic question here: Type 1's
-  `seac` had a fifth argument `asb`, Type 2's `endchar` form drops it and the accent goes at
-  (adx, ady) directly.
-  ⚠ **The dev-host corpus cannot check this one.** A re-survey found **0 of 406** CFF faces using
-  `seac` — so unlike 0.4.2's outline differential, the evidence here is the fontTools font above and
-  `programs/cff_test.cyr`'s group I (four charset shapes, the width form, and nine refusals), not a
-  sweep. Said plainly because the absence is the interesting part: `seac` is a Type 1 relic.
-  ⛔ Refused rather than guessed: an unassigned code, an SID no charset entry carries, the Expert /
-  ExpertSubset predefined charsets (which rekha does not carry), a CID-keyed font (whose charset
-  maps to CIDs, not SIDs), a component that is the glyph itself, and a component that is itself a
-  `seac`. `REKHA_FONT_SIZE` grows 240 → 248 for the cached charset.
-- **v0.4.6 — WOFF2 (shipped).** `rekha_font_open_woff2` opens a `.woff2` end to end: the container
-  and its variable-length table directory, ONE Brotli stream through sankoch 2.8.0, the **glyf /
-  loca** reverse transform (seven substreams, the triplet coordinate encoding, inferred and explicit
-  bounding boxes, composites, the overlap bitmap) and the **hmtx** transform (left side bearings
-  rebuilt from glyf's xMin), then a reassembled SFNT with every checksum and `checkSumAdjustment`
-  RECOMPUTED, as the spec requires. `rekha_font_open_any` moved to `src/woff2.cyr` and now sniffs
-  all three of `wOFF`, `wOF2` and a bare SFNT.
-  ⭐ **MEASURED against an independent decoder on every WOFF2 on the dev host — 280 unique files
-  (Liberation, KaTeX, Fira, Source Serif / Code, NanumBarunGothic, Xiaolai CJK), 111,732 glyphs:
-  rekha's reconstruction and fontTools 4.65.0's are IDENTICAL for every glyph outline, advance and
-  cmap mapping, with 0 failures to open.** rekha's rebuilt SFNTs total 0.46% more bytes than
-  fontTools' (32,483,072 against 32,334,048).
-  ⚠ A rebuilt glyf is **not** byte-identical to the original and cannot be — the spec says several
-  encodings of one outline are valid. rekha's is deterministic and plain: one flag byte per point,
-  no REPEAT run-length.
-  ⚠ WOFF2 costs a consumer of `dist/rekha.cyr` **nothing**: it is in `[lib.woff]` only, beside
-  WOFF 1.0, and the base bundle did not change a line. ⛔ Font COLLECTIONS (`ttcf`) are refused —
-  item 8 below.
-- **v0.4.5 — the toolchain moves, and two leaves become one (shipped).** `cyrius` **6.6.4 → 6.6.6**
-  and `[deps.sadish]` **0.9.0 → 0.11.2**; `lib/` re-resolved against both. ⭐ **No rekha source
-  changed** — all 24 RUN suites build and pass under `CYRIUS_DCE=0` and `1` with no build-log
-  warning, and both bundles differ from 0.4.4 only in the `# Version:` banner. What the bump *did*
-  do is move one consumer-visible number and expose two blind CI gates, all three fixed here:
-  `dist/rekha.deps` now reads **`string`** alone (6.6.6's `lib/string.cyr` includes `lib/alloc.cyr`
-  itself, so `alloc` arrives transitively instead of being re-added by distlib's compile-verify);
-  the format gate stopped trusting `cyrius fmt --check`, which is a **measured false negative** on
-  6.6.6; and the stale-`dist/` message now says `--all`, without which the `[lib.woff]` profile is
-  left behind. ⚠ sadish **0.10.0 is an ABI break** — `SdPolyline` points went inline — and it does
-  not touch rekha, VERIFIED: rekha consumes `sd_path_*` and never a flatten output.
-- **v0.4.x line — next, in order:**
-  1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
-  2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
-  3. ~~OpenType/CFF (`OTTO`) outlines~~ — shipped in 0.4.2, above.
-  4. ~~**WOFF2**~~ — shipped in 0.4.6, below. ⚠ One follow-up is filed, not forgotten:
-     CI exercises WOFF2 over hand-emitted **stored** Brotli streams, because sankoch 2.8.0 decodes
-     Brotli and does not encode it. Real compressed streams are covered only by the dev-host
-     differential (280 files), which CI cannot run. When sankoch **2.8.1** ships its encoder, the
-     suite gains a third, genuinely compressed container variant —
-     `docs/development/issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`.
-  5. ~~`[deps].stdlib` trim~~ — shipped in 0.4.4, above.
-  6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
-     allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
-  7. ~~**CFF `seac`**~~ — shipped in 0.4.7, below.
-  8. ~~**TrueType Collections (`ttcf`)**~~ — shipped in 0.4.8, below.
-  9. ~~**CFF2**~~ — shipped in 0.4.9, below, at the **default instance**. What is left is applying
-     NON-default axis coordinates, which needs `fvar` / `avar` and the region scalars rekha does not
-     read — item 11.
- 11. ~~**Variable-font instancing**~~ — shipped in 0.4.11, below, for **CFF2**.
- 12. ~~**`gvar`**~~ — shipped in 0.4.12, below.
- 13. **`HVAR` / `MVAR`** — METRICS variations, the last piece of the variable-font picture rekha
-     reads. An instanced glyph's OUTLINE varies (0.4.11 for CFF2, 0.4.12 for TrueType) but its
-     ADVANCE does not: `rekha_advance_width` reads hmtx in design units and never consults a
-     variation store. `HVAR` is an ItemVariationStore over advance widths and side bearings, which
-     0.4.11's region scalars already know how to weight; the four phantom points `gvar` carries per
-     glyph are the older mechanism for the same thing.
- 10. ~~**WOFF2 collections**~~ — shipped in 0.4.10, below.
-- **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
-  sizes.
+rekha turns **font bytes into glyph outlines** and hands them to `sadish` as paths. Everything in
+this section is shipped and RUN-tested. This is the capability list; the per-release narrative —
+and the measurement every claim rests on — is [`CHANGELOG.md`](CHANGELOG.md). What is *not* here
+yet is [`docs/development/roadmap.md`](docs/development/roadmap.md).
+
+### Containers
+
+`rekha_font_open_any` sniffs all of them and returns a font.
+
+| container | entry point | since | checked against |
+|---|---|---|---|
+| bare SFNT — `\0\1\0\0`, `true`, `OTTO` | `rekha_font_open` | 0.2.0 | — |
+| TrueType Collections (`.ttc` / `.otc`) | `rekha_ttc_count` · `rekha_font_open_index` | 0.4.8 | 2- and 3-face collections fontTools authored; 2,298 glyphs identical |
+| WOFF 1.0 | `rekha_font_open_woff` | 0.4.1 | all 29 `.woff` on the dev host, byte-identical to a Python/zlib decoder |
+| WOFF2 | `rekha_font_open_woff2` | 0.4.6 | **280 files / 111,732 glyphs**, identical to fontTools 4.65.0 |
+| WOFF2 collections | `rekha_woff2_face_count` · `rekha_font_open_woff2_index` | 0.4.10 | round trip to the `.ttc` each was built from |
+
+⚠ The two web containers are **opt-in**: they live in `dist/rekha-woff.cyr` (`[lib.woff]`) and bring
+sankoch with them. `dist/rekha.cyr` never requires it.
+⚠ A rebuilt WOFF2 `glyf` is **not** byte-identical to the original and cannot be — the spec permits
+several encodings of one outline. rekha's is deterministic and plain: one flag byte per point, no
+REPEAT run-length. And there is **no independent WOFF2-collection decoder** to check against;
+fontTools has no collection support in its WOFF2 reader or writer at all, so what anchors 0.4.10 is
+the outcome — the rebuilt `.ttc` matching one fontTools authored, face for face.
+
+### Outlines
+
+Every format lands in the same `RekhaOutline`, so a consumer draws them the same way. Cubic control
+points are flagged, so an `OTTO` face draws through `sd_path_cubicto` with no consumer change.
+
+| outline source | since | checked against |
+|---|---|---|
+| `glyf` — simple and composite, the full flag set | 0.2.0 / 0.3.0 | — |
+| `CFF ` Type 2 charstrings, name-keyed **and** CID-keyed | 0.4.2 | **all 405 CFF faces of the dev host — 5,093,070 glyphs, 415,584,832 points, identical** |
+| `seac` — the accented glyph built from two others | 0.4.7 | a font fontTools authored, point for point ⚠ **0 of 406** host faces use `seac`, so there is no corpus sweep behind this one |
+| `CFF2` | 0.4.9 | fontTools twice: a CFF→CFF2 conversion, and a variable CFF2 read from the same bytes |
+
+### Variations
+
+`rekha_var_set_axis` puts an axis at a user value; every later `rekha_load_glyph` draws the font
+there. `fvar` + `avar` normalize the setting, and one scalar per region of the variation store
+weights the deltas.
+
+| | since | checked against |
+|---|---|---|
+| CFF2 `blend` / `vsindex` | 0.4.11 | fontTools at every location tested — axis defaults, both extremes, a region peak, halfway up one, the negative half, and a kinked `avar` map |
+| `gvar` — packed points, packed deltas, per-contour IUP, composite offsets | 0.4.12 | **1,027 points across 29 glyph instances**, all identical to fontTools |
+
+⛔ The axis API is deliberately coarse: `rekha_var_set_axis` normalizes, runs `avar` and rebuilds
+every region scalar, so it is a set-the-axes-then-draw call and not a per-glyph one.
+⚠ Outlines vary; **advances do not**. Metrics variations lead the roadmap.
+
+### Characters, metrics, and the sadish seam
+
+- **cmap** formats 4, 12, 13, 6 and 0; the best-ranked valid subtable wins and a broken record is
+  skipped rather than fatal; (3,0) symbol faces retry U+00xx at U+F0xx (0.4.0). MEASURED on 92
+  system faces against an independent reference: every codepoint U+0000..U+10FFFF identical.
+- **Horizontal metrics** — `hhea` / `hmtx`: `rekha_advance_width`, `rekha_char_advance` / `_px` /
+  `_fx` (rounded half-up), the line-box fields (0.3.6).
+- **The seam** — `rekha_outline_to_sdpath` / `rekha_char_to_sdpath` emit y-flipped, scaled paths
+  opened at exactly the glyph's verb and point count (0.4.3: the printable-ASCII set
+  **433,648 B → 59,784 B**). Every byte rekha allocates goes through `sd_alloc` (0.3.10), so 20
+  `rekha_char_to_sdpath` calls under an arena hook cost the global heap **exactly 0 bytes**.
+
+### Safety
+
+0.3.11 closed four out-of-bounds reads reachable from `rekha_char_to_sdpath` and bounded composite
+fan-out that could demand gigabytes. The invariant now enforced: every table lies after its own
+directory and inside the file, a fixed field is read only when its table's DECLARED length covers
+it, variable arrays stay inside their own table, and every outline's `end_pts` strictly increase and
+stay `< n_points`. Load caps — 4,096 points / 128 contours per outline, 64 glyph loads and 16,384
+decoded points per `rekha_load_glyph`, nesting depth 5, no component cycles — yield an EMPTY glyph,
+never a partial one. `programs/hostile_test.cyr` is the standing corpus: a crafted font per audit
+class, a seeded mutation sweep, and an A/B sentinel differential across the allocation seam.
+
+⚠ The font buffer is **borrowed** and its metadata snapshotted at open — do not mutate it
+afterwards, and open fonts OUTSIDE a scoped per-frame `sd_alloc` hook.
+
+## Roadmap
+
+The full list, with the evidence behind every item, is
+[`docs/development/roadmap.md`](docs/development/roadmap.md). What stands between 0.4.12 and a
+**1.0.0** — rekha's promise *complete, correct and frozen*:
+
+| milestone | what it closes |
+|---|---|
+| **0.5.x — conformance and the target** | Five things that are wrong or unproven rather than missing: CFF2 charstrings run on CFF's 48-entry argument stack where the format says **513**; the AGNOS / aarch64 target is never built and a wrong syscall number ships in `dist/`; an `avar` 2.0 table is dropped whole, segment maps included; `FontMatrix` is assumed rather than read; and three CI steps glob a `tests/tcyr` tier that does not exist. |
+| **0.6.x — the font's own answers** | The tables rekha transports and never reads — it resolves twelve, and a consumer cannot compute any of the rest from outlines. `HVAR` / `MVAR` first, because an instanced glyph's outline varies and its advance does not; then `OS/2`, `name`, `fvar` named instances + `STAT`, `post`, `kern`, and vertical metrics. |
+| **0.7.x — failures that say what failed** | `RekhaErr` is published, documented, and produced by nothing: every refusal collapses to a 0 or an empty glyph, so a caller cannot tell "not a font" from "truncated" from "over a cap". |
+| **0.8.x — hinting** | `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter, for small sizes. CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
+| **0.9.0 — the freeze** | 34 of 172 functions carry `@public`, so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |
+
+⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
+complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and
+anti-aliasing (`sadish`); bitmap glyph sources, including the strikes embedded in OpenType files
+(`kashi`); subsetting and font writing, because rekha is a reader.
 
 ## Place in the stack
 

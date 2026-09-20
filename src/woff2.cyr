@@ -399,7 +399,7 @@ fn rekha_w2_bit(td, base, i): i64 {
 # ⭐ This is the spec's 128-row "Triplet Encoding" table (5.2) as ARITHMETIC, not a literal table.
 # The six groups it collapses to — and the whole closed form — were CHECKED row by row against the
 # W3C table: all 128 rows agree on byte count, x bits, y bits, delta x, delta y and both signs
-# (scripts/woff2_triplet_check.py, which re-derives the table from the published spec).
+# (`scripts/woff2_triplet.py verify`, which re-derives the table from the published spec).
 # ⛔ `>>` IS LOGICAL IN CYRIUS. Every shift here is on a non-negative value for that reason; the
 # signs are applied afterwards as `0 - v`, never by shifting a negative.
 fn rekha_w2_triplet(td, p, end, flag, out): i64 {

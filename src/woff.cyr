@@ -7,10 +7,9 @@
 # ⛔ OPT-IN. This module calls sankoch's `zlib_decompress_capped` (sankoch >= 2.7.13), so it is NOT
 # in `[lib].modules`: `dist/rekha.cyr` never requires sankoch. A WOFF consumer takes
 # `dist/rekha-woff.cyr` (`[lib.woff]` — rekha's modules plus this one) and brings sankoch itself —
-# the stdlib `sankoch` leaf (which needs `sync` in scope), or a profile bundle that links. (sankoch's
-# per-codec profiles do not link today: sankoch/docs/development/issues/
-# 2026-09-15-profile-bundles-call-sankoch-reset-tables-outside-their-closure.md.) In-tree it follows
-# `src/lib.cyr`, `lib/sync.cyr` and `lib/sankoch.cyr`.
+# the stdlib `sankoch` leaf (which needs `sync` in scope), or a per-codec profile bundle — those
+# LINK as of sankoch 2.8.0, the release this pin's stdlib snapshot carries, and rekha's filing
+# against them is archived. In-tree it follows `src/lib.cyr`, `lib/sync.cyr` and `lib/sankoch.cyr`.
 #
 # WOFFHeader (44 bytes, big-endian):
 #   +0 signature u32 'wOFF' · +4 flavor u32 (the SFNT's sfntVersion) · +8 length u32 (whole file)

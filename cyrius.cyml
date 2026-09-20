@@ -87,8 +87,9 @@ modules = [
 # in its own test. WOFF2's Brotli decoder, which rekha filed for, SHIPPED in sankoch 2.8.0 — the
 # release the 6.6.6 stdlib snapshot carries: `brotli_decompress` / `brotli_decompress_capped`, and
 # a `[lib.woff]` profile that is `[lib.zlib]` PLUS Brotli so one bundle covers WOFF 1.0 and WOFF2
-# (sankoch ADR 0001-brotli-decoder-placement.md; rekha's proposal is archived). Nothing here uses it
-# yet — WOFF2 is still rekha's to write.
+# (sankoch ADR 0001-brotli-decoder-placement.md; rekha's proposal is archived). src/woff2.cyr has
+# consumed it since 0.4.6 — through `[lib.woff]`, never through this array, which is only what a
+# consumer of `dist/rekha.cyr` must vendor.
 stdlib = ["string"]
 
 # sadish — the rasterize target. rekha emits glyph-outline PATHS

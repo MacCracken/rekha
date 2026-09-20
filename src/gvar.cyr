@@ -23,8 +23,8 @@
 # ⚠ EVERY GLYPH HAS FOUR PHANTOM POINTS past its real ones — the two side bearings and the two
 # vertical ones — and a tuple's deltas cover them too. rekha decodes them (a tuple that names them
 # must still be read to the end) and applies only the real points. Phantom deltas are METRICS
-# variations, which belong with `HVAR` / `MVAR` over rekha's advance readers — roadmap v0.4.x item
-# 13, filed when this one shipped (see CHANGELOG 0.4.12).
+# variations, which belong with `HVAR` / `MVAR` over rekha's advance readers — the metrics item in
+# docs/development/roadmap.md, filed when this one shipped (see CHANGELOG 0.4.12).
 #
 # ⛔ WHAT IS REFUSED — and a refusal here leaves the outline at its DEFAULT, never half-varied:
 #   - a major version other than 1, or a header, offset array or data slice outside the table;

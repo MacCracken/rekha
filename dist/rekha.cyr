@@ -2845,12 +2845,12 @@ fn rekha_cff_load(font, gid): i64 {
 # its charstrings, so a CFF2 face draws through rekha_load_glyph / rekha_glyph_to_sdpath /
 # rekha_char_to_sdpath with no consumer change, exactly as an 'OTTO' CFF face does.
 #
-# ⭐ THE DEFAULT INSTANCE, AND ONLY THAT. A CFF2 font is a variable font: its charstrings carry
-# `blend` operators whose deltas move every point as the design axes move. rekha decodes the font at
-# its DEFAULT location, where every region's scalar is zero and each blended value is simply its
-# default — which is the instance a consumer that does not set axis coordinates wants, and the one
-# `fvar`'s defaults name. Applying non-default coordinates needs `fvar` / `avar` and the region
-# scalars, which rekha does not read; the roadmap carries that separately.
+# ⭐ THE DEFAULT INSTANCE, AND SINCE 0.4.11 EVERY OTHER ONE. A CFF2 font is a variable font: its
+# charstrings carry `blend` operators whose deltas move every point as the design axes move. Left
+# alone, rekha decodes the font at its DEFAULT location, where every region's scalar is zero and a
+# blended value is simply its default — the instance a consumer that sets no axis wants, and the
+# one `fvar`'s defaults name. `rekha_var_set_axis` (src/var.cyr, 0.4.11) reads `fvar` / `avar` and
+# builds the region scalars `blend` then weights its deltas by.
 #
 # WHAT IS DIFFERENT FROM CFF (Adobe TN 5176 vs the OpenType CFF2 chapter), and it is most of the
 # container:
@@ -3037,9 +3037,10 @@ fn rekha_cff2_resolve(f): i64 {
 # of the region it belongs to. At the default location every scalar is zero, which is why 0.4.9
 # could decode a CFF2 without any of this.
 #
-# ⛔ WHAT THIS DOES NOT DO. Only the CFF2 charstring `blend` consumes these scalars today. `gvar`
-# (TrueType outline deltas), `HVAR` (metrics) and `MVAR` are separate delta formats over the same
-# region machinery — the roadmap carries them.
+# ⛔ WHAT THIS DOES NOT DO. The region-scalar ARRAY built here is the CFF2 variation store's, and
+# the CFF2 charstring `blend` is its only consumer. `gvar` (0.4.12) shares the tent maths instead —
+# `rekha_var_axis_factor`, `rekha_var_live` — and derives its own scalar per tuple. `HVAR` and
+# `MVAR` are METRICS deltas over the same machinery and are not read: docs/development/roadmap.md.
 #
 # fvar (OpenType): majorVersion u16 · minorVersion u16 · axesArrayOffset u16 · reserved u16 ·
 #   axisCount u16 · axisSize u16 · instanceCount u16 · instanceSize u16; then axisCount
@@ -3048,8 +3049,10 @@ fn rekha_cff2_resolve(f): i64 {
 # avar: majorVersion u16 · minorVersion u16 · reserved u16 · axisSegmentMapCount u16; then one
 #   SegmentMap per axis: positionMapCount u16 · that many (fromCoordinate, toCoordinate) F2Dot14
 #   pairs, both in normalized space.
-# ⚠ avar 2.0 adds a variation store on top of the segment maps. rekha reads the maps, which 2.0
-# keeps and which are the whole of avar 1.0; a 2.0 table's extra mapping is NOT applied.
+# ⛔ avar 2.0 adds a variation store on top of the segment maps, and rekha takes majorVersion 1
+# ONLY — `rekha_var_resolve` caches the table just for version 1, so a 2.0 table is dropped WHOLE,
+# the segment maps it keeps unchanged from 1.0 included. That leaves such an axis UNMAPPED rather
+# than half-mapped. Accepting 2.0's maps is roadmap work: docs/development/roadmap.md.
 #
 # ⚠ FIXED POINT. Axis values and normalized coordinates are 16.16 here, because that is what fvar's
 # own Fixed fields are and what the charstring interpreter already works in. A region's coordinates
@@ -3400,8 +3403,8 @@ fn rekha_var_resolve(f): i64 {
 # ⚠ EVERY GLYPH HAS FOUR PHANTOM POINTS past its real ones — the two side bearings and the two
 # vertical ones — and a tuple's deltas cover them too. rekha decodes them (a tuple that names them
 # must still be read to the end) and applies only the real points. Phantom deltas are METRICS
-# variations, which belong with `HVAR` / `MVAR` over rekha's advance readers — roadmap v0.4.x item
-# 13, filed when this one shipped (see CHANGELOG 0.4.12).
+# variations, which belong with `HVAR` / `MVAR` over rekha's advance readers — the metrics item in
+# docs/development/roadmap.md, filed when this one shipped (see CHANGELOG 0.4.12).
 #
 # ⛔ WHAT IS REFUSED — and a refusal here leaves the outline at its DEFAULT, never half-varied:
 #   - a major version other than 1, or a header, offset array or data slice outside the table;
