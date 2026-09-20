@@ -37,6 +37,9 @@ var REKHA_TAG_AVAR = 0x61766172;   # 'avar'
 # the cap keeps the per-font arrays small and every index multiplication trivially in range.
 var REKHA_VAR_MAXAXES   = 64;
 var REKHA_VAR_MAXREGION = 4096;
+# Named instances in one font. Real families carry a few dozen; the cap keeps the index
+# multiplication below trivially in range.
+var REKHA_VAR_MAXINST   = 4096;
 var REKHA_VAR_ONE       = 65536;   # 1.0 in 16.16
 
 # 16.16 x 16.16 -> 16.16, rounded half up. ⚠ `>>` is logical in Cyrius, so the shift is sd_asr.
@@ -257,6 +260,84 @@ fn rekha_var_build_scalars(font, vstore): i64 {
 
 # @public — the normalized coordinate axis `i` currently sits at, in 16.16. 0 (the default location)
 # until rekha_var_set_axis moves it.
+# ================================================================
+# Named instances — the styles a variable font ships with
+# ================================================================
+# ⭐ WHAT THESE ARE FOR. An axis is a continuum; a NAMED INSTANCE is a point on it the designer
+# blessed and gave a name to — "Regular", "Bold", "Condensed Light". A font menu lists these, not
+# axis values, and `rekha_var_set_instance` is the one call that turns a menu choice into a drawn
+# font. Every coordinate is a USER value, the same units `rekha_var_set_axis` takes.
+# ⚠ An instance record names its style through the `name` table (0.6.2): `rekha_name_utf8` on
+# `rekha_var_instance_name_id` is the text.
+
+# @public — how many named instances the font ships. 0 when there are none or the array is one
+# rekha will not walk.
+fn rekha_var_instance_count(font): i64 {
+    if (font == 0) { return 0; }
+    return load64(font + 504);
+}
+
+# The absolute offset of instance `i`'s record, or 0.
+fn rekha_var_inst_rec(font, i): i64 {
+    if (font == 0) { return 0; }
+    if (i < 0) { return 0; }
+    if (i >= load64(font + 504)) { return 0; }
+    return load64(font + 496) + i * load64(font + 512);
+}
+
+# @public — instance `i`'s subfamily name id, for `rekha_name_utf8`. 0 when there is no such
+# instance.
+fn rekha_var_instance_name_id(font, i): i64 {
+    var r = rekha_var_inst_rec(font, i);
+    if (r == 0) { return 0; }
+    return rekha_rd_u16(load64(font), r);
+}
+
+# @public — instance `i`'s PostScript name id, or 0 when the record does not carry one. ⚠ The
+# field is OPTIONAL and its presence is told by instanceSize alone, which is why the resolver
+# refuses any size but the two the spec allows.
+fn rekha_var_instance_ps_name_id(font, i): i64 {
+    var r = rekha_var_inst_rec(font, i);
+    if (r == 0) { return 0; }
+    var n = load64(font + 280);
+    if (load64(font + 512) != n * 4 + 6) { return 0; }
+    return rekha_rd_u16(load64(font), r + 4 + n * 4);
+}
+
+# @public — instance `i`'s flags word (every bit reserved as of OpenType 1.9), or 0.
+fn rekha_var_instance_flags(font, i): i64 {
+    var r = rekha_var_inst_rec(font, i);
+    if (r == 0) { return 0; }
+    return rekha_rd_u16(load64(font), r + 2);
+}
+
+# @public — instance `i`'s coordinate on axis `a`, in 16.16 USER units. 0 when either index is out
+# of range. ⚠ 0 is a real coordinate on most axes, so check the counts first.
+fn rekha_var_instance_coord(font, i, a): i64 {
+    var r = rekha_var_inst_rec(font, i);
+    if (r == 0) { return 0; }
+    if (a < 0 || a >= load64(font + 280)) { return 0; }
+    var v = rekha_rd_u32(load64(font), r + 4 + a * 4);
+    if (v >= 0x80000000) { v = v - 0x100000000; }
+    return v;
+}
+
+# @public — put every axis at instance `i`'s coordinates, so the next rekha_load_glyph draws that
+# style. Returns 1, or 0 when there is no such instance. ⛔ It sets EVERY axis, including the ones
+# the instance leaves at their defaults: a named instance is a whole location, and applying half of
+# one over a previous setting would draw a style the font does not ship.
+fn rekha_var_set_instance(font, i): i64 {
+    var r = rekha_var_inst_rec(font, i);
+    if (r == 0) { return 0; }
+    var n = load64(font + 280);
+    var a = 0;
+    while (a < n) {
+        if (rekha_var_set_axis(font, a, rekha_var_instance_coord(font, i, a)) == 0) { return 0; }
+        a = a + 1;
+    }
+    return 1;
+}
+
 fn rekha_var_coord(font, i): i64 {
     if (font == 0) { return 0; }
     if (i < 0 || i >= load64(font + 280)) { return 0; }
@@ -339,6 +420,9 @@ fn rekha_var_resolve(f): i64 {
     store64(f + 312, 0);
     store64(f + 320, 0);
     store64(f + 328, 0);
+    store64(f + 496, 0);
+    store64(f + 504, 0);
+    store64(f + 512, 0);
     store64(f + 304, load64(f + 8));                  # the whole file bounds every read below
     var buf = load64(f);
     var c: i64[1];
@@ -357,6 +441,24 @@ fn rekha_var_resolve(f): i64 {
     store64(f + 272, fvar + aoff);
     store64(f + 280, n);
     store64(f + 288, asz);
+    # ⭐ THE INSTANCE ARRAY FOLLOWS THE AXES, and nothing else says where it starts: its offset is
+    # `axesArrayOffset + axisCount x axisSize` and there is no field for it. 0.6.3.
+    # ⛔ instanceSize is what says whether a record carries a postScriptNameID. The spec allows
+    # exactly two sizes — axisCount x 4 + 4 without it, + 6 with — and anything else is a record
+    # rekha will not walk, because guessing the stride is guessing every coordinate after the
+    # first. A bad instance array loses only the instances; the axes stay.
+    var icnt = rekha_rd_u16(buf, fvar + 12);
+    var isz = rekha_rd_u16(buf, fvar + 14);
+    var iat = fvar + aoff + n * asz;
+    if (icnt > 0 && icnt <= REKHA_VAR_MAXINST) {
+        if (isz == n * 4 + 4 || isz == n * 4 + 6) {
+            if (iat + icnt * isz <= fend) {
+                store64(f + 496, iat);
+                store64(f + 504, icnt);
+                store64(f + 512, isz);
+            }
+        }
+    }
     var avar = rekha_find_table_len(f, REKHA_TAG_AVAR, &c);
     if (avar != 0) {
         if (avar + 8 <= avar + load64(&c)) {

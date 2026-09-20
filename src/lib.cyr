@@ -74,3 +74,6 @@ include "src/os2.cyr"
 # name.cyr decodes the `name` table to UTF-8 in a caller's buffer. It depends on nothing but
 # sfnt.cyr's readers; var.cyr calls forward into it for an axis's nameID.
 include "src/name.cyr"
+# stat.cyr reads the style attributes a family is ordered and named by. It names ids in the
+# `name` table and depends on nothing else, so it follows name.cyr.
+include "src/stat.cyr"

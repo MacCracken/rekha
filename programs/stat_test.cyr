@@ -1,0 +1,607 @@
+# programs/stat_test.cyr — RUN test for named instances (src/var.cyr) and STAT (src/stat.cyr).
+#
+# ⭐ THE FONT IS BUILT HERE — head / maxp / hhea / hmtx / loca / glyf / name / fvar / STAT, with two
+# axes (`wght` 100-400-900, `wdth` 50-100-200), four named instances, and a STAT carrying one axis
+# value of EACH of the four formats plus a zero offset, which is the spec's "no entry here".
+#
+# ⭐ WHAT THE INSTANCES ARE REALLY FOR is group B: a font menu lists styles, not axis values, and
+# `rekha_var_set_instance` is the one call that turns "Bold Condensed" into a drawn font. Its
+# ⛔ is that it sets EVERY axis — applying half an instance over a previous setting would draw a
+# style the font does not ship.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "stat_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var FB = 0;
+var FB_CAP = 16384;
+var NG = 2;
+var OUT = 0;
+var OUT_CAP = 256;
+
+fn pu16(off, v): i64 {
+    store8(FB + off, (v >> 8) & 255);
+    store8(FB + off + 1, v & 255);
+    return 0;
+}
+
+fn pu32(off, v): i64 {
+    pu16(off, (v >> 16) & 65535);
+    pu16(off + 2, v & 65535);
+    return 0;
+}
+
+# ── a tiny name table: one Windows/English record per id ───────────────────
+var NM_MAX = 24;
+var g_nm = 0;           # i64[NM_MAX * 2]: id, pool offset
+var g_nmn = 0;
+var g_pool = 0;
+var g_pooln = 0;
+
+fn nm_reset(): i64 {
+    g_nmn = 0;
+    g_pooln = 0;
+    return 0;
+}
+
+fn nm_add(id, s): i64 {
+    store64(g_nm + g_nmn * 16, id);
+    store64(g_nm + g_nmn * 16 + 8, g_pooln);
+    var i = 0;
+    var n = strlen(s);
+    while (i < n) {
+        store8(g_pool + g_pooln, 0);
+        store8(g_pool + g_pooln + 1, load8(s + i));
+        g_pooln = g_pooln + 2;
+        i = i + 1;
+    }
+    store64(g_nm + g_nmn * 16 + 8, load64(g_nm + g_nmn * 16 + 8) | (n * 2) << 32);
+    g_nmn = g_nmn + 1;
+    return 0;
+}
+
+fn put_name(at): i64 {
+    var so = 6 + g_nmn * 12;
+    pu16(at, 0);
+    pu16(at + 2, g_nmn);
+    pu16(at + 4, so);
+    var i = 0;
+    while (i < g_nmn) {
+        var r = at + 6 + i * 12;
+        pu16(r, 3);
+        pu16(r + 2, 1);
+        pu16(r + 4, 1033);
+        pu16(r + 6, load64(g_nm + i * 16));
+        var ol = load64(g_nm + i * 16 + 8);
+        pu16(r + 8, ol >> 32);
+        pu16(r + 10, ol & 0xFFFFFFFF);
+        i = i + 1;
+    }
+    memcpy(FB + at + so, g_pool, g_pooln);
+    return so + g_pooln;
+}
+
+# ── build options ────────────────────────────────
+var o_nofvar = 0;
+var o_nostat = 0;
+var o_isz = 0;          # override instanceSize (0 = the natural axisCount * 4 + 6)
+var o_nops = 0;         # write instanceSize without the postScriptNameID field
+var o_ninst = 4;        # how many instances to write
+var o_fakecount = 0;    # write this instanceCount while laying out (and declaring) o_ninst
+var o_smaj = 1;         # the STAT majorVersion
+var o_sminor = 1;       # the STAT minorVersion
+var o_sasz = 8;         # the STAT designAxisSize
+var o_sbadoff = 0;      # push the axis value array past the table
+
+var g_fvar = 0;
+var g_fvarlen = 0;
+var g_stat = 0;
+var g_statlen = 0;
+var g_flen = 0;
+
+fn inst_wght(i): i64 {
+    if (i == 1 || i == 3) { return 700; }
+    return 400;
+}
+
+fn inst_wdth(i): i64 {
+    if (i >= 2) { return 75; }
+    return 100;
+}
+
+fn put_fvar(at): i64 {
+    var isz = 2 * 4 + 6;
+    if (o_nops != 0) { isz = 2 * 4 + 4; }
+    if (o_isz != 0) { isz = o_isz; }
+    pu16(at, 1);
+    pu16(at + 4, 16);
+    pu16(at + 6, 2);
+    pu16(at + 8, 2);
+    pu16(at + 10, 20);
+    var dc = o_ninst;
+    if (o_fakecount != 0) { dc = o_fakecount; }
+    pu16(at + 12, dc);
+    pu16(at + 14, isz);
+    pu32(at + 16, 0x77676874);                          # 'wght'
+    pu32(at + 20, 100 * 65536);
+    pu32(at + 24, 400 * 65536);
+    pu32(at + 28, 900 * 65536);
+    pu16(at + 34, 300);
+    pu32(at + 36, 0x77647468);                          # 'wdth'
+    pu32(at + 40, 50 * 65536);
+    pu32(at + 44, 100 * 65536);
+    pu32(at + 48, 200 * 65536);
+    pu16(at + 54, 301);
+    var iat = at + 56;
+    var i = 0;
+    while (i < o_ninst) {
+        var r = iat + i * isz;
+        pu16(r, 310 + i);                               # subfamilyNameID
+        pu16(r + 2, 0);                                 # flags
+        pu32(r + 4, inst_wght(i) * 65536);
+        pu32(r + 8, inst_wdth(i) * 65536);
+        if (isz >= 2 * 4 + 6) { pu16(r + 12, 320 + i); }
+        i = i + 1;
+    }
+    return 56 + o_ninst * isz;
+}
+
+# format 3 at +12, format 1 at +28, format 2 at +40, format 4 at +60, then a zero offset
+fn put_stat(at): i64 {
+    pu16(at, o_smaj);
+    pu16(at + 2, o_sminor);
+    pu16(at + 4, o_sasz);
+    pu16(at + 6, 2);                                    # designAxisCount
+    pu32(at + 8, 20);                                   # designAxesOffset
+    pu16(at + 12, 5);                                   # axisValueCount
+    var vo = 36;
+    if (o_sbadoff != 0) { vo = 8000; }
+    pu32(at + 14, vo);
+    pu16(at + 18, 340);                                 # elidedFallbackNameID
+    pu32(at + 20, 0x77676874); pu16(at + 24, 300); pu16(at + 26, 0);
+    pu32(at + 28, 0x77647468); pu16(at + 32, 301); pu16(at + 34, 1);
+    if (o_sbadoff != 0) { return 36; }
+    var base = at + 36;
+    pu16(base, 12);
+    pu16(base + 2, 28);
+    pu16(base + 4, 40);
+    pu16(base + 6, 60);
+    pu16(base + 8, 0);                                  # ⛔ the spec's "no entry here"
+    # 0: format 3 — Regular, elidable, linked to Bold
+    var v = base + 12;
+    pu16(v, 3); pu16(v + 2, 0); pu16(v + 4, 2); pu16(v + 6, 330);
+    pu32(v + 8, 400 * 65536); pu32(v + 12, 700 * 65536);
+    # 1: format 1 — Bold
+    v = base + 28;
+    pu16(v, 1); pu16(v + 2, 0); pu16(v + 4, 0); pu16(v + 6, 331);
+    pu32(v + 8, 700 * 65536);
+    # 2: format 2 — Condensed, nominal 75 over 50..87
+    v = base + 40;
+    pu16(v, 2); pu16(v + 2, 1); pu16(v + 4, 1); pu16(v + 6, 332);
+    pu32(v + 8, 75 * 65536); pu32(v + 12, 50 * 65536); pu32(v + 16, 87 * 65536);
+    # 3: format 4 — Bold Condensed, two pairs
+    v = base + 60;
+    pu16(v, 4); pu16(v + 2, 2); pu16(v + 4, 0); pu16(v + 6, 333);
+    pu16(v + 8, 0); pu32(v + 10, 700 * 65536);
+    pu16(v + 14, 1); pu32(v + 16, 75 * 65536);
+    return 36 + 80;
+}
+
+fn build(): i64 {
+    memset(FB, 0, FB_CAP);
+    nm_reset();
+    nm_add(300, "Weight");
+    nm_add(301, "Width");
+    nm_add(310, "Regular");
+    nm_add(311, "Bold");
+    nm_add(312, "Condensed");
+    nm_add(313, "Bold Condensed");
+    nm_add(320, "T-Regular");
+    nm_add(321, "T-Bold");
+    nm_add(330, "Regular");
+    nm_add(331, "Bold");
+    nm_add(332, "Condensed");
+    nm_add(333, "Bold Condensed");
+    nm_add(340, "Normal");
+    var ntab = 7;
+    if (o_nofvar == 0) { ntab = ntab + 1; }
+    if (o_nostat == 0) { ntab = ntab + 1; }
+    pu32(0, 0x00010000);
+    pu16(4, ntab);
+    var at = 12 + ntab * 16;
+    var head_at = at;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var loca_at = hmtx_at + NG * 4;
+    var glyf_at = loca_at + (NG + 1) * 4;
+    var name_at = glyf_at + 4;
+    var namelen = put_name(name_at);
+    var fvar_at = name_at + ((namelen + 3) & (0 - 4));
+    g_fvar = fvar_at;
+    g_fvarlen = 0;
+    if (o_nofvar == 0) { g_fvarlen = put_fvar(fvar_at); }
+    var stat_at = fvar_at + ((g_fvarlen + 3) & (0 - 4));
+    g_stat = stat_at;
+    g_statlen = 0;
+    if (o_nostat == 0) { g_statlen = put_stat(stat_at); }
+
+    pu16(head_at + 18, 1000);
+    pu16(head_at + 50, 1);
+    pu16(maxp_at + 4, NG);
+    pu16(hhea_at + 34, NG);
+    var i = 0;
+    while (i < NG) {
+        pu16(hmtx_at + i * 4, 500);
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= NG) {
+        pu32(loca_at + i * 4, 0);
+        i = i + 1;
+    }
+
+    var d = 12;
+    pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
+    pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, NG * 4); d = d + 16;
+    pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, (NG + 1) * 4); d = d + 16;
+    pu32(d, REKHA_TAG_GLYF); pu32(d + 8, glyf_at); pu32(d + 12, 4); d = d + 16;
+    pu32(d, REKHA_TAG_NAME); pu32(d + 8, name_at); pu32(d + 12, namelen); d = d + 16;
+    if (o_nofvar == 0) {
+        pu32(d, 0x66766172); pu32(d + 8, fvar_at); pu32(d + 12, g_fvarlen); d = d + 16;
+    }
+    if (o_nostat == 0) {
+        pu32(d, REKHA_TAG_STAT); pu32(d + 8, stat_at); pu32(d + 12, g_statlen); d = d + 16;
+    }
+    g_flen = stat_at + g_statlen;
+    if (g_flen < fvar_at + g_fvarlen) { g_flen = fvar_at + g_fvarlen; }
+    return g_flen;
+}
+
+fn opts_reset(): i64 {
+    o_nofvar = 0;
+    o_nostat = 0;
+    o_isz = 0;
+    o_nops = 0;
+    o_ninst = 4;
+    o_fakecount = 0;
+    o_smaj = 1;
+    o_sminor = 1;
+    o_sasz = 8;
+    o_sbadoff = 0;
+    return 0;
+}
+
+var g_f = 0;
+
+fn openf(): i64 {
+    build();
+    g_f = rekha_font_open(FB, g_flen);
+    return g_f;
+}
+
+fn want_name(id, want): i64 {
+    memset(OUT, 0, OUT_CAP);
+    var n = rekha_name_utf8(g_f, id, OUT, OUT_CAP);
+    check(n, strlen(want));
+    if (n != strlen(want)) { return 1; }
+    var i = 0;
+    var same = 1;
+    while (i < n) {
+        if (load8(OUT + i) != load8(want + i)) { same = 0; }
+        i = i + 1;
+    }
+    check(same, 1);
+    return 0;
+}
+
+# ── A) the named instances ─────────────────────────────
+fn t_instances(): i64 {
+    g_group = "A instances";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 2);
+    check(rekha_var_instance_count(g_f), 4);
+    check(rekha_var_instance_name_id(g_f, 0), 310);
+    check(rekha_var_instance_name_id(g_f, 3), 313);
+    check(rekha_var_instance_name_id(g_f, 4), 0);
+    check(rekha_var_instance_name_id(g_f, 0 - 1), 0);
+    check(rekha_var_instance_ps_name_id(g_f, 1), 321);
+    check(rekha_var_instance_flags(g_f, 2), 0);
+    check(sd_asr(rekha_var_instance_coord(g_f, 3, 0), 16), 700);
+    check(sd_asr(rekha_var_instance_coord(g_f, 3, 1), 16), 75);
+    check(rekha_var_instance_coord(g_f, 3, 2), 0);
+    check(rekha_var_instance_count(0), 0);
+    # ⭐ THE NAMES, which is the whole point: an instance is a label a menu can show.
+    want_name(rekha_var_instance_name_id(g_f, 0), "Regular");
+    want_name(rekha_var_instance_name_id(g_f, 3), "Bold Condensed");
+    want_name(rekha_var_instance_ps_name_id(g_f, 0), "T-Regular");
+    # ⚠ the postScriptNameID field is OPTIONAL, and instanceSize is the only thing that says so
+    opts_reset();
+    o_nops = 1;
+    check(openf() != 0, 1);
+    check(rekha_var_instance_count(g_f), 4);
+    check(rekha_var_instance_name_id(g_f, 1), 311);
+    check(sd_asr(rekha_var_instance_coord(g_f, 1, 0), 16), 700);
+    check(rekha_var_instance_ps_name_id(g_f, 1), 0);
+    return 0;
+}
+
+# ── B) selecting one ───────────────────────────────
+fn t_select(): i64 {
+    g_group = "B select";
+    opts_reset();
+    check(openf() != 0, 1);
+    # at the default nothing is set
+    check(rekha_var_coord(g_f, 0), 0);
+    check(rekha_var_coord(g_f, 1), 0);
+    # "Bold Condensed": wght 700 of 400..900 is +0.6, wdth 75 of 50..100 is -0.5
+    check(rekha_var_set_instance(g_f, 3), 1);
+    check(rekha_var_coord(g_f, 0), 39322);              # 0.6 in 16.16, half up
+    check(rekha_var_coord(g_f, 1), 0 - 32768);          # -0.5 exactly
+    # ⛔ AND SELECTING "Bold" AFTER IT PUTS wdth BACK. A named instance is a whole location, so
+    # every axis moves — leaving wdth at Condensed would draw a style the font does not ship.
+    check(rekha_var_set_instance(g_f, 1), 1);
+    check(rekha_var_coord(g_f, 0), 39322);
+    check(rekha_var_coord(g_f, 1), 0);
+    # the default instance puts everything back to zero
+    check(rekha_var_set_instance(g_f, 0), 1);
+    check(rekha_var_coord(g_f, 0), 0);
+    check(rekha_var_coord(g_f, 1), 0);
+    check(rekha_var_set_instance(g_f, 9), 0);
+    check(rekha_var_set_instance(0, 0), 0);
+    return 0;
+}
+
+# ── C) instance refusals: the axes survive them ──────────────────────
+fn t_inst_refuse(): i64 {
+    g_group = "C instance refusals";
+    # ⛔ A STRIDE THE SPEC DOES NOT ALLOW. instanceSize must be axisCount * 4 + 4 or + 6; anything
+    # else and every coordinate after the first is at a guessed offset, so rekha walks none of it.
+    opts_reset();
+    o_isz = 13;
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 2);                # ...and the axes are untouched
+    check(rekha_var_instance_count(g_f), 0);
+    check(rekha_var_instance_name_id(g_f, 0), 0);
+    check(rekha_var_set_instance(g_f, 0), 0);
+    # ⛔ A COUNT THE TABLE'S OWN LENGTH DOES NOT COVER. The header says 900 and there is room for
+    # four; the array is not walked at all rather than walked as far as it goes, because a short
+    # read here is a coordinate from whatever follows fvar.
+    opts_reset();
+    o_fakecount = 900;
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 2);
+    check(rekha_var_instance_count(g_f), 0);
+    # none at all
+    opts_reset();
+    o_ninst = 0;
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 2);
+    check(rekha_var_instance_count(g_f), 0);
+    # no fvar at all
+    opts_reset();
+    o_nofvar = 1;
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 0);
+    check(rekha_var_instance_count(g_f), 0);
+    return 0;
+}
+
+# ── D) STAT's design axes ─────────────────────────────
+fn t_stat_axes(): i64 {
+    g_group = "D stat axes";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 1);
+    check(rekha_stat_axis_count(g_f), 2);
+    check(rekha_stat_axis_tag(g_f, 0), 0x77676874);
+    check(rekha_stat_axis_tag(g_f, 1), 0x77647468);
+    check(rekha_stat_axis_name_id(g_f, 0), 300);
+    check(rekha_stat_axis_ordering(g_f, 0), 0);
+    check(rekha_stat_axis_ordering(g_f, 1), 1);
+    check(rekha_stat_axis_tag(g_f, 2), 0);
+    check(rekha_stat_fallback_name_id(g_f), 340);
+    want_name(rekha_stat_axis_name_id(g_f, 0), "Weight");
+    want_name(rekha_stat_fallback_name_id(g_f), "Normal");
+    # ⚠ elidedFallbackNameID is a minorVersion 1 field; a 1.0 table has none
+    opts_reset();
+    o_sminor = 0;
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 1);
+    check(rekha_stat_fallback_name_id(g_f), 0);
+    check(rekha_stat_axis_count(g_f), 2);
+    return 0;
+}
+
+# ── E) one axis value of every format, through one pair API ──────────────────
+fn t_stat_values(): i64 {
+    g_group = "E stat values";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_stat_value_count(g_f), 5);
+
+    # 0: format 3 — Regular, ELIDABLE, linked to Bold
+    check(rekha_stat_value_format(g_f, 0), 3);
+    check(rekha_stat_value_flags(g_f, 0), REKHA_STAT_ELIDABLE);
+    check(rekha_stat_value_name_id(g_f, 0), 330);
+    check(rekha_stat_value_pairs(g_f, 0), 1);
+    check(rekha_stat_value_axis(g_f, 0, 0), 0);
+    check(sd_asr(rekha_stat_value_value(g_f, 0, 0), 16), 400);
+    check(sd_asr(rekha_stat_value_linked(g_f, 0), 16), 700);
+    check(rekha_stat_value_min(g_f, 0), 0);             # not a format 2
+    check(rekha_stat_value_axis(g_f, 0, 1), 0 - 1);
+
+    # 1: format 1 — Bold
+    check(rekha_stat_value_format(g_f, 1), 1);
+    check(rekha_stat_value_flags(g_f, 1), 0);
+    check(rekha_stat_value_pairs(g_f, 1), 1);
+    check(sd_asr(rekha_stat_value_value(g_f, 1, 0), 16), 700);
+    check(rekha_stat_value_linked(g_f, 1), 0);          # not a format 3
+    want_name(rekha_stat_value_name_id(g_f, 1), "Bold");
+
+    # 2: format 2 — Condensed, nominal 75 over 50..87, OLDER_SIBLING
+    check(rekha_stat_value_format(g_f, 2), 2);
+    check(rekha_stat_value_flags(g_f, 2), REKHA_STAT_OLDER_SIBLING);
+    check(rekha_stat_value_axis(g_f, 2, 0), 1);
+    check(sd_asr(rekha_stat_value_value(g_f, 2, 0), 16), 75);
+    check(sd_asr(rekha_stat_value_min(g_f, 2), 16), 50);
+    check(sd_asr(rekha_stat_value_max(g_f, 2), 16), 87);
+
+    # 3: format 4 — two pairs, and the SAME accessors read them
+    check(rekha_stat_value_format(g_f, 3), 4);
+    check(rekha_stat_value_pairs(g_f, 3), 2);
+    check(rekha_stat_value_axis(g_f, 3, 0), 0);
+    check(sd_asr(rekha_stat_value_value(g_f, 3, 0), 16), 700);
+    check(rekha_stat_value_axis(g_f, 3, 1), 1);
+    check(sd_asr(rekha_stat_value_value(g_f, 3, 1), 16), 75);
+    check(rekha_stat_value_axis(g_f, 3, 2), 0 - 1);
+    want_name(rekha_stat_value_name_id(g_f, 3), "Bold Condensed");
+
+    # 4: ⛔ a ZERO OFFSET is the spec's "no entry here", not an entry at the array's start
+    check(rekha_stat_value_format(g_f, 4), 0);
+    check(rekha_stat_value_name_id(g_f, 4), 0);
+    check(rekha_stat_value_pairs(g_f, 4), 0);
+    check(rekha_stat_value_axis(g_f, 4, 0), 0 - 1);
+    # and past the end
+    check(rekha_stat_value_format(g_f, 5), 0);
+    check(rekha_stat_value_format(g_f, 0 - 1), 0);
+    return 0;
+}
+
+# ── F) STAT refusals ───────────────────────────────
+fn t_stat_refuse(): i64 {
+    g_group = "F stat refusals";
+    opts_reset();
+    o_nostat = 1;
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 0);
+    check(rekha_stat_axis_count(g_f), 0);
+    check(rekha_stat_value_count(g_f), 0);
+    check(rekha_stat_fallback_name_id(g_f), 0);
+    check(rekha_stat_present(0), 0);
+    # a majorVersion rekha does not take
+    opts_reset();
+    o_smaj = 2;
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 0);
+    # a designAxisSize too small to hold a record
+    opts_reset();
+    o_sasz = 6;
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 0);
+    # an axis value offset array outside the table
+    opts_reset();
+    o_sbadoff = 1;
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 0);
+    # ...and the instances are untouched by any of it
+    check(rekha_var_instance_count(g_f), 4);
+    return 0;
+}
+
+# ── G) every byte of fvar and STAT, flipped ───────────────────────
+fn t_guard(): i64 {
+    g_group = "G guard";
+    opts_reset();
+    build();
+    var lo = g_fvar;
+    var hi = g_stat + g_statlen;
+    var bad = 0;
+    var at = lo;
+    while (at < hi) {
+        var bit = 0;
+        while (bit < 8) {
+            var orig = load8(FB + at);
+            store8(FB + at, orig ^ (1 << bit));
+            var f = rekha_font_open(FB, g_flen);
+            if (f != 0) {
+                var ni = rekha_var_instance_count(f);
+                if (ni < 0) { bad = bad + 1; }
+                var i = 0;
+                while (i < ni) {
+                    if (rekha_var_instance_name_id(f, i) < 0) { bad = bad + 1; }
+                    if (rekha_var_set_instance(f, i) == 0) { bad = bad + 1; }
+                    i = i + 1;
+                }
+                var nv = rekha_stat_value_count(f);
+                var k = 0;
+                while (k < nv) {
+                    var p = rekha_stat_value_pairs(f, k);
+                    if (p < 0) { bad = bad + 1; }
+                    var j = 0;
+                    while (j < p) {
+                        if (rekha_stat_value_axis(f, k, j) < 0 - 1) { bad = bad + 1; }
+                        rekha_stat_value_value(f, k, j);
+                        j = j + 1;
+                    }
+                    k = k + 1;
+                }
+                var na = rekha_stat_axis_count(f);
+                var a = 0;
+                while (a < na) {
+                    if (rekha_stat_axis_ordering(f, a) < 0) { bad = bad + 1; }
+                    a = a + 1;
+                }
+            }
+            store8(FB + at, orig);
+            bit = bit + 1;
+        }
+        at = at + 1;
+    }
+    check(bad, 0);
+    g_f = rekha_font_open(FB, g_flen);
+    check(g_f != 0, 1);
+    check(rekha_var_instance_count(g_f), 4);
+    check(rekha_stat_value_count(g_f), 5);
+    check(rekha_stat_value_format(g_f, 3), 4);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    FB = alloc(FB_CAP);
+    OUT = alloc(OUT_CAP);
+    g_nm = alloc(NM_MAX * 16);
+    g_pool = alloc(2048);
+    t_instances();
+    t_select();
+    t_inst_refuse();
+    t_stat_axes();
+    t_stat_values();
+    t_stat_refuse();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "stat_test: PASS (instances, selection, STAT axes and all four value formats; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

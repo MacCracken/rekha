@@ -638,8 +638,9 @@ fn t_alloc(buf): i64 {
     # 336 -> 360 in 0.4.12 for gvar and its per-glyph scratch, 360 -> 416 in 0.5.1 for the CFF /
     # CFF2 FontMatrix: a flag plus its six 16.16 entries, already folded with unitsPerEm,
     # 416 -> 448 in 0.6.0 for HVAR and MVAR and their extents, 448 -> 464 in 0.6.1 for OS/2,
-    # 464 -> 496 in 0.6.2 for the `name` table, its count and its string storage.
-    check(REKHA_FONT_SIZE, 496);
+    # 464 -> 496 in 0.6.2 for the `name` table, its count and its string storage, 496 -> 536 in
+    # 0.6.3 for fvar's named-instance array and STAT.
+    check(REKHA_FONT_SIZE, 536);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

@@ -153,6 +153,10 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
 #                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
 #                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +496 fvar_inst +504 inst_count +512 inst_size (i64 — `fvar`'s named-instance array, which has
+#                      no offset field of its own: it follows the axes. 0 = none, or a stride the
+#                      spec does not allow. 0.6.3.)
+#   +520 stat  +528 stat_end (i64 — the STAT table, 0 = absent or refused at open. 0.6.3.)
 #   +464 name  +472 name_end · +480 name_count · +488 name_strings (i64 — the `name` table, its
 #                      record count, and the ABSOLUTE offset of its string storage. 0 = absent or
 #                      a header that does not fit. 0.6.2.)
@@ -193,7 +197,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 496;
+var REKHA_FONT_SIZE = 536;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.6.2
+Version: 0.6.3
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -67,8 +67,12 @@ weights the deltas.
 | wide stores — up to the 513-operand `blend` CFF2 specifies | 0.5.0 | **550 points across 100 glyph instances** over five region counts, all identical to fontTools |
 | `HVAR` / `MVAR` — advances, and every OS/2 metric with a tag | 0.6.0, corrected in 0.6.1 | **160 of 160 metric values** over two axes and eight locations, all identical to fontTools |
 
-`fvar` axes are enumerable (`rekha_var_axis_count` / `_tag` / `_min` / `_default` / `_max`); `avar`
-segment maps apply, **version 1 and 2** (0.5.0).
+`fvar` axes are enumerable, labelled and selectable: `rekha_var_axis_count` / `_tag` / `_min` /
+`_default` / `_max` / `_name_id`, and since 0.6.3 the **named instances** a font ships —
+`rekha_var_instance_count` / `_name_id` / `_coord` and **`rekha_var_set_instance`**, the one call
+that turns "Bold Condensed" from a menu entry into a drawn font. `STAT` says how a family orders
+and names those styles; rekha reads it and leaves the naming policy to the consumer. `avar` segment
+maps apply, **version 1 and 2** (0.5.0).
 ⛔ The axis API is deliberately coarse: `rekha_var_set_axis` normalizes, runs `avar` and rebuilds
 every region scalar, so it is a set-the-axes-then-draw call and not a per-glyph one.
 ⚠ **Advances and the intended metrics vary too**: `rekha_advance_width` reads HVAR (0.6.0), and
@@ -128,7 +132,7 @@ The full list, with the evidence behind every item, is
 | milestone | what it closes |
 |---|---|
 | ~~**0.5.x — conformance and the target**~~ | **Closed.** The CFF2 argument stack is the format's 513, not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; `FontMatrix` is read and applied instead of assumed; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. |
-| **0.6.x — the font's own answers** | The tables rekha transports and never reads — it resolved twelve, and a consumer cannot compute any of the rest from outlines. **`HVAR` / `MVAR` shipped in 0.6.0, `OS/2` in 0.6.1 and `name` in 0.6.2**, making sixteen; left are `fvar` named instances + `STAT`, `post`, `kern`, and vertical metrics. |
+| **0.6.x — the font's own answers** | The tables rekha transports and never reads — it resolved twelve, and a consumer cannot compute any of the rest from outlines. **0.6.0 shipped `HVAR` / `MVAR`, 0.6.1 `OS/2`, 0.6.2 `name` and 0.6.3 `STAT` with `fvar`'s named instances**, making seventeen; left are `post`, `kern`, and vertical metrics. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published, documented, and produced by nothing: every refusal collapses to a 0 or an empty glyph, so a caller cannot tell "not a font" from "truncated" from "over a cap". |
 | **0.8.x — hinting** | `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter, for small sizes. CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
 | **0.9.0 — the freeze** | 34 of 172 functions carry `@public`, so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |

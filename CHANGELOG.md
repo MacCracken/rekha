@@ -5,6 +5,72 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-09-20 — named instances and `STAT`: a font menu, at last
+
+An axis is a continuum. A **named instance** is a point on it the designer blessed and gave a name
+to — "Regular", "Bold Condensed". A font menu lists those, not axis values, and until now rekha
+could report that a font has a `wght` axis running 100 to 900 without being able to say it ships a
+style called "Bold" at 700. `STAT` is the other half: it says 700 is *called* Bold, that `wght`
+sorts before `wdth`, and that "Regular" is a name to be **elided** rather than printed.
+
+This closes the last of the 0.6.x metadata items but one, and it is the **largest single API
+addition rekha has made** — twenty public functions, because these two tables are the font-menu
+surface and nothing smaller answers the question.
+
+### Added — named instances, in `src/var.cyr`
+
+`rekha_var_instance_count`, `_name_id`, `_ps_name_id`, `_flags`, `_coord`, and
+**`rekha_var_set_instance`** — the one call that turns a menu choice into a drawn font. Every
+coordinate is a USER value, the same units `rekha_var_set_axis` takes, and the name id goes
+straight to `rekha_name_utf8` (0.6.2).
+
+- ⭐ **The instance array has no offset field of its own.** It begins at
+  `axesArrayOffset + axisCount x axisSize` and nothing in the header says so.
+- ⛔ **`instanceSize` is the only thing that says whether a record carries a `postScriptNameID`.**
+  The spec allows exactly two strides — `axisCount x 4 + 4` without it and `+ 6` with — and rekha
+  walks neither anything else, because guessing the stride is guessing every coordinate after the
+  first. A refused array loses only the instances; the **axes are untouched**.
+- ⛔ **`rekha_var_set_instance` sets EVERY axis**, including the ones the instance leaves at their
+  defaults. Applying half an instance over a previous setting would draw a style the font does not
+  ship — selecting "Bold" after "Bold Condensed" has to put the width back.
+
+### Added — `src/stat.cyr`
+
+`rekha_stat_present`, `_fallback_name_id`, `_axis_count` / `_axis_tag` / `_axis_name_id` /
+`_axis_ordering`, `_value_count` / `_value_format` / `_value_flags` / `_value_name_id` /
+`_value_pairs` / `_value_axis` / `_value_value` / `_value_min` / `_value_max` / `_value_linked`.
+
+- ⭐ **All four axis-value formats are read through ONE pair API.** `rekha_stat_value_pairs` is 1
+  for formats 1, 2 and 3 and format 4's own `axisCount`, and `_value_axis` / `_value_value` take a
+  pair index — so a consumer walks every format the same way and never branches on the format to
+  reach the numbers. The format is still reported, because 2 and 3 carry fields the others do not.
+- ⛔ **rekha reads STAT and does not synthesize a style name.** Choosing which values apply,
+  ordering them by `axisOrdering`, dropping the elidable ones and joining the rest is a
+  family-naming POLICY with real disagreement in it — the same reason `rekha_use_typo_metrics`
+  reports a bit instead of picking a line box. Every field the policy needs is here.
+- ⛔ **A zero offset is the spec's "no entry here"**, not an entry at the start of the array.
+- ⚠ An `axisIndex` is **not** clamped against `designAxisCount`: it is reported as written, so a
+  consumer cross-referencing STAT's axes can see an out-of-range one instead of having it quietly
+  turned into axis 0. Every BYTE read is inside the table; only the meaning is left alone.
+- ⚠ `elidedFallbackNameID` is a minorVersion 1 field and a 1.0 table has none, which is 0 here.
+
+`REKHA_FONT_SIZE` **496 -> 536**.
+
+### Refused
+
+A `STAT` majorVersion other than 1, a header that does not fit, a `designAxisSize` below 8, an axis
+array or axis-value offset array outside the table, an axis value format past 4, and a format 4
+whose record array does not fit. On the `fvar` side: a stride the spec does not allow, and an
+`instanceCount` the table's own declared length does not cover — the array is not walked at all
+rather than walked as far as it goes, because a short read there is a coordinate taken from
+whatever follows `fvar`.
+
+⇒ new `programs/stat_test.cyr`, **127 checks**: four instances with and without their PostScript
+name ids, selection and re-selection across two axes, three instance refusals that leave the axes
+working, STAT's design axes and its version-1.0 fallback, **one axis value of each of the four
+formats plus a zero offset**, four STAT refusals, and a sweep that flips every bit of `fvar` and
+`STAT` and requires every accessor to stay in range.
+
 ## [0.6.2] - 2026-09-20 — `name`: what a font is called, and labels for its axes
 
 rekha is the only SFNT parser in the AGNOS stack, and until now nothing here could ask a face its

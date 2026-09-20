@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.6.2**.
+> **Last updated:** 2026-09-20, at **0.6.3**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -18,7 +18,8 @@ holds, and no published name that does nothing.
 
 ⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
 is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`**, **0.6.1
-`OS/2`** and **0.6.2 `name`**, so the tables rekha resolves are now sixteen.
+`OS/2`**, **0.6.2 `name`** and **0.6.3 `STAT`** with `fvar`'s named instances, so the tables rekha
+resolves are now seventeen and only three of this milestone's items are left.
 
 | milestone | what it closes |
 |---|---|
@@ -37,21 +38,8 @@ explicit **non-goal**.
 
 The tables rekha **transports and never reads**. The set it DOES resolve is fourteen: `head`,
 `maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, `HVAR`,
-`MVAR`, `OS/2` and `name`. Every other OpenType tag in the codebase lives only inside WOFF2's
+`MVAR`, `OS/2`, `name` and `STAT`. Every other OpenType tag in the codebase lives only inside WOFF2's
 known-tag strings at `src/woff2.cyr:100-102`: lookup bytes, not readers.
-
-### `fvar` named instances, and `STAT`
-
-`src/var.cyr:14` documents `instanceCount` / `instanceSize`; the word `instance` appears nowhere
-else in `src/`, and the `RekhaFont` slot map caches no instance array. `grep -rn '0x53544154' src/`
-→ nothing.
-
-Axes themselves **are** enumerable and, since 0.6.2, **labelled** — `rekha_var_axis_name_id` feeds
-`rekha_name_utf8`. What is missing is the layer above: a consumer cannot list "Regular / Bold /
-Condensed" and select one, because the `InstanceRecords` are skipped, and `STAT` — which OpenType
-makes **required** for a variable font — is unread.
-⭐ Both are now short walks, because the `name` reader they needed exists: an InstanceRecord is a
-subfamilyNameID plus axisCount Fixed coordinates feeding the existing `rekha_var_set_axis`.
 
 ### `post` — underline, and glyph names
 
@@ -168,6 +156,7 @@ a milestone when a consumer asks.
 | **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if the vertical-metrics item lands: the API shape would need a vertical twin. |
 | **`gvar` phantom-point advances are decoded and discarded** | `src/gvar.cyr:23` | A TrueType variable font with `gvar` and no HVAR varies its advances through the four phantom points per glyph. Honouring them puts a full glyph decode behind an advance query measured at 47 ns, so the honest shape is a separate resolver, not a change to the O(1) reader. |
 | **HVAR's lsb and rsb maps are read past** | `src/hvar.cyr`, the header note | rekha publishes no side-bearing accessor for them to vary, and a glyph's real bearing already follows its outline. Wants the accessor first. |
+| **STAT style-name synthesis** | `src/stat.cyr`, the header note | rekha reads every field and joins none of them: which values apply, the `axisOrdering` sort, dropping the elidable names. Deliberately the consumer's, like `rekha_use_typo_metrics` — but if two consumers write the same loop it belongs here after all. |
 | **`avar` 2.0's variation store** | `src/var.cyr`, the avar note | 0.6.0 built the `DeltaSetIndexMap` reader that `avar` 2.0's mapping needs; wiring the two together is what is left. Its segment maps already apply. |
 
 ---
