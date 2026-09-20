@@ -71,3 +71,6 @@ include "src/hvar.cyr"
 # os2.cyr reads the metrics a font INTENDS, each field taking its MVAR delta, so it follows
 # hvar.cyr. Nothing calls into it: its accessors are leaves of the public surface.
 include "src/os2.cyr"
+# name.cyr decodes the `name` table to UTF-8 in a caller's buffer. It depends on nothing but
+# sfnt.cyr's readers; var.cyr calls forward into it for an axis's nameID.
+include "src/name.cyr"

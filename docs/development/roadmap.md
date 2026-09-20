@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.6.1**.
+> **Last updated:** 2026-09-20, at **0.6.2**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -17,8 +17,8 @@ surface, but no remaining place where a consumer has to reach around rekha to a 
 holds, and no published name that does nothing.
 
 ⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
-is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`** and **0.6.1
-`OS/2`**, so the tables rekha resolves are now fifteen.
+is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`**, **0.6.1
+`OS/2`** and **0.6.2 `name`**, so the tables rekha resolves are now sixteen.
 
 | milestone | what it closes |
 |---|---|
@@ -37,15 +37,8 @@ explicit **non-goal**.
 
 The tables rekha **transports and never reads**. The set it DOES resolve is fourteen: `head`,
 `maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, `HVAR`,
-`MVAR` and `OS/2`. Every other OpenType tag in the codebase lives only inside WOFF2's
+`MVAR`, `OS/2` and `name`. Every other OpenType tag in the codebase lives only inside WOFF2's
 known-tag strings at `src/woff2.cyr:100-102`: lookup bytes, not readers.
-
-### `name` — a font cannot be asked what it is called
-
-`grep -rn '0x6E616D65' src/` → nothing. No family, subfamily, PostScript name, version or licence
-string. This also strands metadata rekha **already parses past**: `fvar`'s `axisNameID` is in the
-record layout at `src/var.cyr:16` and is never resolved, so a consumer can enumerate axes and
-cannot label them.
 
 ### `fvar` named instances, and `STAT`
 
@@ -53,11 +46,12 @@ cannot label them.
 else in `src/`, and the `RekhaFont` slot map caches no instance array. `grep -rn '0x53544154' src/`
 → nothing.
 
-Axes themselves **are** enumerable — `rekha_var_axis_count` / `_tag` / `_at` / `_coord` are public
-(`src/var.cyr:52+`). What is missing is the layer above: a consumer cannot list "Regular / Bold /
-Condensed" and select one, because the `InstanceRecords` are skipped, and cannot present a name for
-an axis or an instance, because `STAT` — which OpenType makes **required** for a variable font — is
-unread and both tables' nameIDs need the `name` reader above. The `fvar` half is a short walk once `name` exists.
+Axes themselves **are** enumerable and, since 0.6.2, **labelled** — `rekha_var_axis_name_id` feeds
+`rekha_name_utf8`. What is missing is the layer above: a consumer cannot list "Regular / Bold /
+Condensed" and select one, because the `InstanceRecords` are skipped, and `STAT` — which OpenType
+makes **required** for a variable font — is unread.
+⭐ Both are now short walks, because the `name` reader they needed exists: an InstanceRecord is a
+subfamilyNameID plus axisCount Fixed coordinates feeding the existing `rekha_var_set_axis`.
 
 ### `post` — underline, and glyph names
 

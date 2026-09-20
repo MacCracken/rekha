@@ -5,6 +5,69 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-09-20 — `name`: what a font is called, and labels for its axes
+
+rekha is the only SFNT parser in the AGNOS stack, and until now nothing here could ask a face its
+name. A font picker had a list of files. `rekha_var_axis_count` could say a font has two axes
+without being able to say either one is called "Weight" — the record's `axisNameID` was parsed past
+and never resolved, which is the gap this closes.
+
+### Added — `src/name.cyr`
+
+⭐ **WHAT COMES BACK IS UTF-8, IN THE CALLER'S BUFFER.** A name is stored as UTF-16BE or as
+Macintosh Roman, and neither is something a consumer should have to know. rekha decodes and writes
+into a buffer the caller owns — the same shape as `rekha_woff_decode` — so a name query **allocates
+nothing**. `dst == 0` sizes it; a `cap` below the size writes nothing at all and still returns the
+size, so the two-call idiom is safe. ⛔ Half a name is worse than no name, and a truncated UTF-8
+string can end inside a character.
+
+- `rekha_name_utf8(font, name_id, dst, cap)` — the best record for an id, ranked.
+- `rekha_name_count`, `rekha_name_at_utf8`, and `rekha_name_platform_at` / `_encoding_at` /
+  `_language_at` / `_id_at`, for a consumer that wants another language and will walk the table.
+- Sixteen named ids (`REKHA_NAME_FAMILY`, `_SUBFAMILY`, `_POSTSCRIPT`, `_LICENSE`, …); every other
+  id is still readable by number.
+- `rekha_var_axis_name_id(font, i)` in `src/var.cyr`, which feeds straight into `rekha_name_utf8`.
+- `rekha_mac_roman_cp(b)`, public because the table is worth being able to check.
+- `REKHA_FONT_SIZE` **464 -> 496**.
+
+⛔ **WHICH RECORD WINS IS RANKED, NOT LAST-ONE-SEEN.** A font carries the same id several times
+over — Windows English, Unicode, Macintosh Roman — and the last is no more the intended one than
+the first. The order is Windows/BMP/English, the other Windows encodings in English, any Windows
+record, the Unicode platform, Macintosh Roman in English, then any Macintosh Roman. A platform or
+encoding rekha cannot decode is **not a candidate at all**, rather than a candidate that later
+fails, so a readable record behind it still wins. Same shape as cmap's subtable ranking (0.4.0) and
+for the same reason.
+
+### Added — the Macintosh Roman table, generated
+
+⭐ A `name` record on platform 1 encoding 0 is **Mac OS Roman**, not Latin-1 and not Unicode: its
+high half is 128 fixed entries that nothing derives, and one wrong entry is one wrong character in
+a font's name — the quietest failure in the table. So it is **generated**, by
+`scripts/mac_roman.py`, from **Python's own `mac_roman` codec**: the script prints the hex chunks
+`src/name.cyr` carries and emits `programs/mac_roman_vectors.cyr`, the independent half that
+`programs/name_test.cyr` drives the decoder with. CI regenerates and compares the vectors, the
+third gate of that shape after the WOFF2 triplet table and CFF Standard Encoding.
+
+⚠ Stored as hex, four digits an entry, rather than as the characters themselves — which would put
+a non-breaking space and a set of curly quotes into a Cyrius literal, invisible to a reader and at
+the mercy of the formatter.
+
+### Refused — 0 bytes, and the name is simply absent
+
+A `name` format past 1; a header, record array or string outside the table; a UTF-16BE string with
+an **odd byte length**, an unpaired high surrogate, or a low surrogate first; an empty string; any
+platform / encoding pair rekha does not decode.
+
+⚠ **Nothing here caps what a font may declare**, because nothing is allocated: a 65,535-byte name
+costs the caller exactly the buffer it chooses to pass.
+
+⇒ new `programs/name_test.cyr`, **101 checks**: the record accessors, the ranking across four
+platforms in a deliberately unhelpful order, UTF-16 past ASCII including a surrogate pair,
+**every one of the 128 Macintosh Roman bytes** through the whole decoder with the UTF-8 decoded
+back by the suite's own decoder rather than compared against rekha's encoder, the buffer contract,
+ten refusals, the fvar axis labels, and a sweep that flips every bit of the table and requires a
+name never to report more than it writes nor write past its cap.
+
 ## [0.6.1] - 2026-09-20 — `OS/2`: the metrics a font intends, and the MVAR targets 0.6.0 got wrong
 
 `hhea` says how tall a font's glyphs are. **`OS/2` says how the designer meant them to be set** —

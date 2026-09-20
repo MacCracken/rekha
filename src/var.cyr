@@ -94,6 +94,15 @@ fn rekha_var_axis_at(font, i, off): i64 {
     return v;
 }
 
+# @public — the `name` id of axis `i`'s label, or 0 when the font has no such axis. Feed it to
+# `rekha_name_utf8` for the text: an axis has been enumerable since 0.4.11 and unlabelable until
+# 0.6.2, because the record's axisNameID was parsed past and never resolved.
+fn rekha_var_axis_name_id(font, i): i64 {
+    var r = rekha_var_axis_rec(font, i);
+    if (r == 0) { return 0; }
+    return rekha_rd_u16(load64(font), r + 18);
+}
+
 fn rekha_var_axis_min(font, i): i64     { return rekha_var_axis_at(font, i, 4); }
 fn rekha_var_axis_default(font, i): i64 { return rekha_var_axis_at(font, i, 8); }
 fn rekha_var_axis_max(font, i): i64     { return rekha_var_axis_at(font, i, 12); }
