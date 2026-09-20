@@ -142,7 +142,12 @@ shim, no external binaries.
   1. ~~cmap formats 12 / 6 / 0 + symbol fonts~~ — shipped in 0.4.0, above.
   2. ~~WOFF 1.0~~ — shipped in 0.4.1, above.
   3. ~~OpenType/CFF (`OTTO`) outlines~~ — shipped in 0.4.2, above.
-  4. ~~**WOFF2**~~ — shipped in 0.4.6, below.
+  4. ~~**WOFF2**~~ — shipped in 0.4.6, below. ⚠ One follow-up is filed, not forgotten:
+     CI exercises WOFF2 over hand-emitted **stored** Brotli streams, because sankoch 2.8.0 decodes
+     Brotli and does not encode it. Real compressed streams are covered only by the dev-host
+     differential (280 files), which CI cannot run. When sankoch **2.8.1** ships its encoder, the
+     suite gains a third, genuinely compressed container variant —
+     `docs/development/issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`.
   5. ~~`[deps].stdlib` trim~~ — shipped in 0.4.4, above.
   6. ~~Adopt the sadish filings as they ship~~ — done in 0.4.3: bounded flatten, checked path
      allocation and `sd_path_new_cap` all shipped in sadish 0.7.1–0.9.0 and are adopted here.
