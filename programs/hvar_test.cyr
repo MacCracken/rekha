@@ -1,0 +1,582 @@
+# programs/hvar_test.cyr — RUN test for HVAR and MVAR (src/hvar.cyr): metrics variations.
+#
+# ⭐ THE FONT IS BUILT HERE — a TrueType SFNT (head / maxp / hhea / hmtx / loca / glyf / fvar /
+# HVAR / MVAR) with four glyphs whose hmtx advances are 500, 600, 700, 800, one `wght` axis at
+# 100 / 400 / 900, and an ItemVariationStore over TWO regions: region 0 peaks at +1 (so its scalar
+# is 1 at wght 900 and 0.5 at 650) and region 1 at -1 (1 at wght 100). Every expected number below
+# is the hmtx value plus a delta weighted by one of those two scalars, worked out by hand.
+#
+# ⛔ WHAT THIS IS REALLY GUARDING. An advance is a NUMBER a consumer lays text out with, and a
+# variation store that is misread does not fail — it returns a different number. So the refusal
+# groups all assert the metric is back at its DEFAULT, never somewhere between, and group H flips
+# every byte of both tables one at a time and requires the same.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "hvar_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var FB = 0;
+var FB_CAP = 16384;
+var NG = 4;
+
+fn pu16(off, v): i64 {
+    store8(FB + off, (v >> 8) & 255);
+    store8(FB + off + 1, v & 255);
+    return 0;
+}
+
+fn pu32(off, v): i64 {
+    pu16(off, (v >> 16) & 65535);
+    pu16(off + 2, v & 65535);
+    return 0;
+}
+
+# ── build options ────────────────────────────────
+var o_nohvar = 0;       # omit HVAR
+var o_nomvar = 0;       # omit MVAR
+var o_nofvar = 0;       # omit fvar, so the font has no axes at all
+var o_hver = 1;         # the HVAR majorVersion to write
+var o_mver = 1;         # the MVAR majorVersion to write
+var o_map = 0;          # 0 = no advance map · 1 = format 0 · 2 = format 1 · 3 = reserved bit set
+# 4 = mapCount 0
+var o_long = 0;         # LONG_WORDS delta rows (4- and 2-byte instead of 2- and 1-byte)
+var o_badreg = 0;       # a region index past the region list
+var o_badwdc = 0;       # wordDeltaCount > regionIndexCount
+var o_badouter = 0;     # an MVAR record naming an outer index that is not there
+var o_mrecsz = 8;       # the MVAR valueRecordSize to write
+
+var g_hvar = 0;
+var g_hvarlen = 0;
+var g_mvar = 0;
+var g_mvarlen = 0;
+var g_flen = 0;
+
+# The four (region 0, region 1) delta pairs, one per glyph.
+fn dlt(i, r): i64 {
+    if (r == 0) { return 100 + i * 100; }
+    return 0 - 50 - i * 10;
+}
+
+# ── HVAR ───────────────────────────────────
+# +0 major · +2 minor · +4 itemVariationStoreOffset u32 · +8 advanceWidthMappingOffset u32 ·
+# +12 lsbMappingOffset u32 · +16 rsbMappingOffset u32 · then the map (if any) and the store.
+fn put_hvar(at): i64 {
+    pu16(at, o_hver);
+    pu16(at + 2, 0);
+    pu32(at + 12, 0);                                   # no lsb map
+    pu32(at + 16, 0);                                   # no rsb map
+    var p = 20;
+
+    var maplen = 0;
+    if (o_map != 0) {
+        pu32(at + 8, p);
+        var m = at + p;
+        if (o_map == 2) {
+            # format 1: a u32 mapCount, two-byte entries, eight inner bits
+            store8(FB + m, 1);
+            store8(FB + m + 1, 0x17);
+            pu32(m + 2, 2);
+            pu16(m + 6, 3);                             # gid 0 -> inner 3
+            pu16(m + 8, 2);                             # gid 1 -> inner 2; 2 and 3 take the last
+            maplen = 10;
+        } else {
+            store8(FB + m, 0);
+            var ef = 3;                                 # four inner bits, one-byte entries
+            if (o_map == 3) { ef = 3 + 64; }            # ⛔ a reserved bit
+            store8(FB + m + 1, ef);
+            var cnt = 2;
+            if (o_map == 4) { cnt = 0; }
+            pu16(m + 2, cnt);
+            store8(FB + m + 4, 3);
+            store8(FB + m + 5, 2);
+            maplen = 4 + cnt;
+        }
+        p = p + maplen;
+    } else {
+        pu32(at + 8, 0);
+    }
+
+    pu32(at + 4, p);
+    var ivs = at + p;
+    var wsz = 2;
+    var ssz = 1;
+    var wdc = 1;
+    if (o_long != 0) {
+        wsz = 4;
+        ssz = 2;
+        wdc = 1 + 32768;
+    }
+    if (o_badwdc != 0) { wdc = 3; }                     # ⛔ more word deltas than regions
+    var rowlen = wsz + ssz;
+    var ivd = 12;
+    var rl = ivd + 10 + NG * rowlen;
+    pu16(ivs, 1);
+    pu32(ivs + 2, rl);
+    pu16(ivs + 6, 1);
+    pu32(ivs + 8, ivd);
+    pu16(ivs + ivd, NG);
+    pu16(ivs + ivd + 2, wdc);
+    pu16(ivs + ivd + 4, 2);
+    pu16(ivs + ivd + 6, 0);
+    var r1 = 1;
+    if (o_badreg != 0) { r1 = 9; }                      # ⛔ past regionCount
+    pu16(ivs + ivd + 8, r1);
+    var i = 0;
+    while (i < NG) {
+        var row = ivs + ivd + 10 + i * rowlen;
+        if (wsz == 2) {
+            pu16(row, dlt(i, 0) & 65535);
+        } else {
+            pu32(row, dlt(i, 0));
+        }
+        if (ssz == 1) {
+            store8(FB + row + wsz, dlt(i, 1) & 255);
+        } else {
+            pu16(row + wsz, dlt(i, 1) & 65535);
+        }
+        i = i + 1;
+    }
+    # the region list: one axis, two regions — (0, +1, +1) and (-1, -1, 0) in F2Dot14
+    pu16(ivs + rl, 1);
+    pu16(ivs + rl + 2, 2);
+    pu16(ivs + rl + 4, 0);     pu16(ivs + rl + 6, 16384);  pu16(ivs + rl + 8, 16384);
+    pu16(ivs + rl + 10, 49152); pu16(ivs + rl + 12, 49152); pu16(ivs + rl + 14, 0);
+    return p + rl + 4 + 12;
+}
+
+# ── MVAR ───────────────────────────────────
+# +0 major · +2 minor · +4 reserved · +6 valueRecordSize · +8 valueRecordCount ·
+# +10 itemVariationStoreOffset u16 · +12 records · then the store.
+fn put_mvar(at): i64 {
+    pu16(at, o_mver);
+    pu16(at + 2, 0);
+    pu16(at + 4, 0);
+    pu16(at + 6, o_mrecsz);
+    pu16(at + 8, 4);
+    var recs = 12;
+    var ivso = recs + 4 * o_mrecsz;
+    pu16(at + 10, ivso);
+    var o0 = 0;
+    if (o_badouter != 0) { o0 = 7; }                    # ⛔ past itemVariationDataCount
+    pu32(at + recs, 0x68617363);          pu16(at + recs + 4, o0); pu16(at + recs + 6, 0);
+    pu32(at + recs + o_mrecsz, 0x68647363);
+    pu16(at + recs + o_mrecsz + 4, 0);    pu16(at + recs + o_mrecsz + 6, 1);
+    pu32(at + recs + o_mrecsz * 2, 0x686C6770);
+    pu16(at + recs + o_mrecsz * 2 + 4, 0); pu16(at + recs + o_mrecsz * 2 + 6, 2);
+    # ⚠ a tag rekha has no reader for. It must be SKIPPED, not refused: MVAR is a bag of metrics
+    # and most of them belong to tables rekha does not read.
+    pu32(at + recs + o_mrecsz * 3, 0x78686774);          # 'xhgt'
+    pu16(at + recs + o_mrecsz * 3 + 4, 0); pu16(at + recs + o_mrecsz * 3 + 6, 0);
+
+    var ivs = at + ivso;
+    var ivd = 12;
+    var rl = ivd + 8 + 3 * 2;
+    pu16(ivs, 1);
+    pu32(ivs + 2, rl);
+    pu16(ivs + 6, 1);
+    pu32(ivs + 8, ivd);
+    pu16(ivs + ivd, 3);
+    pu16(ivs + ivd + 2, 1);
+    pu16(ivs + ivd + 4, 1);
+    pu16(ivs + ivd + 6, 0);
+    pu16(ivs + ivd + 8, 30);                            # hasc +30
+    pu16(ivs + ivd + 10, 0 - 20 & 65535);               # hdsc -20
+    pu16(ivs + ivd + 12, 10);                           # hlgp +10
+    pu16(ivs + rl, 1);
+    pu16(ivs + rl + 2, 1);
+    pu16(ivs + rl + 4, 0); pu16(ivs + rl + 6, 16384); pu16(ivs + rl + 8, 16384);
+    return ivso + rl + 4 + 6;
+}
+
+fn build(): i64 {
+    memset(FB, 0, FB_CAP);
+    var ntab = 6;
+    if (o_nofvar == 0) { ntab = ntab + 1; }
+    if (o_nohvar == 0) { ntab = ntab + 1; }
+    if (o_nomvar == 0) { ntab = ntab + 1; }
+    pu32(0, 0x00010000);
+    pu16(4, ntab);
+    var at = 12 + ntab * 16;
+    var head_at = at;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var loca_at = hmtx_at + NG * 4;
+    var glyf_at = loca_at + (NG + 1) * 4;
+    var fvar_at = glyf_at + 4;
+    var fvlen = 0;
+    if (o_nofvar == 0) { fvlen = 36; }
+    var hvar_at = fvar_at + fvlen;
+    g_hvar = hvar_at;
+    g_hvarlen = 0;
+    if (o_nohvar == 0) { g_hvarlen = put_hvar(hvar_at); }
+    var mvar_at = hvar_at + g_hvarlen;
+    g_mvar = mvar_at;
+    g_mvarlen = 0;
+    if (o_nomvar == 0) { g_mvarlen = put_mvar(mvar_at); }
+
+    pu16(head_at + 18, 1000);
+    pu16(head_at + 50, 1);                              # long loca
+    pu16(maxp_at + 4, NG);
+    pu16(hhea_at + 4, 800);                             # ascender
+    pu16(hhea_at + 6, 0 - 200 & 65535);                 # descender
+    pu16(hhea_at + 8, 90);                              # lineGap
+    pu16(hhea_at + 34, NG);
+    var i = 0;
+    while (i < NG) {
+        pu16(hmtx_at + i * 4, 500 + i * 100);
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= NG) {
+        pu32(loca_at + i * 4, 0);                       # every glyph empty: this suite is metrics
+        i = i + 1;
+    }
+    if (o_nofvar == 0) {
+        pu16(fvar_at, 1);
+        pu16(fvar_at + 4, 16);
+        pu16(fvar_at + 8, 1);
+        pu16(fvar_at + 10, 20);
+        pu32(fvar_at + 16, 0x77676874);
+        pu32(fvar_at + 20, 100 * 65536);
+        pu32(fvar_at + 24, 400 * 65536);
+        pu32(fvar_at + 28, 900 * 65536);
+        pu16(fvar_at + 34, 256);
+    }
+
+    var d = 12;
+    pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
+    pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, NG * 4); d = d + 16;
+    pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, (NG + 1) * 4); d = d + 16;
+    pu32(d, REKHA_TAG_GLYF); pu32(d + 8, glyf_at); pu32(d + 12, 4); d = d + 16;
+    if (o_nofvar == 0) {
+        pu32(d, 0x66766172); pu32(d + 8, fvar_at); pu32(d + 12, fvlen); d = d + 16;
+    }
+    if (o_nohvar == 0) {
+        pu32(d, REKHA_TAG_HVAR); pu32(d + 8, hvar_at); pu32(d + 12, g_hvarlen); d = d + 16;
+    }
+    if (o_nomvar == 0) {
+        pu32(d, REKHA_TAG_MVAR); pu32(d + 8, mvar_at); pu32(d + 12, g_mvarlen); d = d + 16;
+    }
+    g_flen = mvar_at + g_mvarlen;
+    return g_flen;
+}
+
+fn opts_reset(): i64 {
+    o_nohvar = 0;
+    o_nomvar = 0;
+    o_nofvar = 0;
+    o_hver = 1;
+    o_mver = 1;
+    o_map = 0;
+    o_long = 0;
+    o_badreg = 0;
+    o_badwdc = 0;
+    o_badouter = 0;
+    o_mrecsz = 8;
+    return 0;
+}
+
+var g_f = 0;
+
+fn openf(): i64 {
+    build();
+    g_f = rekha_font_open(FB, g_flen);
+    return g_f;
+}
+
+fn wght(v): i64 {
+    return rekha_var_set_axis(g_f, 0, v * 65536);
+}
+
+# the four advances at the current setting
+fn adv4(a0, a1, a2, a3): i64 {
+    check(rekha_advance_width(g_f, 0), a0);
+    check(rekha_advance_width(g_f, 1), a1);
+    check(rekha_advance_width(g_f, 2), a2);
+    check(rekha_advance_width(g_f, 3), a3);
+    return 0;
+}
+
+fn linebox(a, d, l): i64 {
+    check(rekha_ascender(g_f), a);
+    check(rekha_descender(g_f), d);
+    check(rekha_line_gap(g_f), l);
+    return 0;
+}
+
+# ── A) the default instance, and an unvaried font ─────────────────────
+fn t_default(): i64 {
+    g_group = "A default";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 1);
+    # ⭐ AT THE DEFAULT EVERY SCALAR IS ZERO, so hmtx and hhea stand exactly as they are. This is
+    # the 0.5.1 behaviour and it must not move.
+    adv4(500, 600, 700, 800);
+    linebox(800, 0 - 200, 90);
+    # setting the axis TO its default is the same thing
+    check(wght(400), 1);
+    adv4(500, 600, 700, 800);
+    linebox(800, 0 - 200, 90);
+    # ⚠ and a font with no fvar cannot be varied at all, so neither table is ever consulted
+    opts_reset();
+    o_nofvar = 1;
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 0);
+    check(wght(900), 0);
+    adv4(500, 600, 700, 800);
+    linebox(800, 0 - 200, 90);
+    return 0;
+}
+
+# ── B) HVAR with no map: the glyph id IS the inner index ───────────────────
+fn t_advance(): i64 {
+    g_group = "B advance";
+    opts_reset();
+    check(openf() != 0, 1);
+    # wght 900 normalizes to +1: region 0's scalar is 1, region 1's is 0
+    check(wght(900), 1);
+    adv4(600, 800, 1000, 1200);
+    # wght 100 normalizes to -1: region 1 only, and its deltas are negative
+    check(wght(100), 1);
+    adv4(450, 540, 630, 720);
+    # ⭐ HALFWAY UP REGION 0'S TENT. wght 650 is +0.5, so each delta is halved and rounded half up:
+    # 100 -> 50, 200 -> 100, 300 -> 150, 400 -> 200.
+    check(wght(650), 1);
+    adv4(550, 700, 850, 1000);
+    # ⚠ A GID PAST numberOfHMetrics SHARES THE LAST ADVANCE — that is hmtx's own rule and rekha
+    # has always followed it. What matters here is that HVAR does NOT invent a delta for it: the
+    # inner index is past itemCount, so the store refuses and the shared advance stands unvaried.
+    check(rekha_advance_width(g_f, 99), 800);
+    check(rekha_var_reset(g_f), 1);
+    adv4(500, 600, 700, 800);
+    # the delta accessor itself, which is what the readers above are built on
+    check(wght(900), 1);
+    check(rekha_hvar_advance_delta(g_f, 2), 300);
+    check(rekha_hvar_advance_delta(g_f, 0 - 1), 0);
+    check(rekha_hvar_advance_delta(0, 0), 0);
+    return 0;
+}
+
+# ── C) the DeltaSetIndexMap, both formats ────────────────────────
+fn t_map(): i64 {
+    g_group = "C map";
+    # format 0: gid 0 -> inner 3, gid 1 -> inner 2, and ⛔ gids 2 and 3 take the LAST entry
+    opts_reset();
+    o_map = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(900, 900, 1000, 1100);
+    # format 1: a u32 mapCount and two-byte entries with eight inner bits, same mapping
+    opts_reset();
+    o_map = 2;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(900, 900, 1000, 1100);
+    return 0;
+}
+
+# ── D) LONG_WORDS delta rows ────────────────────────────
+fn t_long(): i64 {
+    g_group = "D long words";
+    # ⛔ bit 15 of wordDeltaCount makes the first N deltas 4 bytes and the rest 2, instead of 2 and
+    # 1. Reading a long row as a short one does not fail — it returns other numbers.
+    opts_reset();
+    o_long = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(600, 800, 1000, 1200);
+    check(wght(100), 1);
+    adv4(450, 540, 630, 720);
+    return 0;
+}
+
+# ── E) MVAR: the line box moves ───────────────────────────
+fn t_mvar(): i64 {
+    g_group = "E mvar";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    linebox(830, 0 - 220, 100);
+    check(wght(650), 1);
+    linebox(815, 0 - 210, 95);
+    check(rekha_var_reset(g_f), 1);
+    linebox(800, 0 - 200, 90);
+    # the accessor, and ⚠ a tag with no reader is SKIPPED rather than refused
+    check(wght(900), 1);
+    check(rekha_mvar_delta(g_f, 0x68617363), 30);
+    check(rekha_mvar_delta(g_f, 0x7A7A7A7A), 0);
+    check(rekha_mvar_delta(0, 0x68617363), 0);
+    # with no MVAR the line box is hhea's, whatever the axis says
+    opts_reset();
+    o_nomvar = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    linebox(800, 0 - 200, 90);
+    adv4(600, 800, 1000, 1200);                          # ...and HVAR still works
+    return 0;
+}
+
+# ── F) refusals: the metric falls back to its default, never to something else ────────────
+fn t_refuse(): i64 {
+    g_group = "F refusals";
+    # no HVAR at all
+    opts_reset();
+    o_nohvar = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+    linebox(830, 0 - 220, 100);                          # ...and MVAR is unaffected
+
+    # a majorVersion rekha does not take
+    opts_reset();
+    o_hver = 2;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+
+    # a reserved bit in the map's entryFormat
+    opts_reset();
+    o_map = 3;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+
+    # mapCount 0
+    opts_reset();
+    o_map = 4;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+
+    # a region index past the region list
+    opts_reset();
+    o_badreg = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+
+    # wordDeltaCount greater than regionIndexCount
+    opts_reset();
+    o_badwdc = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+
+    # an MVAR majorVersion rekha does not take
+    opts_reset();
+    o_mver = 2;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    linebox(800, 0 - 200, 90);
+    adv4(600, 800, 1000, 1200);                          # ...and HVAR is unaffected
+
+    # an MVAR valueRecordSize below the eight bytes a record needs
+    opts_reset();
+    o_mrecsz = 6;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    linebox(800, 0 - 200, 90);
+
+    # an MVAR record naming an outer index that is not in the store
+    opts_reset();
+    o_badouter = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    check(rekha_ascender(g_f), 800);                     # that record refuses
+    check(rekha_descender(g_f), 0 - 220);                # the others still resolve
+    return 0;
+}
+
+# ── G) every byte of both tables, flipped ────────────────────────
+# ⭐ WHAT THIS CATCHES that the groups above cannot: a read that walks off a table through a field
+# nobody thought to craft. Each mutant must leave every advance and every line-box field at either
+# its varied value or its default — never anything else — and must never fault.
+fn t_guard(): i64 {
+    g_group = "G guard";
+    opts_reset();
+    build();
+    var lo = g_hvar;
+    var hi = g_mvar + g_mvarlen;
+    var bad = 0;
+    var at = lo;
+    while (at < hi) {
+        var bit = 0;
+        while (bit < 8) {
+            var orig = load8(FB + at);
+            store8(FB + at, orig ^ (1 << bit));
+            var f = rekha_font_open(FB, g_flen);
+            if (f != 0) {
+                rekha_var_set_axis(f, 0, 900 * 65536);
+                var g = 0;
+                while (g < NG) {
+                    var w = rekha_advance_width(f, g);
+                    if (w < 0) { bad = bad + 1; }
+                    if (w > 100000) { bad = bad + 1; }
+                    g = g + 1;
+                }
+                var a = rekha_ascender(f);
+                if (a < 0 - 100000 || a > 100000) { bad = bad + 1; }
+                var l = rekha_line_gap(f);
+                if (l < 0 - 100000 || l > 100000) { bad = bad + 1; }
+            }
+            store8(FB + at, orig);
+            bit = bit + 1;
+        }
+        at = at + 1;
+    }
+    check(bad, 0);
+    # and the untouched font still answers, so the sweep really did put every byte back
+    check(rekha_font_open(FB, g_flen) != 0, 1);
+    g_f = rekha_font_open(FB, g_flen);
+    check(wght(900), 1);
+    adv4(600, 800, 1000, 1200);
+    linebox(830, 0 - 220, 100);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    FB = alloc(FB_CAP);
+    t_default();
+    t_advance();
+    t_map();
+    t_long();
+    t_mvar();
+    t_refuse();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "hvar_test: PASS (advances, the index map, long words, MVAR, refusals, guard; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

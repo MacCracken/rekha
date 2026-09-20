@@ -540,6 +540,7 @@ fn rekha_cff_resolve(f): i64 {
     # +176.. block is cleared here, so the resolve that fills part of it belongs here as well.
     rekha_var_resolve(f);
     rekha_gvar_resolve(f);
+    rekha_hvar_resolve(f);
     if (load64(f + 16) != REKHA_SFNT_VER_OTTO) { return 0; }
     var c: i64[1];
     var cff = rekha_find_table_len(f, REKHA_TAG_CFF, &c);

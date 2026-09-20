@@ -64,3 +64,7 @@ include "src/var.cyr"
 # gvar.cyr applies a variable font's TrueType outline deltas, at the axis settings var.cyr holds.
 # It follows var.cyr (whose tent maths and axis state it shares) and glyf.cyr calls into it.
 include "src/gvar.cyr"
+# hvar.cyr is the metrics half of the same picture: HVAR moves a glyph's advance and MVAR the
+# font-wide line box, both over var.cyr's region scalars. It follows var.cyr for those, and
+# sfnt.cyr's advance and hhea readers call forward into it.
+include "src/hvar.cyr"

@@ -153,6 +153,10 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
 #                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
 #                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +416 hvar  +424 hvar_end · +432 mvar  +440 mvar_end (i64 — the metrics-variation tables, 0 =
+#                      absent or refused at open. HVAR varies a glyph's ADVANCE, MVAR the font-wide
+#                      line box; both are read on demand, since one query touches one delta row.
+#                      0.6.0.)
 #   +368 .. +408     (i64 x 6 — that matrix as [a b c d e f] x unitsPerEm, in 16.16. It maps
 #                      charstring units straight to DESIGN units, so the sadish seam's divide by
 #                      upem remains the only other scaling step. See src/cff.cyr on why the product
@@ -181,7 +185,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 416;
+var REKHA_FONT_SIZE = 448;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -445,21 +449,21 @@ fn rekha_ascender(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
-    return rekha_rd_i16(load64(font), hhea + 4);
+    return rekha_rd_i16(load64(font), hhea + 4) + rekha_mvar_delta(font, REKHA_MVAR_HASC);
 }
 
 fn rekha_descender(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
-    return rekha_rd_i16(load64(font), hhea + 6);
+    return rekha_rd_i16(load64(font), hhea + 6) + rekha_mvar_delta(font, REKHA_MVAR_HDSC);
 }
 
 fn rekha_line_gap(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
-    return rekha_rd_i16(load64(font), hhea + 8);
+    return rekha_rd_i16(load64(font), hhea + 8) + rekha_mvar_delta(font, REKHA_MVAR_HLGP);
 }
 
 # @public — the advance width of glyph `gid`, in font DESIGN UNITS (unitsPerEm space).
@@ -486,7 +490,14 @@ fn rekha_advance_width(font, gid): i64 {
     var idx = gid;
     if (idx >= nhm) { idx = nhm - 1; }
     if ((idx + 1) * 4 > load64(font + 120)) { return 0; }
-    return rekha_rd_u16(load64(font), hmtx + idx * 4);
+    var w = rekha_rd_u16(load64(font), hmtx + idx * 4);
+    # ⭐ AND IT VARIES (0.6.0). `idx` is clamped into the long-metric array; the HVAR lookup takes
+    # the REAL gid, because the delta is per glyph however hmtx compressed its tail. Costs one load
+    # and a compare when no axis is set. ⛔ Clamped at 0: an advance is a width, and a store that
+    # would take it negative is refused by arithmetic rather than believed.
+    w = w + rekha_hvar_advance_delta(font, gid);
+    if (w < 0) { return 0; }
+    return w;
 }
 
 # @public — the advance of glyph `gid` in PIXELS at pixel size `px_size`, rounded half-up:

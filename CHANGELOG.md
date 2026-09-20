@@ -5,6 +5,80 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-20 — `HVAR` / `MVAR`: the advance follows the axes
+
+0.4.11 and 0.4.12 made a glyph's **outline** follow the axes, for CFF2 and for TrueType. Its
+**advance** did not: `rekha_advance_width` read `hmtx` in design units and consulted no variation
+store, so a bold instance drew bold letters at regular spacing. This is that store, and with it the
+line box — `rekha_ascender` / `_descender` / `_line_gap` now move too. First item of the 0.6.x
+milestone, *the font's own answers*.
+
+⭐ **CHECKED AGAINST fontTools, SAME BYTES, BEFORE AND AFTER** — `scripts/metrics_var_diff.py`, a
+**two-axis** font (`wght` x `wdth`) over four regions including a cross-term one, eight glyphs
+through a DeltaSetIndexMap spanning two ItemVariationDatas, and LONG_WORDS delta rows:
+
+| | locations | metric values | result |
+|---|---:|---:|---|
+| **0.6.0** | 8 | **88** | all identical |
+| 0.5.1, same harness | 8 | 88 | 11 identical — only the default location, where nothing varies |
+
+⚠ **fontTools is used two ways here, because it uses two itself.** For MVAR,
+`instantiateVariableFont` pins the axes and rewrites `hhea` end to end. For HVAR it does **not**:
+on a `glyf` font the instancer bakes advances out of gvar's PHANTOM POINTS and treats HVAR as a
+lookaside to drop, so on this gvar-less metrics fixture it would have reported the unvaried
+advances and proved nothing. The advance side therefore goes through fontTools' own
+`VarStoreInstancer` — the store evaluator the rest of fontTools calls — over the same HVAR bytes
+and the same index map. Both routes are named in the script.
+
+### Added — `src/hvar.cyr`
+
+- **HVAR**: the ItemVariationStore, the advance DeltaSetIndexMap (**formats 0 and 1**, any entry
+  size, any inner-bit split), and the delta sum. ⛔ An index past `mapCount` takes the LAST entry —
+  the spec's rule, not a clamp of convenience: a font maps its first N glyphs and lets the tail
+  share.
+- **MVAR**: the ValueRecord array and the three tags the line box is made of — `hasc`, `hdsc`,
+  `hlgp`. ⚠ A tag rekha has no reader for is **skipped, not refused**: MVAR is a bag of metrics and
+  most of them belong to tables rekha does not read yet.
+- ⛔ **LONG_WORDS.** Bit 15 of `wordDeltaCount` makes the first N deltas four bytes and the rest
+  two, instead of two and one. Reading a long row as a short one does not fail — it returns other
+  numbers — so it is decoded, and group D of the suite is built on it.
+- ⭐ **The region machinery is `var.cyr`'s, unchanged.** `rekha_var_region_scalar` already turns a
+  region into a 16.16 scalar at the current setting; this module is only the other half. The
+  scalars are computed **on demand** rather than cached the way CFF2's are: an advance query
+  touches one delta row, so a per-store array would cost more than it saves and would need a second
+  allocation at open. When no axis is set the cost is one load and a compare — `rekha_var_live` is
+  checked first and an unvaried font never reaches the store.
+- `REKHA_FONT_SIZE` **416 -> 448** for the two tables and their extents.
+
+### Fixed — a metric a hostile store could take to 10^12
+
+⭐ **Found by `programs/hvar_test.cyr`'s bit-flip sweep, before any font did it.** Nothing in the
+format bounds a delta: LONG_WORDS makes each one a signed 32-bit value and `regionIndexCount` is a
+u16, so a crafted store can ask for `2^31 x 65535` — which overflows the 16.16 accumulator and,
+short of that, hands a consumer an advance of **8.8e12** to lay text out with. A real delta is a
+fraction of an em. `REKHA_VAR_MAXDELTA` is 2^20 design units, checked on the accumulator **every
+iteration** so the refusal lands before the wrap, and a refusal leaves the metric at its default.
+
+### Refused, each leaving the metric at its DEFAULT and never half-varied
+
+A major version other than 1 (either table); a header, store, map or delta row outside its table; a
+region index past the region list; an outer index past `itemVariationDataCount` or an inner index
+past `itemCount`; `wordDeltaCount` greater than `regionIndexCount`; a DeltaSetIndexMap with a
+reserved `entryFormat` bit or `mapCount` 0; an MVAR `valueRecordSize` below 8.
+
+⚠ **HVAR's lsb and rsb maps are read past, not read.** rekha publishes no side-bearing accessor for
+them to vary, and a glyph's real bearing already follows its outline, which does vary. Pinned in
+`docs/development/roadmap.md`.
+⚠ **Phantom-point advances are still not applied.** A TrueType variable font with `gvar` and no
+HVAR varies its advances through the four phantom points `gvar` carries per glyph, which rekha
+decodes and discards. Honouring them would put a full glyph decode behind the advance query that
+0.3.11 measured at 47 ns, so it is its own item rather than a line here.
+
+⇒ new `programs/hvar_test.cyr`, **169 checks**: the default instance, advances with and without a
+map, both map formats, the shared tail, LONG_WORDS, the line box, nine refusals, and a sweep that
+flips **every bit of both tables** and requires every metric to come back at its varied value or
+its default and nothing between.
+
 ## [0.5.1] - 2026-09-20 — `FontMatrix`: charstring units are not always design units
 
 The last of the five conformance items, and **0.5.x closes with it**. Through 0.5.0 rekha never

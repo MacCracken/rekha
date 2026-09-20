@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.5.1**.
+> **Last updated:** 2026-09-20, at **0.6.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -17,7 +17,8 @@ surface, but no remaining place where a consumer has to reach around rekha to a 
 holds, and no published name that does nothing.
 
 ⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
-is done, and what remains is surface, not correctness.
+is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`**, so the
+tables rekha resolves are now fourteen.
 
 | milestone | what it closes |
 |---|---|
@@ -34,23 +35,10 @@ explicit **non-goal**.
 
 ## 0.6.x — the font's own answers
 
-The tables rekha **transports and never reads**. The complete set rekha resolves is twelve:
-`head`, `maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`
-(`grep -rn 'rekha_find_table' src/*.cyr | grep REKHA_TAG` → 12 call sites). Every other OpenType tag
-in the codebase lives only inside WOFF2's known-tag strings at `src/woff2.cyr:100-102` — lookup
-bytes, not readers.
-
-### `HVAR` / `MVAR` — metrics variations
-
-An instanced glyph's **outline** varies on both formats (0.4.11 CFF2,
-0.4.12 `gvar`); its **advance** does not. `rekha_advance_width` reads `hmtx` in design units and
-consults no variation store. `HVAR` is an ItemVariationStore over advances and side bearings, which
-0.4.11's region scalars already know how to weight. The four **phantom points** `gvar` carries per
-glyph are the older mechanism for the same thing: rekha decodes them and applies only the real
-points (`src/gvar.cyr:23`).
-
-⚠ This is the one item that makes a shipped feature incomplete rather than absent, which is why it
-leads this milestone.
+The tables rekha **transports and never reads**. The set it DOES resolve is fourteen: `head`,
+`maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, and — as of
+0.6.0 — `HVAR` and `MVAR`. Every other OpenType tag in the codebase lives only inside WOFF2's
+known-tag strings at `src/woff2.cyr:100-102`: lookup bytes, not readers.
 
 ### `OS/2` — the metrics a font *intends*
 
@@ -194,6 +182,9 @@ a milestone when a consumer asks.
 | **WOFF / WOFF2 metadata and private blocks discarded** | `src/woff.cyr:36`; `src/woff2.cyr:46` | Bounds-checked, then dropped. Consistent with rekha's scope, but a named W3C container feature no accessor reaches. |
 | **WOFF2 collections re-inflate per face** | `src/woff2.cyr:1565` (the warning is at the call site) | Opening every face of an *n*-face collection rebuilds the file *n* times, and `sd_alloc` has no free. The two-step escape hatch is public and documented; a cached handle would remove the trap. |
 | **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if the vertical-metrics item lands: the API shape would need a vertical twin. |
+| **`gvar` phantom-point advances are decoded and discarded** | `src/gvar.cyr:23` | A TrueType variable font with `gvar` and no HVAR varies its advances through the four phantom points per glyph. Honouring them puts a full glyph decode behind an advance query measured at 47 ns, so the honest shape is a separate resolver, not a change to the O(1) reader. |
+| **HVAR's lsb and rsb maps are read past** | `src/hvar.cyr`, the header note | rekha publishes no side-bearing accessor for them to vary, and a glyph's real bearing already follows its outline. Wants the accessor first. |
+| **`avar` 2.0's variation store** | `src/var.cyr`, the avar note | 0.6.0 built the `DeltaSetIndexMap` reader that `avar` 2.0's mapping needs; wiring the two together is what is left. Its segment maps already apply. |
 
 ---
 
@@ -204,10 +195,10 @@ quietly become permanent.
 
 - ⚠ **Every headline ⭐ differential is a dev-host one-off.** CFF (405 faces / 5,093,070 glyphs),
   WOFF2 (280 files / 111,732 glyphs), cmap (92 faces), CFF2 and `gvar` — none of it runs in CI.
-  ⭐ 0.5.x's two sweeps are the exception and the model: `scripts/cff2_wide_diff.py` (550 points
-  over 100 glyph instances) and `scripts/cff_fontmatrix_diff.py` (12 matrices) each build their own
-  font, so they need fontTools and nothing else, and both are committed. The remaining sweeps need
-  corpora that are not. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
+  ⭐ Three sweeps are the exception and the model: `scripts/cff2_wide_diff.py` (550 points over 100
+  glyph instances), `scripts/cff_fontmatrix_diff.py` (12 matrices) and `scripts/metrics_var_diff.py`
+  (88 metric values over two axes) each build their own font, so they need fontTools and nothing
+  else, and all three are committed. The remaining sweeps need corpora that are not. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
   in-repo fixtures are narrower by construction. A regression after 0.4.12 in any of those decoders
   would be caught only by the synthetic suites. Worth having: a scheduled workflow that installs
   fontTools and re-runs the sweeps, or a licence-clean mini-corpus with committed digests.
