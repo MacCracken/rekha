@@ -547,6 +547,7 @@ fn rekha_cff_resolve(f): i64 {
     rekha_post_resolve(f);
     rekha_kern_resolve(f);
     rekha_gpos_resolve(f);
+    rekha_vert_resolve(f);
     if (load64(f + 16) != REKHA_SFNT_VER_OTTO) { return 0; }
     var c: i64[1];
     var cff = rekha_find_table_len(f, REKHA_TAG_CFF, &c);

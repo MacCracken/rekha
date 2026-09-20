@@ -1,0 +1,241 @@
+# @internal — vertical metrics: `vhea`, `vmtx`, `VORG` and `VVAR` (0.6.7).
+#
+# vert.cyr — everything rekha knows about laying a line of text DOWN the page instead of across
+# it. A CJK face set vertically needs a per-glyph advance HEIGHT, a vertical line box, a top side
+# bearing, and — because a glyph's vertical origin is not where its outline starts — the y the pen
+# sits at before it draws. None of it is derivable from the horizontal metrics.
+#
+# ⭐ AND IT CLOSES MVAR. `vasc`, `vdsc`, `vlgp`, `vcrs`, `vcrn` and `vcof` were the last six tags
+# with nowhere to land, so with 0.6.7 **every one of MVAR's 28 tags lands on the field the spec
+# names**. ⚠ 0.6.4's note said four; it is six, and this is the correction.
+#
+# ⚠ HORIZONTAL IS STILL THE DEFAULT AND THE TESTED PATH. rekha names horizontal metrics as its
+# shipped scope (0.3.6) and no AGNOS consumer lays out vertical text today. This is here because it
+# is metrics, because it is what the last MVAR tags need, and because a CJK consumer that arrives
+# should not find the table unread. It is not a vertical LAYOUT engine: rekha reports the numbers.
+#
+#   vhea (36 bytes, the same shape as hhea): version Fixed · vertTypoAscender i16 ·
+#     vertTypoDescender i16 · vertTypoLineGap i16 · advanceHeightMax u16 · minTopSideBearing i16 ·
+#     minBottomSideBearing i16 · yMaxExtent i16 · caretSlopeRise i16 · caretSlopeRun i16 ·
+#     caretOffset i16 · 4 reserved i16 · metricDataFormat i16 · numOfLongVerMetrics u16
+#   vmtx: numOfLongVerMetrics of (advanceHeight u16, topSideBearing i16), then a tail of bare
+#     topSideBearing i16 for every glyph past that — hmtx's shape exactly.
+#   VORG: major u16 (1) · minor u16 · defaultVertOriginY i16 · numVertOriginYMetrics u16 · then
+#     that many (glyphIndex u16, vertOriginY i16), SORTED by glyph index.
+#   VVAR: HVAR with one more map — major · minor · itemVariationStore u32 · advanceHeightMapping
+#     u32 · tsbMapping u32 · bsbMapping u32 · vOrgMapping u32.
+#
+# ⛔ A GLYPH'S VERTICAL ORIGIN IS NOT ITS TOP SIDE BEARING. VORG gives the origin outright and is
+# what a CFF face carries; a TrueType face usually has none, and the convention is to derive one
+# from the bounding box and the top side bearing. rekha does NOT derive it: `rekha_vorg_present`
+# says whether the font stated one, and `rekha_vert_origin_y` answers only when it did. Guessing
+# here would put every glyph of a vertical run at a plausible wrong height.
+
+var REKHA_TAG_VHEA = 0x76686561;   # 'vhea'
+var REKHA_TAG_VMTX = 0x766D7478;   # 'vmtx'
+var REKHA_TAG_VORG = 0x564F5247;   # 'VORG'
+var REKHA_TAG_VVAR = 0x56564152;   # 'VVAR'
+# The six MVAR tags that had nowhere to land until now.
+var REKHA_MVAR_VASC = 0x76617363;  # 'vasc' — vhea.vertTypoAscender
+var REKHA_MVAR_VDSC = 0x76647363;  # 'vdsc' — vhea.vertTypoDescender
+var REKHA_MVAR_VLGP = 0x766C6770;  # 'vlgp' — vhea.vertTypoLineGap
+var REKHA_MVAR_VCRS = 0x76637273;  # 'vcrs' — vhea.caretSlopeRise
+var REKHA_MVAR_VCRN = 0x7663726E;  # 'vcrn' — vhea.caretSlopeRun
+var REKHA_MVAR_VCOF = 0x76636F66;  # 'vcof' — vhea.caretOffset
+
+fn rekha_vert_resolve(f): i64 {
+    store64(f + 608, 0);
+    store64(f + 616, 0);
+    store64(f + 624, 0);
+    store64(f + 632, 0);
+    store64(f + 640, 0);
+    store64(f + 648, 0);
+    store64(f + 656, 0);
+    store64(f + 664, 0);
+    var buf = load64(f);
+    var c: i64[1];
+    var vh = rekha_find_table_len(f, REKHA_TAG_VHEA, &c);
+    if (vh != 0) {
+        if (load64(&c) >= 36) {
+            store64(f + 608, vh);
+            store64(f + 616, rekha_rd_u16(buf, vh + 34));
+        }
+    }
+    store64(f + 624, rekha_find_table_len(f, REKHA_TAG_VMTX, &c));
+    store64(f + 632, load64(&c));
+    var vo = rekha_find_table_len(f, REKHA_TAG_VORG, &c);
+    if (vo != 0) {
+        if (load64(&c) >= 8) {
+            if (rekha_rd_u16(buf, vo) == 1) {
+                store64(f + 640, vo);
+                store64(f + 648, vo + load64(&c));
+            }
+        }
+    }
+    var vv = rekha_find_table_len(f, REKHA_TAG_VVAR, &c);
+    if (vv != 0) {
+        if (load64(&c) >= 24) {
+            if (rekha_rd_u16(buf, vv) == 1) {
+                store64(f + 656, vv);
+                store64(f + 664, vv + load64(&c));
+            }
+        }
+    }
+    return 0;
+}
+
+# A signed vhea field at `off`, plus its MVAR delta. 0 when there is no vhea.
+fn rekha_vhea_i16(font, off, tag): i64 {
+    if (font == 0) { return 0; }
+    var vh = load64(font + 608);
+    if (vh == 0) { return 0; }
+    return rekha_rd_i16(load64(font), vh + off) + rekha_mvar_delta(font, tag);
+}
+
+# @public — 1 when the font carries a `vhea` rekha can read, else 0. The probe to use before
+# trusting a 0 from the accessors below, every one of which is a real value for some font.
+fn rekha_vhea_present(font): i64 {
+    if (font == 0) { return 0; }
+    if (load64(font + 608) == 0) { return 0; }
+    return 1;
+}
+
+# @public — the vertical line box, in design units, all three varying through MVAR.
+fn rekha_vert_ascender(font): i64  { return rekha_vhea_i16(font, 4, REKHA_MVAR_VASC); }
+fn rekha_vert_descender(font): i64 { return rekha_vhea_i16(font, 6, REKHA_MVAR_VDSC); }
+fn rekha_vert_line_gap(font): i64  { return rekha_vhea_i16(font, 8, REKHA_MVAR_VLGP); }
+
+# @public — the vertical caret, the twin of hhea's. All three vary.
+fn rekha_vert_caret_slope_rise(font): i64 { return rekha_vhea_i16(font, 18, REKHA_MVAR_VCRS); }
+fn rekha_vert_caret_slope_run(font): i64  { return rekha_vhea_i16(font, 20, REKHA_MVAR_VCRN); }
+fn rekha_vert_caret_offset(font): i64     { return rekha_vhea_i16(font, 22, REKHA_MVAR_VCOF); }
+
+# @public — vhea.numOfLongVerMetrics: how many glyphs carry their own advance height. 0 with no
+# vhea, which is also what makes every reader below answer 0.
+fn rekha_num_v_metrics(font): i64 {
+    if (font == 0) { return 0; }
+    return load64(font + 616);
+}
+
+# One VVAR delta for `gid` through the map at header offset `moff`. 0 when there is no VVAR, no
+# axis is set, or anything about the store refuses.
+fn rekha_vvar_delta(font, gid, moff): i64 {
+    if (font == 0) { return 0; }
+    if (gid < 0) { return 0; }
+    var vv = load64(font + 656);
+    if (vv == 0) { return 0; }
+    if (rekha_var_live(font) == 0) { return 0; }
+    var buf = load64(font);
+    var end = load64(font + 664);
+    var ivs = vv + rekha_rd_u32(buf, vv + 4);
+    if (ivs < vv) { return 0; }
+    var pair: i64[2];
+    store64(&pair, 0);
+    store64(&pair + 8, gid);
+    var mo = rekha_rd_u32(buf, vv + moff);
+    if (mo != 0) {
+        if (rekha_dsim(font, vv + mo, end, gid, &pair) == 0) { return 0; }
+    }
+    var d: i64[1];
+    if (rekha_ivs_delta(font, ivs, end, load64(&pair), load64(&pair + 8), &d) == 0) { return 0; }
+    return load64(&d);
+}
+
+# @public — `gid`'s advance height, in design units, varying through VVAR. 0 when the font has no
+# vertical metrics. ⚠ Like hmtx, a gid past numOfLongVerMetrics SHARES the last advance; that is
+# the format's own rule, and VVAR's delta still applies to the real gid.
+fn rekha_advance_height(font, gid): i64 {
+    if (font == 0) { return 0; }
+    if (gid < 0) { return 0; }
+    var nvm = load64(font + 616);
+    if (nvm <= 0) { return 0; }
+    var vmtx = load64(font + 624);
+    if (vmtx == 0) { return 0; }
+    var idx = gid;
+    if (idx >= nvm) { idx = nvm - 1; }
+    if ((idx + 1) * 4 > load64(font + 632)) { return 0; }
+    var h = rekha_rd_u16(load64(font), vmtx + idx * 4) + rekha_vvar_delta(font, gid, 8);
+    if (h < 0) { return 0; }
+    return h;
+}
+
+# @public — `gid`'s top side bearing, in design units, varying through VVAR. ⛔ The tail past
+# numOfLongVerMetrics is a BARE i16 array, not a continuation of the 4-byte records: reading it
+# with the wrong stride returns another glyph's advance as a bearing.
+fn rekha_top_side_bearing(font, gid): i64 {
+    if (font == 0) { return 0; }
+    if (gid < 0) { return 0; }
+    var nvm = load64(font + 616);
+    if (nvm <= 0) { return 0; }
+    var vmtx = load64(font + 624);
+    if (vmtx == 0) { return 0; }
+    var len = load64(font + 632);
+    var at = 0;
+    if (gid < nvm) {
+        at = gid * 4 + 2;
+    } else {
+        at = nvm * 4 + (gid - nvm) * 2;
+    }
+    if (at + 2 > len) { return 0; }
+    return rekha_rd_i16(load64(font), vmtx + at) + rekha_vvar_delta(font, gid, 12);
+}
+
+# @public — 1 when the font states its vertical origins in a VORG table, else 0.
+fn rekha_vorg_present(font): i64 {
+    if (font == 0) { return 0; }
+    if (load64(font + 640) == 0) { return 0; }
+    return 1;
+}
+
+# @public — the y the pen sits at before drawing `gid` in a vertical run, in design units, varying
+# through VVAR. ⛔ 0 when the font carries no VORG — rekha does NOT derive one from the bounding
+# box and the top side bearing, because a derived origin is a plausible wrong height for every
+# glyph in the run. `rekha_vorg_present` is the question to ask first.
+fn rekha_vert_origin_y(font, gid): i64 {
+    if (rekha_vorg_present(font) == 0) { return 0; }
+    if (gid < 0) { return 0; }
+    var buf = load64(font);
+    var t = load64(font + 640);
+    var end = load64(font + 648);
+    var y = rekha_rd_i16(buf, t + 4);                    # defaultVertOriginY
+    var n = rekha_rd_u16(buf, t + 6);
+    if (t + 8 + n * 4 <= end) {
+        # sorted by glyph index, so this is a binary search
+        var lo = 0;
+        var hi = n - 1;
+        while (lo <= hi) {
+            var mid = lo + (hi - lo) / 2;
+            var r = t + 8 + mid * 4;
+            var g = rekha_rd_u16(buf, r);
+            if (g == gid) {
+                y = rekha_rd_i16(buf, r + 2);
+                lo = hi + 1;
+            } else {
+                if (g < gid) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+        }
+    }
+    return y + rekha_vvar_delta(font, gid, 20);
+}
+
+# @public — the advance height in whole pixels at `px_size`, and in 16.16, rounded half up. The
+# vertical twins of rekha_glyph_advance_px / _fx.
+fn rekha_glyph_advance_height_px(font, gid, px_size): i64 {
+    var upem = rekha_units_per_em(font);
+    if (upem <= 0) { return 0; }
+    var h = rekha_advance_height(font, gid);
+    if (h <= 0) { return 0; }
+    return (h * px_size + upem / 2) / upem;
+}
+
+fn rekha_glyph_advance_height_fx(font, gid, px_size): i64 {
+    var upem = rekha_units_per_em(font);
+    if (upem <= 0) { return 0; }
+    var h = rekha_advance_height(font, gid);
+    if (h <= 0) { return 0; }
+    return (h * px_size * 65536 + upem / 2) / upem;
+}

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.6.6
+Version: 0.6.7
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -106,11 +106,17 @@ an advance query measured at 47 ns, so it is pinned rather than shipped.
   for absent pairs all correctly 0. ⛔ GPOS wins when a font has both, because such a font says the
   same thing twice and adding them would double every pair; `rekha_kern_source` says which
   answered.
+- **Vertical metrics** — `vhea` / `vmtx` / `VORG` / `VVAR` (0.6.7): the vertical line box and
+  caret, per-glyph advance heights and top side bearings, and the vertical origin a CJK face sets
+  its glyphs from. ⛔ rekha does **not** derive an origin when the font states none:
+  `rekha_vorg_present` is the question to ask. ⚠ Horizontal remains the default and the tested
+  path; this is metrics, not a vertical layout engine.
 - **The metrics a font INTENDS** — `OS/2` (0.6.1): the sTypo trio, the usWin pair, `sxHeight`,
   `sCapHeight`, weight and width class, `fsType`, `fsSelection`, the strikeout rule and the
   sub/superscript boxes; plus `post` (0.6.4) for the **underline** pair, the italic angle and fixed
   pitch, and `hhea`'s caret. ⭐ Every field MVAR has a tag for varies — as of 0.6.4 that is every
-  tag naming a table rekha reads, **264 of 264** values identical to fontTools' instancer.
+  tag — **all 28 of them** as of 0.6.7 — and **312 of 312** values are identical to fontTools'
+  instancer.
   ⛔ A face carries **three** vertical pairs and `fsSelection` bit 7 says which it means;
   `rekha_use_typo_metrics` reports the bit and rekha picks none of them, because choosing is layout
   policy. ⚠ `rekha_os2_version` returns -1 when there is no table — every metric answers 0, which a
@@ -143,7 +149,7 @@ The full list, with the evidence behind every item, is
 | milestone | what it closes |
 |---|---|
 | ~~**0.5.x — conformance and the target**~~ | **Closed.** The CFF2 argument stack is the format's 513, not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; `FontMatrix` is read and applied instead of assumed; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. |
-| **0.6.x — the font's own answers** | The tables rekha transports and never reads — it resolved twelve, and a consumer cannot compute any of the rest from outlines. **0.6.0 shipped `HVAR` / `MVAR`, 0.6.1 `OS/2`, 0.6.2 `name`, 0.6.3 `STAT` with `fvar`'s named instances 0.6.4 `post`, 0.6.5 `kern` and 0.6.6 **GPOS** pair positioning**, making twenty. Left is vertical metrics — which also closes the last four MVAR tags. |
+| ~~**0.6.x — the font's own answers**~~ | **Closed.** The tables rekha transports and never reads: it resolved twelve, and now twenty-one. `HVAR` / `MVAR` (0.6.0), `OS/2` (0.6.1), `name` (0.6.2), `STAT` with `fvar`'s named instances (0.6.3), `post` (0.6.4), `kern` (0.6.5), **GPOS** pair positioning (0.6.6) and the **vertical metrics** (0.6.7) — which closed MVAR too: all 28 of its tags land. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published, documented, and produced by nothing: every refusal collapses to a 0 or an empty glyph, so a caller cannot tell "not a font" from "truncated" from "over a cap". |
 | **0.8.x — hinting** | `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter, for small sizes. CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
 | **0.9.0 — the freeze** | 34 of 172 functions carry `@public`, so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |

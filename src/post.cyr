@@ -7,7 +7,7 @@
 #
 # ⭐ AND THEY ARE THE LAST TWO MVAR TAGS WITH NOWHERE TO LAND. `unds` and `undo` target exactly
 # these two fields, so with 0.6.4 every tag in MVAR that names a table rekha reads now lands on it.
-# What is left of MVAR after this is the four `vhea` tags, which are the vertical-metrics item.
+# What is left of MVAR after this is the `vhea` tags, which are the vertical-metrics item.
 #
 # Table layout. ⚠ THE HEADER IS 32 BYTES IN EVERY VERSION and carries everything below; the
 # versions differ only in what follows it.

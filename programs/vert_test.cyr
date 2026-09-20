@@ -1,0 +1,478 @@
+# programs/vert_test.cyr — RUN test for the vertical metrics (src/vert.cyr): vhea, vmtx, VORG, VVAR.
+#
+# ⭐ THE FONT IS BUILT HERE — head / maxp / hhea / hmtx / loca / glyf / vhea / vmtx / VORG / VVAR,
+# with six glyphs and only FOUR long vertical metrics, so the bare top-side-bearing tail past
+# numOfLongVerMetrics is exercised rather than assumed.
+#
+# ⛔ THE VVAR MAPS ARE DELIBERATELY DIFFERENT. Its advance map sends glyph g to delta row g and its
+# vertical-origin map sends it to row g + 2, so a reader that used one map's offset for the other
+# metric returns a plausible number that is simply the wrong one. Group D is built to catch that.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "vert_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var FB = 0;
+var FB_CAP = 8192;
+var NG = 6;
+var NVM = 4;
+
+fn pu16(off, v): i64 {
+    store8(FB + off, (v >> 8) & 255);
+    store8(FB + off + 1, v & 255);
+    return 0;
+}
+
+fn pu32(off, v): i64 {
+    pu16(off, (v >> 16) & 65535);
+    pu16(off + 2, v & 65535);
+    return 0;
+}
+
+# ── build options ────────────────────────────────
+var o_novhea = 0;
+var o_novmtx = 0;
+var o_novorg = 0;
+var o_novvar = 0;
+var o_nofvar = 1;
+var o_vhealen = 36;     # the DECLARED vhea length (below 36 loses the table)
+var o_vorgver = 1;
+var o_vvarver = 1;
+var o_shortvmtx = 0;    # declare a vmtx too short for the bare tail
+
+var g_vhea = 0;
+var g_vvar = 0;
+var g_vvarlen = 0;
+var g_flen = 0;
+
+fn vadv(i): i64 { return 1000 + i * 10; }
+fn vtsb(i): i64 { return 50 + i; }
+fn vdelta(i): i64 { return (i + 1) * 10; }
+
+# A DeltaSetIndexMap format 0: one byte an entry, four inner bits, sending g to g + `shift`.
+fn put_map(at, shift): i64 {
+    store8(FB + at, 0);
+    store8(FB + at + 1, 3);                             # entry size 1, four inner bits
+    pu16(at + 2, NG);
+    var i = 0;
+    while (i < NG) {
+        store8(FB + at + 4 + i, i + shift);
+        i = i + 1;
+    }
+    return 4 + NG;
+}
+
+fn put_vvar(at): i64 {
+    pu16(at, o_vvarver);
+    pu16(at + 2, 0);
+    var advm = 24;
+    var vorgm = advm + put_map(at + advm, 0);
+    var after = vorgm + put_map(at + vorgm, 2);
+    pu32(at + 8, advm);
+    pu32(at + 12, 0);                                   # no tsb map: the inner index IS the gid
+    pu32(at + 16, 0);
+    pu32(at + 20, vorgm);
+    var ivs = after;
+    pu32(at + 4, ivs);
+    var ivd = 12;
+    var nrows = 8;
+    var rl = ivd + 8 + nrows * 2;
+    pu16(at + ivs, 1);
+    pu32(at + ivs + 2, rl);
+    pu16(at + ivs + 6, 1);
+    pu32(at + ivs + 8, ivd);
+    pu16(at + ivs + ivd, nrows);
+    pu16(at + ivs + ivd + 2, 1);
+    pu16(at + ivs + ivd + 4, 1);
+    pu16(at + ivs + ivd + 6, 0);
+    var i = 0;
+    while (i < nrows) {
+        pu16(at + ivs + ivd + 8 + i * 2, vdelta(i));
+        i = i + 1;
+    }
+    pu16(at + ivs + rl, 1);
+    pu16(at + ivs + rl + 2, 1);
+    pu16(at + ivs + rl + 4, 0); pu16(at + ivs + rl + 6, 16384); pu16(at + ivs + rl + 8, 16384);
+    return ivs + rl + 4 + 6;
+}
+
+fn build(): i64 {
+    memset(FB, 0, FB_CAP);
+    var ntab = 6;
+    if (o_novhea == 0) { ntab = ntab + 1; }
+    if (o_novmtx == 0) { ntab = ntab + 1; }
+    if (o_novorg == 0) { ntab = ntab + 1; }
+    if (o_novvar == 0) { ntab = ntab + 1; }
+    if (o_nofvar == 0) { ntab = ntab + 1; }
+    pu32(0, 0x00010000);
+    pu16(4, ntab);
+    var at = 12 + ntab * 16;
+    var head_at = at;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var loca_at = hmtx_at + 4;
+    var glyf_at = loca_at + (NG + 1) * 4;
+    var vhea_at = glyf_at + 4;
+    g_vhea = vhea_at;
+    var vmtx_at = vhea_at + 36;
+    var vmtxlen = NVM * 4 + (NG - NVM) * 2;
+    var dvmtxlen = vmtxlen;
+    if (o_shortvmtx != 0) { dvmtxlen = NVM * 4; }
+    var vorg_at = vmtx_at + ((vmtxlen + 3) & (0 - 4));
+    var vorglen = 8 + 2 * 4;
+    var fvar_at = vorg_at + vorglen;
+    var fvlen = 0;
+    if (o_nofvar == 0) { fvlen = 36; }
+    var vvar_at = fvar_at + fvlen;
+    g_vvar = vvar_at;
+    g_vvarlen = 0;
+    if (o_novvar == 0) { g_vvarlen = put_vvar(vvar_at); }
+
+    pu16(head_at + 18, 1000);
+    pu16(head_at + 50, 1);
+    pu16(maxp_at + 4, NG);
+    pu16(hhea_at + 34, 1);
+    pu16(hmtx_at, 500);
+    var i = 0;
+    while (i <= NG) {
+        pu32(loca_at + i * 4, 0);
+        i = i + 1;
+    }
+    # vhea, version 1.0
+    pu32(vhea_at, 0x00010000);
+    pu16(vhea_at + 4, 500);                             # vertTypoAscender
+    pu16(vhea_at + 6, 0 - 500 & 65535);                 # vertTypoDescender
+    pu16(vhea_at + 8, 20);                              # vertTypoLineGap
+    pu16(vhea_at + 18, 0);                              # caretSlopeRise
+    pu16(vhea_at + 20, 1);                              # caretSlopeRun
+    pu16(vhea_at + 22, 7);                              # caretOffset
+    pu16(vhea_at + 34, NVM);
+    # vmtx: four long records, then a BARE i16 tail
+    i = 0;
+    while (i < NVM) {
+        pu16(vmtx_at + i * 4, vadv(i));
+        pu16(vmtx_at + i * 4 + 2, vtsb(i) & 65535);
+        i = i + 1;
+    }
+    i = NVM;
+    while (i < NG) {
+        pu16(vmtx_at + NVM * 4 + (i - NVM) * 2, vtsb(i) & 65535);
+        i = i + 1;
+    }
+    # VORG: default 880, with glyphs 1 and 4 named explicitly
+    pu16(vorg_at, o_vorgver);
+    pu16(vorg_at + 2, 0);
+    pu16(vorg_at + 4, 880);
+    pu16(vorg_at + 6, 2);
+    pu16(vorg_at + 8, 1);  pu16(vorg_at + 10, 900);
+    pu16(vorg_at + 12, 4); pu16(vorg_at + 14, 950);
+    if (o_nofvar == 0) {
+        pu16(fvar_at, 1);
+        pu16(fvar_at + 4, 16);
+        pu16(fvar_at + 8, 1);
+        pu16(fvar_at + 10, 20);
+        pu32(fvar_at + 16, 0x77676874);
+        pu32(fvar_at + 20, 100 * 65536);
+        pu32(fvar_at + 24, 400 * 65536);
+        pu32(fvar_at + 28, 900 * 65536);
+        pu16(fvar_at + 34, 256);
+    }
+
+    var d = 12;
+    pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
+    pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, 4); d = d + 16;
+    pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, (NG + 1) * 4); d = d + 16;
+    pu32(d, REKHA_TAG_GLYF); pu32(d + 8, glyf_at); pu32(d + 12, 4); d = d + 16;
+    if (o_novhea == 0) {
+        pu32(d, REKHA_TAG_VHEA); pu32(d + 8, vhea_at); pu32(d + 12, o_vhealen); d = d + 16;
+    }
+    if (o_novmtx == 0) {
+        pu32(d, REKHA_TAG_VMTX); pu32(d + 8, vmtx_at); pu32(d + 12, dvmtxlen); d = d + 16;
+    }
+    if (o_novorg == 0) {
+        pu32(d, REKHA_TAG_VORG); pu32(d + 8, vorg_at); pu32(d + 12, vorglen); d = d + 16;
+    }
+    if (o_nofvar == 0) {
+        pu32(d, 0x66766172); pu32(d + 8, fvar_at); pu32(d + 12, fvlen); d = d + 16;
+    }
+    if (o_novvar == 0) {
+        pu32(d, REKHA_TAG_VVAR); pu32(d + 8, vvar_at); pu32(d + 12, g_vvarlen); d = d + 16;
+    }
+    g_flen = vvar_at + g_vvarlen;
+    if (g_flen < vorg_at + vorglen) { g_flen = vorg_at + vorglen; }
+    return g_flen;
+}
+
+fn opts_reset(): i64 {
+    o_novhea = 0;
+    o_novmtx = 0;
+    o_novorg = 0;
+    o_novvar = 1;
+    o_nofvar = 1;
+    o_vhealen = 36;
+    o_vorgver = 1;
+    o_vvarver = 1;
+    o_shortvmtx = 0;
+    return 0;
+}
+
+var g_f = 0;
+
+fn openf(): i64 {
+    build();
+    g_f = rekha_font_open(FB, g_flen);
+    return g_f;
+}
+
+# ── A) vhea ──────────────────────────────────
+fn t_vhea(): i64 {
+    g_group = "A vhea";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_vhea_present(g_f), 1);
+    check(rekha_vert_ascender(g_f), 500);
+    check(rekha_vert_descender(g_f), 0 - 500);
+    check(rekha_vert_line_gap(g_f), 20);
+    # ⛔ A RISE OF 0 AND A RUN OF 1 is a caret lying flat, which is what vertical text wants — the
+    # mirror of hhea's upright 1 / 0, and the pair is a vector either way.
+    check(rekha_vert_caret_slope_rise(g_f), 0);
+    check(rekha_vert_caret_slope_run(g_f), 1);
+    check(rekha_vert_caret_offset(g_f), 7);
+    check(rekha_num_v_metrics(g_f), NVM);
+    # ...and hhea, a different table, is untouched by any of it
+    check(rekha_ascender(g_f), 0);
+    check(rekha_vhea_present(0), 0);
+    check(rekha_vert_ascender(0), 0);
+    # absent
+    opts_reset();
+    o_novhea = 1;
+    check(openf() != 0, 1);
+    check(rekha_vhea_present(g_f), 0);
+    check(rekha_vert_ascender(g_f), 0);
+    check(rekha_num_v_metrics(g_f), 0);
+    check(rekha_advance_height(g_f, 0), 0);
+    return 0;
+}
+
+# ── B) vmtx, including the bare tail ──────────────────────────
+fn t_vmtx(): i64 {
+    g_group = "B vmtx";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_advance_height(g_f, 0), 1000);
+    check(rekha_advance_height(g_f, 3), 1030);
+    # ⚠ a gid past numOfLongVerMetrics SHARES the last advance, exactly as hmtx does
+    check(rekha_advance_height(g_f, 4), 1030);
+    check(rekha_advance_height(g_f, 5), 1030);
+    check(rekha_advance_height(g_f, 0 - 1), 0);
+    check(rekha_advance_height(0, 0), 0);
+    # ⛔ THE TAIL IS A BARE i16 ARRAY, not a continuation of the 4-byte records. Reading it with the
+    # wrong stride hands back another glyph's ADVANCE as a bearing.
+    check(rekha_top_side_bearing(g_f, 0), 50);
+    check(rekha_top_side_bearing(g_f, 3), 53);
+    check(rekha_top_side_bearing(g_f, 4), 54);
+    check(rekha_top_side_bearing(g_f, 5), 55);
+    check(rekha_top_side_bearing(g_f, 0 - 1), 0);
+    check(rekha_top_side_bearing(0, 0), 0);
+    # a vmtx the tail does not fit in: the long records still read, the tail does not
+    opts_reset();
+    o_shortvmtx = 1;
+    check(openf() != 0, 1);
+    check(rekha_advance_height(g_f, 3), 1030);
+    check(rekha_top_side_bearing(g_f, 3), 53);
+    check(rekha_top_side_bearing(g_f, 4), 0);
+    # no vmtx at all
+    opts_reset();
+    o_novmtx = 1;
+    check(openf() != 0, 1);
+    check(rekha_num_v_metrics(g_f), NVM);               # vhea still says how many there would be
+    check(rekha_advance_height(g_f, 0), 0);
+    check(rekha_top_side_bearing(g_f, 0), 0);
+    return 0;
+}
+
+# ── C) VORG ──────────────────────────────────
+fn t_vorg(): i64 {
+    g_group = "C vorg";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_vorg_present(g_f), 1);
+    check(rekha_vert_origin_y(g_f, 1), 900);
+    check(rekha_vert_origin_y(g_f, 4), 950);
+    # ⚠ a glyph the table does not name takes defaultVertOriginY — that is the table's own rule
+    check(rekha_vert_origin_y(g_f, 0), 880);
+    check(rekha_vert_origin_y(g_f, 2), 880);
+    check(rekha_vert_origin_y(g_f, 5), 880);
+    check(rekha_vert_origin_y(g_f, 0 - 1), 0);
+    # ⛔ WITH NO VORG rekha ANSWERS 0 AND DOES NOT DERIVE ONE from the bounding box and the top side
+    # bearing. A derived origin is a plausible wrong height for every glyph in the run.
+    opts_reset();
+    o_novorg = 1;
+    check(openf() != 0, 1);
+    check(rekha_vorg_present(g_f), 0);
+    check(rekha_vert_origin_y(g_f, 1), 0);
+    check(rekha_top_side_bearing(g_f, 1), 51);          # ...which IS there, and is a different thing
+    check(rekha_vorg_present(0), 0);
+    # a major version rekha does not take
+    opts_reset();
+    o_vorgver = 2;
+    check(openf() != 0, 1);
+    check(rekha_vorg_present(g_f), 0);
+    check(rekha_vert_origin_y(g_f, 1), 0);
+    return 0;
+}
+
+# ── D) VVAR, and its maps kept apart ──────────────────────────
+fn t_vvar(): i64 {
+    g_group = "D vvar";
+    opts_reset();
+    o_novvar = 0;
+    o_nofvar = 0;
+    check(openf() != 0, 1);
+    # at the default every scalar is zero
+    check(rekha_advance_height(g_f, 1), 1010);
+    check(rekha_top_side_bearing(g_f, 1), 51);
+    check(rekha_vert_origin_y(g_f, 1), 900);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    # ⭐ THE ADVANCE MAP SENDS g TO ROW g, and the tsb has NO map, so the glyph id is the row.
+    check(rekha_advance_height(g_f, 1), 1030);          # 1010 + 20
+    check(rekha_advance_height(g_f, 0), 1010);          # 1000 + 10
+    check(rekha_top_side_bearing(g_f, 1), 71);          # 51 + 20
+    check(rekha_top_side_bearing(g_f, 3), 93);          # 53 + 40
+    # ⛔ ...BUT THE VERTICAL-ORIGIN MAP SENDS g TO ROW g + 2. A reader that used the advance map's
+    # offset here would answer 920, which is wrong and entirely plausible.
+    check(rekha_vert_origin_y(g_f, 1), 940);            # 900 + row 3 = 40
+    check(rekha_vert_origin_y(g_f, 0), 910);            # 880 + row 2 = 30
+    check(rekha_var_reset(g_f), 1);
+    check(rekha_advance_height(g_f, 1), 1010);
+    check(rekha_vert_origin_y(g_f, 1), 900);
+    # a VVAR major version rekha does not take leaves everything static
+    opts_reset();
+    o_novvar = 0;
+    o_nofvar = 0;
+    o_vvarver = 2;
+    check(openf() != 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_advance_height(g_f, 1), 1010);
+    check(rekha_vert_origin_y(g_f, 1), 900);
+    return 0;
+}
+
+# ── E) pixels ─────────────────────────────────
+fn t_px(): i64 {
+    g_group = "E pixels";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_glyph_advance_height_px(g_f, 0, 1000), 1000);
+    check(rekha_glyph_advance_height_px(g_f, 0, 16), 16);
+    check(rekha_glyph_advance_height_fx(g_f, 0, 1000), 1000 * 65536);
+    check(rekha_glyph_advance_height_px(g_f, 0 - 1, 16), 0);
+    check(rekha_glyph_advance_height_px(0, 0, 16), 0);
+    return 0;
+}
+
+# ── F) a vhea the header does not fit in ────────────────────────
+fn t_refuse(): i64 {
+    g_group = "F refusals";
+    opts_reset();
+    o_vhealen = 34;
+    check(openf() != 0, 1);
+    check(rekha_vhea_present(g_f), 0);
+    check(rekha_num_v_metrics(g_f), 0);
+    check(rekha_vert_ascender(g_f), 0);
+    check(rekha_advance_height(g_f, 0), 0);
+    # ...and VORG, a different table, still answers
+    check(rekha_vorg_present(g_f), 1);
+    check(rekha_vert_origin_y(g_f, 1), 900);
+    return 0;
+}
+
+# ── G) every byte of the vertical tables, flipped ─────────────────────
+fn t_guard(): i64 {
+    g_group = "G guard";
+    opts_reset();
+    o_novvar = 0;
+    o_nofvar = 0;
+    build();
+    var lo = g_vhea;
+    var hi = g_vvar + g_vvarlen;
+    var bad = 0;
+    var at = lo;
+    while (at < hi) {
+        var bit = 0;
+        while (bit < 8) {
+            var orig = load8(FB + at);
+            store8(FB + at, orig ^ (1 << bit));
+            var f = rekha_font_open(FB, g_flen);
+            if (f != 0) {
+                rekha_var_set_axis(f, 0, 900 * 65536);
+                var g = 0;
+                while (g < NG + 2) {
+                    var h = rekha_advance_height(f, g);
+                    if (h < 0 || h > 1100000) { bad = bad + 1; }
+                    var t = rekha_top_side_bearing(f, g);
+                    if (t > 1100000 || t < 0 - 1100000) { bad = bad + 1; }
+                    var y = rekha_vert_origin_y(f, g);
+                    if (y > 1100000 || y < 0 - 1100000) { bad = bad + 1; }
+                    g = g + 1;
+                }
+                if (rekha_vert_ascender(f) > 1100000) { bad = bad + 1; }
+            }
+            store8(FB + at, orig);
+            bit = bit + 1;
+        }
+        at = at + 1;
+    }
+    check(bad, 0);
+    g_f = rekha_font_open(FB, g_flen);
+    check(g_f != 0, 1);
+    check(rekha_advance_height(g_f, 1), 1010);
+    check(rekha_vert_origin_y(g_f, 4), 950);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    FB = alloc(FB_CAP);
+    t_vhea();
+    t_vmtx();
+    t_vorg();
+    t_vvar();
+    t_px();
+    t_refuse();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "vert_test: PASS (vhea, vmtx and its bare tail, VORG, VVAR's separate maps; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

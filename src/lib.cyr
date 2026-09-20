@@ -84,5 +84,8 @@ include "src/post.cyr"
 # it follows cmap.cyr; nothing calls into it.
 # gpos.cyr is GPOS pair positioning, which kern.cyr prefers over the legacy table, so it comes
 # FIRST of the two.
+# vert.cyr is the vertical half of the metrics: vhea, vmtx, VORG and VVAR. It uses hvar.cyr's
+# variation-store readers and var.cyr's live-axis check, so it follows both.
+include "src/vert.cyr"
 include "src/gpos.cyr"
 include "src/kern.cyr"

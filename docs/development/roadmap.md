@@ -16,15 +16,14 @@ out, for `sadish` to fill. 1.0.0 is that promise **complete, correct and frozen*
 surface, but no remaining place where a consumer has to reach around rekha to a byte rekha already
 holds, and no published name that does nothing.
 
-⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
-is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`**, **0.6.1
-`OS/2`**, **0.6.2 `name`**, **0.6.3 `STAT`** with `fvar`'s named instances **0.6.4 `post`**, **0.6.5 `kern`** and **0.6.6 GPOS**, so the
-tables rekha resolves are now twenty and **one** of this milestone's items is left. ⭐ Every tag
-in MVAR that names a table rekha reads now lands on it; the four `vhea` ones are what remain.
+⭐ **0.5.x and 0.6.x are both closed.** 0.5.x was the conformance milestone that opened
+this file; 0.6.x was "the tables rekha transports and never reads", and there are none left —
+rekha resolves **twenty-one**, and **all 28 of MVAR's tags** land on the field the spec names.
+See CHANGELOG 0.5.0 through 0.6.7. What remains is a published error vocabulary with no
+producer, hinting, and the freeze.
 
 | milestone | what it closes |
 |---|---|
-| **0.6.x — the font's own answers** | The tables rekha transports and never reads. A consumer cannot compute any of them from outlines, so today it must parse the SFNT itself — the one thing rekha exists to stop. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published and has no producer. |
 | **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. |
 | **0.9.0 — the freeze** | An API that is declared, documented and promised, rather than merely exported. |
@@ -32,26 +31,6 @@ in MVAR that names a table rekha reads now lands on it; the four `vhea` ones are
 
 Everything else is **pinned** (real, evidenced, unscheduled), **blocked on a sibling**, or an
 explicit **non-goal**.
-
----
-
-## 0.6.x — the font's own answers
-
-The tables rekha **transports and never reads**. The set it DOES resolve is fourteen: `head`,
-`maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, `HVAR`,
-`MVAR`, `OS/2`, `name`, `STAT`, `post`, `kern` and `GPOS`. Every other OpenType tag in the codebase lives only inside WOFF2's
-known-tag strings at `src/woff2.cyr:100-102`: lookup bytes, not readers.
-
-### Vertical metrics — `vhea`, `vmtx`, `VORG`
-
-`grep -rn -E 'vhea|vmtx|VORG' src/` → only the WOFF2 tag strings. A CJK face laid out vertically
-needs a per-glyph vertical advance, a vertical line box, and (for CFF faces) a vertical origin that
-is not derivable. The block mirrors the existing `hhea` / `hmtx` one almost exactly, long-metrics
-tail included.
-
-⚠ **Scheduled last in this milestone, and movable past 1.0.** rekha names *horizontal* metrics as
-its shipped scope (0.3.6) and has never claimed vertical; no AGNOS consumer lays out vertical text
-today. It is here because it is metrics, not because anything is waiting.
 
 ---
 
@@ -138,6 +117,7 @@ a milestone when a consumer asks.
 | **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if the vertical-metrics item lands: the API shape would need a vertical twin. |
 | **`gvar` phantom-point advances are decoded and discarded** | `src/gvar.cyr:23` | A TrueType variable font with `gvar` and no HVAR varies its advances through the four phantom points per glyph. Honouring them puts a full glyph decode behind an advance query measured at 47 ns, so the honest shape is a separate resolver, not a change to the O(1) reader. |
 | **HVAR's lsb and rsb maps are read past** | `src/hvar.cyr`, the header note | rekha publishes no side-bearing accessor for them to vary, and a glyph's real bearing already follows its outline. Wants the accessor first. |
+| **A vertical origin is not derived when a font states none** | `src/vert.cyr`, the header note | With no `VORG`, the convention is to derive one from the bounding box and the top side bearing. rekha answers 0 and says so through `rekha_vorg_present`, because a derived origin is a plausible wrong height for every glyph in a run. Wants a bbox accessor and a consumer that needs it. |
 | **GPOS kerning does not follow the axes** | `src/gpos.cyr`, the header note | A GPOS ValueRecord can carry a Device table or a VariationIndex into GDEF's ItemVariationStore. The store reader exists (`rekha_ivs_delta`, 0.6.0); GDEF is what is missing, so a variable font's GPOS kerning is read at its default. |
 | **GPOS script and language selection** | `src/gpos.cyr`, the header note | rekha takes the union of every `kern` feature's lookups. Doing it properly needs a script and a language on the API, which is a bigger question than the walk. |
 | **`kern` format 2** | `src/kern.cyr`, the skip list | The two-dimensional class array. Rare, and a font carrying one alongside a format 0 still kerns from the format 0; none of the 16 host `kern` fonts has one rekha needed. |

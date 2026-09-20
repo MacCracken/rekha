@@ -5,6 +5,62 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.7] - 2026-09-20 — vertical metrics, and the close of 0.6.x
+
+`vhea`, `vmtx`, `VORG` and `VVAR`: everything rekha knows about laying a line of text DOWN the page
+instead of across it. A CJK face set vertically needs a per-glyph advance HEIGHT, a vertical line
+box, a top side bearing and a vertical origin, and none of it is derivable from the horizontal
+metrics. **This is the last item of the 0.6.x milestone.**
+
+⭐ **AND IT CLOSES MVAR.** `vasc`, `vdsc`, `vlgp`, `vcrs`, `vcrn` and `vcof` were the last tags with
+nowhere to land, so **every one of MVAR's 28 tags now lands on the field the spec names** —
+re-measured against fontTools' instancer on the same bytes, two axes, eight locations:
+
+| | fields | identical |
+|---|---:|---|
+| **0.6.7** | **28 MVAR + 3 unvarying hhea + 8 advances** | **312 of 312** |
+| 0.6.4 | 22 MVAR + 3 + 8 | 264 of 264 |
+
+⚠ **0.6.4 said there were four `vhea` tags left. There are six** — it counted the line box and
+missed the caret. This is the correction; the live comment that said it is fixed too.
+
+### Added — `src/vert.cyr`
+
+`rekha_vhea_present`, `rekha_vert_ascender` / `_descender` / `_line_gap`,
+`rekha_vert_caret_slope_rise` / `_run` / `_offset`, `rekha_num_v_metrics`,
+`rekha_advance_height` (+ `_px`, `_fx`), `rekha_top_side_bearing`, `rekha_vorg_present`,
+`rekha_vert_origin_y`.
+
+- ⛔ **A glyph's vertical origin is NOT its top side bearing.** `VORG` gives the origin outright and
+  is what a CFF face carries; a TrueType face usually has none, and the convention is to derive one
+  from the bounding box and the bearing. **rekha does not derive it.** `rekha_vorg_present` says
+  whether the font stated one, and the reader answers only when it did — guessing here would put
+  every glyph of a vertical run at a plausible wrong height.
+- ⛔ **`vmtx`'s tail is a BARE i16 array**, not a continuation of its 4-byte records. Reading it
+  with the wrong stride hands back another glyph's advance as a bearing. The fixture has six glyphs
+  and four long metrics so the tail is exercised rather than assumed.
+- **VVAR** varies the advance height, the top side bearing and the vertical origin, through
+  `src/hvar.cyr`'s `rekha_ivs_delta` and `rekha_dsim` — the same readers HVAR uses, already
+  verified at 264/264 against fontTools. ⛔ Its four maps are **separate**, and the suite gives the
+  advance map and the vertical-origin map deliberately different targets, so a reader that used one
+  map's offset for the other metric returns a plausible number that is simply the wrong one.
+- ⚠ **Horizontal is still the default and the tested path.** rekha names horizontal metrics as its
+  shipped scope (0.3.6) and no AGNOS consumer lays out vertical text today. This is here because it
+  is metrics, because it is what the last MVAR tags needed, and because a CJK consumer that arrives
+  should not find the table unread. ⛔ It is not a vertical LAYOUT engine: rekha reports the numbers.
+
+`REKHA_FONT_SIZE` **608 -> 672**. ⇒ new `programs/vert_test.cyr`, **89 checks**: the line box and
+caret, advances including the shared tail past `numOfLongVerMetrics`, bearings in both regions of
+`vmtx`, VORG's per-glyph entries and its default, VVAR's three metrics with the maps kept apart, a
+vhea below its header, a VORG and a VVAR version rekha refuses, and a bit-flip sweep over all four
+tables.
+
+### 0.6.x closed
+
+Twenty-one tables resolved, from `head` to `VVAR`. The milestone opened with "the tables rekha
+transports and never reads"; what is left of that list is nothing. Next is 0.7.x — `RekhaErr`,
+which is published and produced by nothing.
+
 ## [0.6.6] - 2026-09-20 — GPOS: where a modern font actually keeps its kerning
 
 0.6.5 read the legacy `kern` table and said plainly that a face with GPOS alone is normal and got

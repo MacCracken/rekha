@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""metrics_var_diff.py — HVAR and MVAR against fontTools' own instancer (0.6.0, 0.6.1, 0.6.4).
+"""metrics_var_diff.py — HVAR and MVAR against fontTools' own instancer (0.6.0, 0.6.1, 0.6.4, 0.6.7).
 
 Builds a two-axis variable font with HVAR (a DeltaSetIndexMap over two ItemVariationDatas) and
 MVAR, writes it out, and hands THE SAME BYTES to both:
@@ -44,6 +44,8 @@ SUB = [70, 65, 0, 75]                       # OS/2 ySubscript X/Y size, X/Y offs
 SUP = [72, 68, 0, 480]                      # OS/2 ySuperscript X/Y size, X/Y offset
 CRS, CRN, COF = 1, 0, 0                     # hhea caretSlopeRise / Run / Offset
 UNDO, UNDS = -75, 50                        # post underlinePosition / underlineThickness
+VASC, VDSC, VLGP = 500, -500, 20            # vhea, the vertical line box
+VCRS, VCRN, VCOF = 0, 1, 0                  # vhea's caret
 
 # Two axes, so every region scalar is a product of two tents rather than one.
 AXES = [(b"wght", 100, 400, 900), (b"wdth", 50, 100, 200)]
@@ -69,6 +71,9 @@ REKHA_ACCESSOR = {
     b"spys": "rekha_superscript_y_size",   b"stro": "rekha_strikeout_position",
     b"strs": "rekha_strikeout_size",       b"undo": "rekha_underline_position",
     b"unds": "rekha_underline_thickness",  b"xhgt": "rekha_x_height",
+    b"vasc": "rekha_vert_ascender",        b"vcof": "rekha_vert_caret_offset",
+    b"vcrn": "rekha_vert_caret_slope_run", b"vcrs": "rekha_vert_caret_slope_rise",
+    b"vdsc": "rekha_vert_descender",       b"vlgp": "rekha_vert_line_gap",
 }
 
 LOCATIONS = [
@@ -155,6 +160,12 @@ MVAR_FIELDS = [
     (b"strs", "OS/2", "yStrikeoutSize", [5, -2, 3, 1]),
     (b"undo", "post", "underlinePosition", [-9, 4, -5, -2]),
     (b"unds", "post", "underlineThickness", [6, -2, 3, 1]),
+    (b"vasc", "vhea", "ascent", [22, -8, 10, 4]),
+    (b"vcof", "vhea", "caretOffset", [2, -1, 1, 1]),
+    (b"vcrn", "vhea", "caretSlopeRun", [4, -2, 2, 1]),
+    (b"vcrs", "vhea", "caretSlopeRise", [3, -1, 2, 1]),
+    (b"vdsc", "vhea", "descent", [-16, 7, -7, -3]),
+    (b"vlgp", "vhea", "lineGap", [8, -4, 4, 2]),
     (b"xhgt", "OS/2", "sxHeight", [25, -9, 8, 3]),
 ]
 MVAR_FIELDS.sort(key=lambda e: e[0])
@@ -239,8 +250,17 @@ def make_font():
     struct.pack_into(">hhh", os2, 68, TASC, TDSC, TLGP)    # sTypoAscender / Descender / LineGap
     struct.pack_into(">HH", os2, 74, WASC, WDSC)           # usWinAscent / usWinDescent
     struct.pack_into(">hh", os2, 86, XHGT, CPHT)           # sxHeight / sCapHeight
+    # ⭐ vhea version 1.0 and its vmtx: the six `vhea` MVAR tags were the last with nowhere to
+    # land, and 0.6.7 is where they do.
+    vhea = bytearray(36)
+    struct.pack_into(">I", vhea, 0, 0x00010000)
+    struct.pack_into(">hhh", vhea, 4, VASC, VDSC, VLGP)
+    struct.pack_into(">hhh", vhea, 18, VCRS, VCRN, VCOF)
+    struct.pack_into(">H", vhea, 34, NG)
+    vmtx = b"".join(struct.pack(">Hh", 1000, 50) for _ in range(NG))
     return sfnt({"head": bytes(head), "maxp": maxp, "hhea": bytes(hhea), "hmtx": hmtx,
                  "loca": loca, "glyf": b"", "post": post, "OS/2": bytes(os2),
+                 "vhea": bytes(vhea), "vmtx": vmtx,
                  "name": build_name(),
                  "fvar": build_fvar(), "HVAR": build_hvar(), "MVAR": build_mvar()})
 
@@ -344,7 +364,7 @@ def fonttools_metrics(path):
             else:
                 varidx = g
             advances.append(ADV[g] + otRound(inst[varidx]))
-        tabs = {"OS/2": o, "hhea": h, "post": f["post"]}
+        tabs = {"OS/2": o, "hhea": h, "post": f["post"], "vhea": f["vhea"]}
         # every varying field, in the order the dumper prints them, then the three hhea vertical
         # metrics that must NOT move, then the advances
         vals = [getattr(tabs[t], a) for _, t, a, _ in MVAR_FIELDS]
