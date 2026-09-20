@@ -5,6 +5,68 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.11] - 2026-09-20 — variable-font instancing, for CFF2
+
+`rekha_var_set_axis(font, i, value)` puts axis `i` at a user value and every later
+`rekha_load_glyph` draws the font there. Roadmap v0.4.x item 11, the CFF2 half.
+
+0.4.9 decoded a CFF2 at its **default** location, and the reason it could ignore the deltas
+entirely is the reason this release is small: at the default every region's scalar is **zero**, so a
+blended value simply *is* its default. `src/var.cyr` reads `fvar` and `avar`, normalizes an axis
+setting onto [-1, 1], and turns the coordinates into one scalar per region of the variation store.
+The `blend` operator then adds each delta weighted by its region's scalar — and with no axes set
+RC_NSCAL is 0 and the deltas are dropped exactly as before, byte-identical to 0.4.9.
+
+⭐ **CHECKED AGAINST fontTools AT EVERY LOCATION TESTED**, on a variable CFF2 it instanced too:
+
+| `wght` | normalized | rekha | fontTools |
+|---|---|---|---|
+| 400 (default) | 0 | `(100,200) (400,200) (400,600)` | identical |
+| 900 / 100 (both extremes) | ±1 | unchanged — the coordinate is ON a region edge | identical |
+| 650 (a region's peak) | +0.5 | `(110,230) (410,230) (410,630)` | identical |
+| 550 (interior) | +0.3 | `(106,218) (406,218) (406,618)` | identical |
+| 550 through an `avar` map | +0.8 | `(104,212) (404,212) (404,612)` | identical |
+
+### Added — `src/var.cyr`: the axes, and the scalars
+
+- `rekha_var_axis_count` / `_tag` / `_min` / `_default` / `_max` / `_coord`, and
+  `rekha_var_set_axis` / `rekha_var_reset`. Axis values are 16.16 **user** units, the scale `fvar`'s
+  own Fixed fields use; `rekha_var_coord` reports the normalized result.
+- ⭐ **The region scalar is OpenType's own rule, and three of its five branches mean "this axis does
+  not constrain the region" rather than "the region is off"**: a peak of 0, a malformed
+  start/peak/end triple, and a region spanning the default are each *ignored on that axis*, not
+  treated as zero. Only being at or beyond an edge zeroes the whole region. Getting that inverted
+  turns a font that should not move into one that moves everywhere.
+- `avar` segment maps are applied after normalization, piecewise linear between positions. ⚠ avar
+  **2.0** adds a variation store on top of the maps; rekha reads the maps, which 2.0 keeps, and does
+  not apply that extra mapping.
+- ⛔ `rekha_var_set_axis` is a **set-the-axes-then-draw** call: it normalizes, runs `avar` and
+  rebuilds every region scalar. It is not cheap enough to call per glyph and is not meant to be.
+- ⚠ ALLOCATION: the coordinate and scalar arrays are allocated on the first `set_axis` and reused.
+  rekha's seam has no free, so a font whose axes are set keeps them.
+
+### Changed — `blend` applies its deltas
+
+The products are accumulated at 32.32 and shifted **once**, so a value blended over several regions
+rounds like one sum rather than a chain of them. `REKHA_FONT_SIZE` **272 → 336** for the `fvar` /
+`avar` cache, the normalized coordinates and the scalars. `rekha_cff2_ivd` replaces
+`rekha_cff2_regions` as the primitive: instancing needs to know *which* regions a subtable blends
+over, not just how many, so the region-index array is now bounds-checked as well.
+
+### Added — `programs/cff2_test.cyr` groups F and G (144 → **258 checks**)
+
+The builder gained an `fvar` (one `wght` axis, 100 / 400 / 900), an `avar` whose map kinks at
+0.3 → 0.8, and **real region tents** in its variation store — region 0 peaking at +0.5 over (0, 1],
+region 1 at -0.5 over [-1, 0). Every expected coordinate is worked out from those tents and the
+charstrings' own deltas rather than read back off rekha: the default and both extremes (where a
+coordinate sits on an edge and nothing moves), a region's peak, halfway up a tent, the negative
+half, a glyph with no blend at all, and `rekha_var_reset` putting it all back.
+
+⚠ **The builder's SFNT layout is now COMPUTED, not written down.** Adding `fvar` and `avar` grew the
+directory past the offsets the old fixed layout used — which is exactly the defect 0.4.10 fixed in
+`programs/cff_test.cyr`, where a hardcoded `head` offset ended up inside the directory and went
+unnoticed for eight releases. The comment on those lines says so.
+
 ## [0.4.10] - 2026-09-20 — WOFF2 collections, and the fixture that hid the scaled readers
 
 Two unrelated things, and the second one is why the first is not alone: the fixture fix was already

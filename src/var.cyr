@@ -1,0 +1,324 @@
+# @internal — OpenType font variations: axes, normalization, and the region scalars (0.4.11).
+#
+# var.cyr — read `fvar` and `avar`, turn a user axis setting into a NORMALIZED coordinate, and turn
+# those coordinates into one scalar per region of a variation store. That scalar is the whole of
+# instancing: a blended value is its default plus the sum of its deltas, each weighted by the scalar
+# of the region it belongs to. At the default location every scalar is zero, which is why 0.4.9
+# could decode a CFF2 without any of this.
+#
+# ⛔ WHAT THIS DOES NOT DO. Only the CFF2 charstring `blend` consumes these scalars today. `gvar`
+# (TrueType outline deltas), `HVAR` (metrics) and `MVAR` are separate delta formats over the same
+# region machinery — the roadmap carries them.
+#
+# fvar (OpenType): majorVersion u16 · minorVersion u16 · axesArrayOffset u16 · reserved u16 ·
+#   axisCount u16 · axisSize u16 · instanceCount u16 · instanceSize u16; then axisCount
+#   VariationAxisRecords of `axisSize` bytes: tag u32 · minValue Fixed · defaultValue Fixed ·
+#   maxValue Fixed · flags u16 · axisNameID u16.
+# avar: majorVersion u16 · minorVersion u16 · reserved u16 · axisSegmentMapCount u16; then one
+#   SegmentMap per axis: positionMapCount u16 · that many (fromCoordinate, toCoordinate) F2Dot14
+#   pairs, both in normalized space.
+# ⚠ avar 2.0 adds a variation store on top of the segment maps. rekha reads the maps, which 2.0
+# keeps and which are the whole of avar 1.0; a 2.0 table's extra mapping is NOT applied.
+#
+# ⚠ FIXED POINT. Axis values and normalized coordinates are 16.16 here, because that is what fvar's
+# own Fixed fields are and what the charstring interpreter already works in. A region's coordinates
+# are F2Dot14 in the font (1.0 = 16384) and are widened by 2 on the way in.
+
+var REKHA_TAG_FVAR = 0x66766172;   # 'fvar'
+var REKHA_TAG_AVAR = 0x61766172;   # 'avar'
+# Axes in one font, and regions in one variation store. Real variable fonts carry a handful of axes;
+# the cap keeps the per-font arrays small and every index multiplication trivially in range.
+var REKHA_VAR_MAXAXES   = 64;
+var REKHA_VAR_MAXREGION = 4096;
+var REKHA_VAR_ONE       = 65536;   # 1.0 in 16.16
+
+# 16.16 x 16.16 -> 16.16, rounded half up. ⚠ `>>` is logical in Cyrius, so the shift is sd_asr.
+fn rekha_fx_mul(a, b): i64 {
+    return sd_asr(a * b + 32768, 16);
+}
+
+# 16.16 / 16.16 -> 16.16. Both arguments are positive at every call site (each is a difference
+# between a coordinate and the edge of the interval it lies inside), so no sign handling is needed.
+fn rekha_fx_div(a, b): i64 {
+    if (b == 0) { return 0; }
+    return (a << 16) / b;
+}
+
+# ================================================================
+# fvar — the axes
+# ================================================================
+
+# @public — how many variation axes the font declares, or 0 when it has no usable `fvar`.
+fn rekha_var_axis_count(font): i64 {
+    if (font == 0) { return 0; }
+    return load64(font + 280);
+}
+
+# The byte offset of axis record `i`, or 0.
+fn rekha_var_axis_rec(font, i): i64 {
+    if (font == 0) { return 0; }
+    if (i < 0) { return 0; }
+    if (i >= load64(font + 280)) { return 0; }
+    return load64(font + 272) + i * load64(font + 288);
+}
+
+# @public — axis `i`'s four-byte tag ('wght', 'wdth', …), or 0.
+fn rekha_var_axis_tag(font, i): i64 {
+    var r = rekha_var_axis_rec(font, i);
+    if (r == 0) { return 0; }
+    return rekha_rd_u32(load64(font), r);
+}
+
+# @public — axis `i`'s minimum / default / maximum, in 16.16 user units. 0 for a bad index.
+# ⚠ fvar stores these as signed Fixed, so they are sign-extended from the u32 the reader returns.
+fn rekha_var_axis_at(font, i, off): i64 {
+    var r = rekha_var_axis_rec(font, i);
+    if (r == 0) { return 0; }
+    var v = rekha_rd_u32(load64(font), r + off);
+    if (v >= 0x80000000) { v = v - 0x100000000; }
+    return v;
+}
+
+fn rekha_var_axis_min(font, i): i64     { return rekha_var_axis_at(font, i, 4); }
+fn rekha_var_axis_default(font, i): i64 { return rekha_var_axis_at(font, i, 8); }
+fn rekha_var_axis_max(font, i): i64     { return rekha_var_axis_at(font, i, 12); }
+
+# Normalize a user value onto [-1, 1] (OpenType's rule): clamp to the axis range, then scale the
+# distance from the default by the half-range it falls in.
+fn rekha_var_normalize(lo, def, hi, v): i64 {
+    if (v < lo) { v = lo; }
+    if (v > hi) { v = hi; }
+    if (v == def) { return 0; }
+    if (v < def) {
+        if (def == lo) { return 0; }
+        return 0 - rekha_fx_div(def - v, def - lo);
+    }
+    if (hi == def) { return 0; }
+    return rekha_fx_div(v - def, hi - def);
+}
+
+# Apply axis `i`'s avar SegmentMap to an already-normalized coordinate. Returns it unchanged when
+# there is no avar, no map for this axis, or fewer than two positions — a map needs a segment.
+# ⚠ The map is piecewise linear between consecutive (from, to) pairs, and the spec requires `from`
+# to increase; a pair that does not is where the walk stops, leaving the coordinate as it was.
+fn rekha_var_avar(font, i, coord): i64 {
+    var avar = load64(font + 296);
+    if (avar == 0) { return coord; }
+    var buf = load64(font);
+    var end = load64(font + 304);
+    if (avar + 8 > end) { return coord; }
+    var nmaps = rekha_rd_u16(buf, avar + 6);
+    if (i >= nmaps) { return coord; }
+    var p = avar + 8;
+    var a = 0;
+    while (a < i) {
+        if (p + 2 > end) { return coord; }
+        p = p + 2 + rekha_rd_u16(buf, p) * 4;
+        a = a + 1;
+    }
+    if (p + 2 > end) { return coord; }
+    var cnt = rekha_rd_u16(buf, p);
+    if (cnt < 2) { return coord; }
+    if (p + 2 + cnt * 4 > end) { return coord; }
+    var prevf = 0 - REKHA_VAR_ONE * 2;
+    var prevt = prevf;
+    var k = 0;
+    while (k < cnt) {
+        var fc = rekha_rd_i16(buf, p + 2 + k * 4) * 4;        # F2Dot14 -> 16.16
+        var tc = rekha_rd_i16(buf, p + 2 + k * 4 + 2) * 4;
+        if (fc <= prevf) { return coord; }                    # not increasing: leave it alone
+        if (coord == fc) { return tc; }
+        if (coord < fc) {
+            if (k == 0) { return coord; }
+            return prevt + rekha_fx_mul(tc - prevt, rekha_fx_div(coord - prevf, fc - prevf));
+        }
+        prevf = fc;
+        prevt = tc;
+        k = k + 1;
+    }
+    return coord;
+}
+
+# ================================================================
+# Region scalars
+# ================================================================
+
+# The scalar for region `r` of the VariationRegionList at `rl`, under the font's current normalized
+# coordinates. 16.16; 0 means the region contributes nothing.
+#
+# ⭐ This is OpenType's own rule, axis by axis, and three of its five branches are "this axis does
+# not constrain the region" rather than "the region is off":
+#   - a peak of 0 means the region does not use the axis at all;
+#   - start > peak or peak > end is a malformed triple, ignored rather than treated as zero;
+#   - a region spanning the default (start < 0 < end) is ignored on that axis, by the same rule;
+#   - at the peak exactly, the factor is 1;
+#   - at or beyond either edge, the WHOLE region is zero and the product stops.
+# Anywhere else the factor is how far the coordinate has travelled from the edge toward the peak.
+fn rekha_var_region_scalar(font, rl, naxes, r): i64 {
+    var buf = load64(font);
+    var coords = load64(font + 312);
+    var scalar = REKHA_VAR_ONE;
+    var base = rl + 4 + r * naxes * 6;
+    var a = 0;
+    while (a < naxes) {
+        var lo = rekha_rd_i16(buf, base + a * 6) * 4;
+        var pk = rekha_rd_i16(buf, base + a * 6 + 2) * 4;
+        var hi = rekha_rd_i16(buf, base + a * 6 + 4) * 4;
+        var v = 0;
+        if (a < load64(font + 280)) { v = load64(coords + a * 8); }
+        var skip = 0;
+        if (pk == 0) { skip = 1; }
+        if (lo > pk || pk > hi) { skip = 1; }
+        if (lo < 0 && hi > 0) { skip = 1; }
+        if (skip == 0) {
+            if (v != pk) {
+                if (v <= lo || v >= hi) { return 0; }
+                if (v < pk) {
+                    scalar = rekha_fx_mul(scalar, rekha_fx_div(v - lo, pk - lo));
+                } else {
+                    scalar = rekha_fx_mul(scalar, rekha_fx_div(hi - v, hi - pk));
+                }
+            }
+        }
+        a = a + 1;
+    }
+    return scalar;
+}
+
+# Recompute one scalar per region of the variation store at `vstore`, into the font's scalar array.
+# 1 on success, 0 when the store's region list does not validate — in which case the array is left
+# empty and every blend falls back to its defaults.
+# VariationRegionList: axisCount u16 · regionCount u16 · then regionCount x axisCount triples of
+# (startCoord, peakCoord, endCoord), each F2Dot14.
+fn rekha_var_build_scalars(font, vstore): i64 {
+    store64(font + 328, 0);
+    if (vstore == 0) { return 0; }
+    var buf = load64(font);
+    var end = load64(font + 304);
+    if (vstore + 2 > end) { return 0; }
+    var ivs = vstore + 2;
+    var ivend = ivs + rekha_rd_u16(buf, vstore);
+    if (ivend > end) { return 0; }
+    if (ivs + 8 > ivend) { return 0; }
+    if (rekha_rd_u16(buf, ivs) != 1) { return 0; }
+    var rl = ivs + rekha_rd_u32(buf, ivs + 2);
+    if (rl < ivs) { return 0; }
+    if (rl + 4 > ivend) { return 0; }
+    var naxes = rekha_rd_u16(buf, rl);
+    var nreg = rekha_rd_u16(buf, rl + 2);
+    if (nreg > REKHA_VAR_MAXREGION) { return 0; }
+    if (naxes > REKHA_VAR_MAXAXES) { return 0; }
+    if (rl + 4 + nreg * naxes * 6 > ivend) { return 0; }
+    var arr = load64(font + 320);
+    if (arr == 0) {
+        arr = sd_alloc(REKHA_VAR_MAXREGION * 8);
+        if (arr == 0) { return 0; }
+        store64(font + 320, arr);
+    }
+    var r = 0;
+    while (r < nreg) {
+        store64(arr + r * 8, rekha_var_region_scalar(font, rl, naxes, r));
+        r = r + 1;
+    }
+    store64(font + 328, nreg);
+    return 1;
+}
+
+# ================================================================
+# The public axis API
+# ================================================================
+
+# @public — the normalized coordinate axis `i` currently sits at, in 16.16. 0 (the default location)
+# until rekha_var_set_axis moves it.
+fn rekha_var_coord(font, i): i64 {
+    if (font == 0) { return 0; }
+    if (i < 0 || i >= load64(font + 280)) { return 0; }
+    var c = load64(font + 312);
+    if (c == 0) { return 0; }
+    return load64(c + i * 8);
+}
+
+# @public — put axis `i` at `value` (16.16 USER units, the same scale fvar's min / default / max are
+# in), normalize it, run it through avar, and rebuild the region scalars. 1 on success, 0 for a font
+# with no axes, a bad index, or an allocation failure.
+# ⚠ This changes what EVERY later rekha_load_glyph returns for this font. It is not cheap enough for
+# a per-glyph call and not meant to be: set the axes once, then draw.
+# ⚠ ALLOCATION: the coordinate and scalar arrays are allocated on the first call and reused after.
+# rekha's seam has no free, so a font whose axes are set keeps them.
+fn rekha_var_set_axis(font, i, value): i64 {
+    if (font == 0) { return 0; }
+    var n = load64(font + 280);
+    if (n < 1) { return 0; }
+    if (i < 0 || i >= n) { return 0; }
+    var c = load64(font + 312);
+    if (c == 0) {
+        c = sd_alloc(REKHA_VAR_MAXAXES * 8);
+        if (c == 0) { return 0; }
+        var z = 0;
+        while (z < REKHA_VAR_MAXAXES) {
+            store64(c + z * 8, 0);
+            z = z + 1;
+        }
+        store64(font + 312, c);
+    }
+    var nc = rekha_var_normalize(rekha_var_axis_min(font, i), rekha_var_axis_default(font, i),
+      rekha_var_axis_max(font, i), value);
+    store64(c + i * 8, rekha_var_avar(font, i, nc));
+    rekha_var_build_scalars(font, load64(font + 264));
+    return 1;
+}
+
+# @public — put every axis back at its default, which is the instance rekha decodes without this
+# API at all. 1 when the font has axes.
+fn rekha_var_reset(font): i64 {
+    if (font == 0) { return 0; }
+    if (load64(font + 280) < 1) { return 0; }
+    var c = load64(font + 312);
+    if (c != 0) {
+        var z = 0;
+        while (z < REKHA_VAR_MAXAXES) {
+            store64(c + z * 8, 0);
+            z = z + 1;
+        }
+    }
+    store64(font + 328, 0);
+    return 1;
+}
+
+# Resolve `fvar` and `avar` into the RekhaFont cache. Never fails an open: a font with no axes, or
+# with an fvar rekha cannot read, is simply a font at one instance.
+fn rekha_var_resolve(f): i64 {
+    store64(f + 272, 0);
+    store64(f + 280, 0);
+    store64(f + 288, 0);
+    store64(f + 296, 0);
+    store64(f + 304, 0);
+    store64(f + 312, 0);
+    store64(f + 320, 0);
+    store64(f + 328, 0);
+    store64(f + 304, load64(f + 8));                  # the whole file bounds every read below
+    var buf = load64(f);
+    var c: i64[1];
+    var fvar = rekha_find_table_len(f, REKHA_TAG_FVAR, &c);
+    if (fvar == 0) { return 0; }
+    var fend = fvar + load64(&c);
+    if (fvar + 16 > fend) { return 0; }
+    if (rekha_rd_u16(buf, fvar) != 1) { return 0; }   # majorVersion 1
+    var aoff = rekha_rd_u16(buf, fvar + 4);
+    var n = rekha_rd_u16(buf, fvar + 8);
+    var asz = rekha_rd_u16(buf, fvar + 10);
+    if (n < 1) { return 0; }
+    if (n > REKHA_VAR_MAXAXES) { return 0; }
+    if (asz < 20) { return 0; }                       # a record rekha can read every field of
+    if (fvar + aoff + n * asz > fend) { return 0; }
+    store64(f + 272, fvar + aoff);
+    store64(f + 280, n);
+    store64(f + 288, asz);
+    var avar = rekha_find_table_len(f, REKHA_TAG_AVAR, &c);
+    if (avar != 0) {
+        if (avar + 8 <= avar + load64(&c)) {
+            if (rekha_rd_u16(buf, avar) == 1) { store64(f + 296, avar); }
+        }
+    }
+    return 1;
+}

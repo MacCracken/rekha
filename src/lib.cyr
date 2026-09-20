@@ -58,3 +58,6 @@ include "src/cff.cyr"
 # cff2.cyr sits atop cff.cyr: it parses the 'CFF2' container and the variation store, and the
 # charstrings themselves go through cff.cyr's interpreter in its CFF2 dialect. Order matters.
 include "src/cff2.cyr"
+# var.cyr reads fvar / avar and turns axis settings into the region scalars cff2.cyr's `blend`
+# weights its deltas by. It follows cff.cyr, whose fixed-point helpers and readers it uses.
+include "src/var.cyr"

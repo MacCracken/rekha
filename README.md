@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.10
+Version: 0.4.11
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,19 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.11 — variable-font instancing, for CFF2 (shipped).** `rekha_var_set_axis` puts an axis at
+  a user value; every later `rekha_load_glyph` draws the font there. 0.4.9 decoded a CFF2 at its
+  default location because every region scalar is zero there and a `blend` keeps its defaults; this
+  reads `fvar` and `avar`, normalizes the setting, and turns it into one scalar per region of the
+  variation store — at which point the same `blend` adds its deltas, each weighted by its region.
+  ⭐ **Checked against fontTools at every location tested, on a font it instanced too**, including
+  an interior point and an `avar`-mapped one: axis defaults, both extremes, the peak of a region
+  tent, halfway up one, the negative half, and a kinked `avar` map — identical coordinates each
+  time.
+  ⛔ The axis API is deliberately coarse: `rekha_var_set_axis` normalizes, runs `avar` and rebuilds
+  every region scalar, so it is a set-the-axes-then-draw call and not a per-glyph one.
+  ⚠ Only CFF2's `blend` consumes the scalars today. `gvar` is item 12 — the axis machinery is done
+  and shared, but its deltas are a different format.
 - **v0.4.10 — WOFF2 collections, and the fixture that hid the scaled readers (shipped).** A
   `ttcf`-flavoured WOFF2 — refused since 0.4.6 — now rebuilds to a real `.ttc`:
   `rekha_woff2_face_count` says how many faces, `rekha_font_open_woff2_index` opens one, and
@@ -232,11 +245,12 @@ shim, no external binaries.
   9. ~~**CFF2**~~ — shipped in 0.4.9, below, at the **default instance**. What is left is applying
      NON-default axis coordinates, which needs `fvar` / `avar` and the region scalars rekha does not
      read — item 11.
- 11. **Variable-font instancing** — 0.4.9 decodes a CFF2 at its default location, where every
-     region scalar is zero and a blended value is its default. Setting axis coordinates needs `fvar`
-     (the axes and their defaults), `avar` (the mapping), the ItemVariationStore's region list, and
-     the scalar product per region — at which point `blend` applies its deltas instead of dropping
-     them, and `gvar` would give TrueType outlines the same treatment.
+ 11. ~~**Variable-font instancing**~~ — shipped in 0.4.11, below, for **CFF2**.
+ 12. **`gvar`** — the same instancing for TrueType outlines. ⚠ Split out of item 11 when the CFF2
+     half shipped: the axis machinery (`fvar`, `avar`, the region scalars) is done and shared, but
+     `gvar`'s deltas are a different format entirely — a per-glyph tuple variation store with
+     shared point numbers, private tuples, and IUP to infer the points a tuple does not name. The
+     metrics variations (`HVAR`, `MVAR`) are the same store over rekha's advance readers.
  10. ~~**WOFF2 collections**~~ — shipped in 0.4.10, below.
 - **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
   sizes.

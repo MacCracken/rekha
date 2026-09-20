@@ -134,6 +134,8 @@ var o_nofd = 0;         # omit the FDArray operator
 var o_vstore = 1;       # 1 = emit an ItemVariationStore, 0 = none
 var o_fdsel = 0;        # 0 = none, 3 = format 3, 4 = format 4 (which rekha must refuse)
 var o_privvs = 0 - 1;   # >= 0 = write that vsindex into the Private DICT
+var o_fvar = 0;         # 1 = emit an fvar with one 'wght' axis, 100 / 400 / 900
+var o_avar = 0;         # 1 = emit an avar mapping the positive half through 0.3 -> 0.8
 
 fn opts_reset(): i64 {
     o_major = 2;
@@ -143,6 +145,8 @@ fn opts_reset(): i64 {
     o_vstore = 1;
     o_fdsel = 0;
     o_privvs = 0 - 1;
+    o_fvar = 0;
+    o_avar = 0;
     return 0;
 }
 
@@ -155,23 +159,69 @@ fn build(): i64 {
     memset(FB, 0, FB_CAP);
     var ng = g_tabn;
     put_u32(FB, 0, 0x4F54544F);
-    put_u16(FB, 4, 5);
-    # ⚠ EVERY TABLE STARTS PAST THE DIRECTORY. Five entries put dir_end at 92, and rekha refuses a
-    # table that begins below it (sfnt.cyr's bounds invariant) — so a fixture laying head at 76, as
-    # an older one here did, has an unreadable head and silently reports unitsPerEm 0.
-    put_u32(FB, 12, REKHA_TAG_HEAD); put_u32(FB, 20, 92);  put_u32(FB, 24, 54);
-    put_u32(FB, 28, REKHA_TAG_MAXP); put_u32(FB, 36, 148); put_u32(FB, 40, 6);
-    put_u32(FB, 44, REKHA_TAG_HHEA); put_u32(FB, 52, 156); put_u32(FB, 56, 36);
-    put_u32(FB, 60, REKHA_TAG_HMTX); put_u32(FB, 68, 192); put_u32(FB, 72, ng * 4);
-    put_u16(FB, 92 + 18, 1000);
-    put_u16(FB, 148 + 4, ng);
-    put_u16(FB, 156 + 34, ng);
+    # ⚠ EVERY TABLE STARTS PAST THE DIRECTORY, and the layout is COMPUTED rather than written down:
+    # rekha refuses a table beginning below dir_end (sfnt.cyr's bounds invariant), and a hardcoded
+    # layout silently breaks the moment the directory grows by an entry. programs/cff_test.cyr had
+    # exactly that bug from 0.4.2 to 0.4.10 — an unreadable head and unitsPerEm 0, unnoticed.
+    var ntab = 4;
+    if (o_fvar != 0) { ntab = ntab + 1; }
+    if (o_avar != 0) { ntab = ntab + 1; }
+    ntab = ntab + 1;                                    # CFF2
+    put_u16(FB, 4, ntab);
+    var at0 = 12 + ntab * 16;
+    var head_at = at0;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var fvar_at = hmtx_at + ((ng * 4 + 3) & (0 - 4));
+    var fvlen = 0;
+    if (o_fvar != 0) { fvlen = 36; }
+    var avar_at = fvar_at + fvlen;
+    var avlen = 0;
+    if (o_avar != 0) { avlen = 26; }
+    var cff = avar_at + ((avlen + 3) & (0 - 4));
+    var de = 12;
+    put_u32(FB, de, REKHA_TAG_HEAD); put_u32(FB, de + 8, head_at); put_u32(FB, de + 12, 54);
+    de = de + 16;
+    put_u32(FB, de, REKHA_TAG_MAXP); put_u32(FB, de + 8, maxp_at); put_u32(FB, de + 12, 6);
+    de = de + 16;
+    put_u32(FB, de, REKHA_TAG_HHEA); put_u32(FB, de + 8, hhea_at); put_u32(FB, de + 12, 36);
+    de = de + 16;
+    put_u32(FB, de, REKHA_TAG_HMTX); put_u32(FB, de + 8, hmtx_at); put_u32(FB, de + 12, ng * 4);
+    de = de + 16;
+    if (o_fvar != 0) {
+        put_u32(FB, de, 0x66766172); put_u32(FB, de + 8, fvar_at); put_u32(FB, de + 12, fvlen);
+        de = de + 16;
+        # one axis, 'wght' 100 / 400 / 900, in fvar's own 16.16 Fixed
+        put_u16(FB, fvar_at, 1);
+        put_u16(FB, fvar_at + 4, 16);
+        put_u16(FB, fvar_at + 8, 1);
+        put_u16(FB, fvar_at + 10, 20);
+        put_u32(FB, fvar_at + 16, 0x77676874);
+        put_u32(FB, fvar_at + 20, 100 * 65536);
+        put_u32(FB, fvar_at + 24, 400 * 65536);
+        put_u32(FB, fvar_at + 28, 900 * 65536);
+        put_u16(FB, fvar_at + 34, 256);
+    }
+    if (o_avar != 0) {
+        put_u32(FB, de, 0x61766172); put_u32(FB, de + 8, avar_at); put_u32(FB, de + 12, avlen);
+        de = de + 16;
+        put_u16(FB, avar_at, 1);
+        put_u16(FB, avar_at + 6, 1);                    # one SegmentMap
+        put_u16(FB, avar_at + 8, 4);                    # four positions
+        put_u16(FB, avar_at + 10, 49152); put_u16(FB, avar_at + 12, 49152);   # -1 -> -1
+        put_u16(FB, avar_at + 14, 0);     put_u16(FB, avar_at + 16, 0);       #  0 ->  0
+        put_u16(FB, avar_at + 18, 4915);  put_u16(FB, avar_at + 20, 13107);   # 0.3 -> 0.8
+        put_u16(FB, avar_at + 22, 16384); put_u16(FB, avar_at + 24, 16384);   #  1 ->  1
+    }
+    put_u16(FB, head_at + 18, 1000);
+    put_u16(FB, maxp_at + 4, ng);
+    put_u16(FB, hhea_at + 34, ng);
     var i = 0;
     while (i < ng) {
-        put_u16(FB, 192 + i * 4, 500 + i);
+        put_u16(FB, hmtx_at + i * 4, 500 + i);
         i = i + 1;
     }
-    var cff = 192 + ng * 4;
     g_cff = cff;
 
     # the Top DICT is a fixed 19 / 25 bytes: CharStrings, FDArray, and optionally vstore + FDSelect
@@ -256,12 +306,12 @@ fn build(): i64 {
         put_u16(FB, ivs + ivd1 + 6, 0);
         put_u16(FB, ivs + rl, 1);                       # axisCount
         put_u16(FB, ivs + rl + 2, 2);                   # regionCount
+        # ⭐ Real tents, in F2Dot14: region 0 peaks at +0.5 over (0, 1], region 1 at -0.5 over
+        # [-1, 0). At the DEFAULT location both are zero — every coordinate sits on an edge — which
+        # is why group B's default-instance results are unaffected by their presence.
         var rb = ivs + rl + 4;
-        var r = 0;
-        while (r < 12) {
-            put_u16(FB, rb + r, 0);
-            r = r + 2;
-        }
+        put_u16(FB, rb, 0);         put_u16(FB, rb + 2, 8192);  put_u16(FB, rb + 4, 16384);
+        put_u16(FB, rb + 6, 49152); put_u16(FB, rb + 8, 57344); put_u16(FB, rb + 10, 0);
         var ivslen = rl + 4 + 12;
         put_u16(FB, p, ivslen);
         p = p + 2 + ivslen;
@@ -292,9 +342,9 @@ fn build(): i64 {
     }
 
     g_cfflen = p - cff;
-    put_u32(FB, 76, REKHA_TAG_CFF2);
-    put_u32(FB, 84, cff);
-    put_u32(FB, 88, g_cfflen);
+    put_u32(FB, de, REKHA_TAG_CFF2);
+    put_u32(FB, de + 8, cff);
+    put_u32(FB, de + 12, g_cfflen);
     g_flen = cff + g_cfflen;
     return g_flen;
 }
@@ -542,6 +592,149 @@ fn t_guard(): i64 {
     return 0;
 }
 
+# ================================================================
+# F) INSTANCING (0.4.11): fvar, avar, and blend applying its deltas instead of dropping them.
+#
+# The font is group B's, plus a real fvar ('wght' 100 / 400 / 900) and the store's two region tents
+# — region 0 peaking at +0.5 over (0, 1], region 1 at -0.5 over [-1, 0). Every expected coordinate
+# below is worked out from those tents and the charstrings' own deltas, not read back off rekha.
+# ================================================================
+
+fn t_instance(): i64 {
+    g_group = "F instancing";
+    tab_reset();
+    # 0: two values blended over BOTH regions — v0 = 100 (+10 r0, +20 r1), v1 = 200 (+30, +40)
+    cs_reset();
+    cs_n(100); cs_n(200); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_n(2); cs_op(16);
+    cs_op(21); cs_n(300); cs_n(0); cs_op(5); tab_add();
+    # 1: vsindex 1 — one region (r0) — v0 = 50 (+5), v1 = 60 (+6)
+    cs_reset();
+    cs_n(1); cs_op(15);
+    cs_n(50); cs_n(60); cs_n(5); cs_n(6); cs_n(2); cs_op(16);
+    cs_op(21); cs_n(100); cs_n(0); cs_op(5); tab_add();
+    # 2: ONE value blended, beside an ordinary argument — v0 = 70 (+7 r0, +8 r1), then a plain 80
+    cs_reset();
+    cs_n(70); cs_n(7); cs_n(8); cs_n(1); cs_op(16);
+    cs_n(80); cs_op(21); cs_n(9); cs_n(0); cs_op(5); tab_add();
+    # 3: no blend at all — this glyph must never move
+    cs_reset(); cs_n(7); cs_n(8); cs_op(21); cs_n(70); cs_n(0); cs_op(5); tab_add();
+    opts_reset();
+    o_fvar = 1;
+    check(open_it() > 0, 1);
+    check(g_f != 0, 1);
+
+    # the axes rekha reports are fvar's own
+    check(rekha_var_axis_count(g_f), 1);
+    check(rekha_var_axis_tag(g_f, 0), 0x77676874);
+    check(sd_asr(rekha_var_axis_min(g_f, 0), 16), 100);
+    check(sd_asr(rekha_var_axis_default(g_f, 0), 16), 400);
+    check(sd_asr(rekha_var_axis_max(g_f, 0), 16), 900);
+    check(rekha_var_axis_tag(g_f, 1), 0);
+    check(rekha_var_axis_count(0), 0);
+
+    # ⭐ AT THE DEFAULT, NOTHING MOVES — every region's coordinate sits on one of its edges, so every
+    # scalar is zero and a blend keeps its defaults. This is the 0.4.9 behaviour, unchanged.
+    check(rekha_var_coord(g_f, 0), 0);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+    check(rekha_var_set_axis(g_f, 0, 400 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 0);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+
+    # at the far ends the coordinate is ON an edge of the only region that could reach it: still zero
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 65536);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+    check(rekha_var_set_axis(g_f, 0, 100 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 0 - 65536);
+    pt(0, 100, 200, 1);
+
+    # ⭐ AT THE PEAK of region 0 (wght 650 -> normalized +0.5) its scalar is 1 and region 1's is 0
+    check(rekha_var_set_axis(g_f, 0, 650 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 32768);
+    check(load(0), 2);
+    pt(0, 110, 230, 1);                                  # 100 + 10, 200 + 30
+    pt(1, 410, 230, 1);
+    check(load(1), 2);
+    pt(0, 55, 66, 1);                                    # 50 + 5, 60 + 6, over one region
+    pt(1, 155, 66, 1);
+    check(load(2), 2);
+    pt(0, 77, 80, 1);                                    # 70 + 7 blended, 80 plain
+    check(load(3), 2);
+    pt(0, 7, 8, 1);                                      # a glyph with no blend never moves
+
+    # ⭐ HALFWAY UP THE TENT (wght 525 -> +0.25, scalar 0.5): the deltas arrive halved
+    check(rekha_var_set_axis(g_f, 0, 525 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 16384);
+    check(load(0), 2);
+    pt(0, 105, 215, 1);                                  # 100 + 5, 200 + 15
+    check(load(1), 2);
+    pt(0, 53, 63, 1);                                    # 50 + 2.5 -> 53 (half up), 60 + 3
+    # the NEGATIVE half reaches region 1 instead
+    check(rekha_var_set_axis(g_f, 0, 250 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 0 - 32768);
+    check(load(0), 2);
+    pt(0, 120, 240, 1);                                  # 100 + 20, 200 + 40, region 1 at its peak
+    check(load(1), 2);
+    pt(0, 50, 60, 1);                                    # vsindex 1 names region 0 only: unmoved
+
+    # ⭐ AND BACK: reset returns the font to the instance it opened at
+    check(rekha_var_reset(g_f), 1);
+    check(rekha_var_coord(g_f, 0), 0);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+
+    # a bad axis index moves nothing, and a font with no fvar has no axes to move
+    check(rekha_var_set_axis(g_f, 1, 650 * 65536), 0);
+    check(rekha_var_set_axis(g_f, 0 - 1, 650 * 65536), 0);
+    check(rekha_var_set_axis(0, 0, 0), 0);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+    opts_reset();
+    check(open_it() > 0, 1);
+    check(rekha_var_axis_count(g_f), 0);
+    check(rekha_var_set_axis(g_f, 0, 650 * 65536), 0);
+    check(rekha_var_reset(g_f), 0);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+    return 0;
+}
+
+# ── G) avar: the same axis, mapped ──────────────────────────
+fn t_avar(): i64 {
+    g_group = "G avar";
+    tab_reset();
+    cs_reset();
+    cs_n(100); cs_n(200); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_n(2); cs_op(16);
+    cs_op(21); cs_n(300); cs_n(0); cs_op(5); tab_add();
+    opts_reset();
+    o_fvar = 1;
+    o_avar = 1;
+    check(open_it() > 0, 1);
+    # the map is {-1 -> -1, 0 -> 0, 0.3 -> 0.8, 1 -> 1}, so the lower positive half is stretched
+    check(rekha_var_set_axis(g_f, 0, 400 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 0);                   # the default is a fixed point of the map
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 65536);               # so is the top
+    # wght 550 normalizes to +0.3, which the map sends to +0.8 — past region 0's peak, on its way
+    # down: scalar = (1 - 0.8) / (1 - 0.5) = 0.4
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(rekha_var_coord(g_f, 0) > 52000, 1);
+    check(rekha_var_coord(g_f, 0) < 53000, 1);
+    check(load(0), 2);
+    pt(0, 104, 212, 1);                                  # 100 + 0.4*10, 200 + 0.4*30
+    # and without the avar the same setting lands at +0.3, BELOW the peak: scalar = 0.3/0.5 = 0.6
+    opts_reset();
+    o_fvar = 1;
+    check(open_it() > 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(load(0), 2);
+    pt(0, 106, 218, 1);                                  # 100 + 0.6*10, 200 + 0.6*30
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     FB = alloc(FB_CAP);
@@ -553,8 +746,10 @@ fn main(): i64 {
     t_blend();
     t_refuse();
     t_guard();
+    t_instance();
+    t_avar();
     if (g_fails == 0) {
-        var ok = "cff2_test: PASS (container, shapes, blend + vsindex, refusals, guard; ";
+        var ok = "cff2_test: PASS (container, shapes, blend, instancing, avar, refusals, guard; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);

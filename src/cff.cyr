@@ -254,6 +254,9 @@ fn rekha_cff_resolve(f): i64 {
         store64(f + k, 0);
         k = k + 8;
     }
+    # ⚠ Variation axes are not a CFF thing — a TrueType variable font has fvar too — but the whole
+    # +176.. block is cleared here, so the resolve that fills part of it belongs here as well.
+    rekha_var_resolve(f);
     if (load64(f + 16) != REKHA_SFNT_VER_OTTO) { return 0; }
     var c: i64[1];
     var cff = rekha_find_table_len(f, REKHA_TAG_CFF, &c);
@@ -414,7 +417,12 @@ var RC_V2    = 216;   # 1 = CFF2 charstring
 var RC_NREG  = 224;   # regions in the CURRENT variation-store index: what one `blend` drops per value
 var RC_VST   = 232;   # absolute offset of the ItemVariationStore, 0 = none
 var RC_VSOK  = 240;   # 1 while a `vsindex` is still permitted (before any blend, and only once)
-var RC_SLOTS = 31;
+# Instancing (0.4.11). At the default location there is nothing to apply and RC_NSCAL is 0, which is
+# exactly the 0.4.9 behaviour; with axes set, `blend` weights each delta by its region's scalar.
+var RC_IVD   = 248;   # the ItemVariationData the current vsindex names, for its region INDEXES
+var RC_SCAL  = 256;   # the font's region-scalar array, or 0
+var RC_NSCAL = 264;   # how many scalars are live; 0 = the default instance
+var RC_SLOTS = 34;
 
 fn rekha_cff_arg(s, i): i64 { return load64(load64(s + RC_STK) + i * 8); }
 
@@ -663,9 +671,10 @@ fn rekha_cff_op(s, op, depth): i64 {
         var vi = sd_asr(rekha_cff_arg(s, sp - 1), 16);
         store64(s + RC_SP, 0);                      # vsindex clears the stack
         store64(s + RC_VSOK, 0);
-        var nr = rekha_cff2_regions(load64(s + RC_BUF), load64(s + RC_VST), load64(s + RC_END), vi);
-        if (nr < 0) { store64(s + RC_BAD, 1); return 0 - 1; }
-        store64(s + RC_NREG, nr);
+        var ivd = rekha_cff2_ivd(load64(s + RC_BUF), load64(s + RC_VST), load64(s + RC_END), vi);
+        if (ivd == 0) { store64(s + RC_BAD, 1); return 0 - 1; }
+        store64(s + RC_IVD, ivd);
+        store64(s + RC_NREG, rekha_rd_u16(load64(s + RC_BUF), ivd + 4));
         return 0;
     }
     if (op == 16) {                                 # blend
@@ -682,7 +691,40 @@ fn rekha_cff_op(s, op, depth): i64 {
         # whole operator is: drop the count, drop the deltas, leave the defaults.
         var k = load64(s + RC_NREG);
         if (nb + nb * k > sp) { store64(s + RC_BAD, 1); return 0 - 1; }
-        store64(s + RC_SP, sp - nb * k);
+        var base = sp - nb - nb * k;
+        # ⭐ INSTANCING, and it is the same three lines plus a weighted sum. With no axes set
+        # RC_NSCAL is 0 and the deltas are simply dropped — byte-identical to 0.4.9 — because every
+        # region's scalar at the default location IS zero and adding them would change nothing.
+        if (load64(s + RC_NSCAL) > 0) {
+            var stk2 = load64(s + RC_STK);
+            var ivd = load64(s + RC_IVD);
+            var scal = load64(s + RC_SCAL);
+            var nsc = load64(s + RC_NSCAL);
+            var buf2 = load64(s + RC_BUF);
+            var vi2 = 0;
+            while (vi2 < nb) {
+                # The products are accumulated at 32.32 and shifted ONCE, so a value blended over
+                # several regions rounds like one sum and not like a chain of them.
+                var acc = 0;
+                var j = 0;
+                while (j < k) {
+                    var ri = rekha_rd_u16(buf2, ivd + 6 + j * 2);
+                    if (ri < nsc) {
+                        var sc = load64(scal + ri * 8);
+                        if (sc != 0) {
+                            acc = acc + load64(stk2 + (base + nb + vi2 * k + j) * 8) * sc;
+                        }
+                    }
+                    j = j + 1;
+                }
+                if (acc != 0) {
+                    var at2 = stk2 + (base + vi2) * 8;
+                    store64(at2, load64(at2) + sd_asr(acc + 32768, 16));
+                }
+                vi2 = vi2 + 1;
+            }
+        }
+        store64(s + RC_SP, base + nb);
         return 0;
     }
     if (load64(s + RC_OPEN) == 0) { store64(s + RC_BAD, 1); return 0 - 1; }   # drawing before moveto
@@ -992,9 +1034,12 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
         # A CFF2 Private DICT may name the variation-store index every blend in its glyphs starts
         # from; without one that is 0. A charstring's own `vsindex` overrides it.
         if (v2 != 0) {
-            var nr0 = rekha_cff2_priv_regions(buf, load64(font + 216), end, fa, fb, load64(font + 264));
-            if (nr0 < 0) { return 0; }
-            store64(s + RC_NREG, nr0);
+            var ivd0 = rekha_cff2_priv_ivd(buf, load64(font + 216), end, fa, fb, load64(font + 264));
+            if (ivd0 < 0) { return 0; }
+            store64(s + RC_IVD, ivd0);
+            if (ivd0 != 0) { store64(s + RC_NREG, rekha_rd_u16(buf, ivd0 + 4)); }
+            store64(s + RC_SCAL, load64(font + 320));
+            store64(s + RC_NSCAL, load64(font + 328));
         }
     }
     var o: i64[2];
@@ -1027,7 +1072,7 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
 # ⚠ No load context: a CFF glyph has no components, so one decode is one load, and its points are
 # already capped at REKHA_COMPOSITE_MAXP — below any budget a context would carry.
 fn rekha_cff_load(font, gid): i64 {
-    var s: i64[31];
+    var s: i64[34];
     var stk: i64[48];
     if (rekha_cff_run(font, gid, &s, &stk, 0) == 0) { return rekha_outline_empty(); }
     var np = load64(&s + RC_NP);
