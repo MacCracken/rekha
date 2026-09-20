@@ -1155,6 +1155,288 @@ fn t_guard(): i64 {
     return 0;
 }
 
+# ================================================================
+# E) COLLECTIONS (0.4.10). A 'ttcf'-flavoured WOFF2 carries a CollectionDirectory after the table
+# directory, one entry per UNIQUE table across every face, and rebuilds to a real .ttc.
+# ================================================================
+
+# Face descriptor, 4 i64: numTables, flavor, where its index slice starts in g_fidx, unused.
+var g_fdesc = 0;
+var g_fidx = 0;
+var g_fnidx = 0;
+var g_gx2 = 0;
+var g_gx2len = 0;
+
+fn put255b(out, at, v): i64 { return put255(out, at, v); }
+
+# Assemble a COLLECTION WOFF2: the header with a 'ttcf' flavor, the table directory, then the
+# CollectionHeader + CollectionFontEntry records, then the stored Brotli block.
+fn w2_assemble_coll(out, ntab, desc, blklen, total_sfnt, nfaces): i64 {
+    memset(out, 0, WCAP);
+    rekha_wr_u32(out, 0, REKHA_WOFF2_SIG);
+    rekha_wr_u32(out, 4, 0x74746366);                    # flavor 'ttcf'
+    rekha_wr_u16(out, 12, ntab);
+    rekha_wr_u32(out, 16, total_sfnt);
+    rekha_wr_u16(out, 24, 1);
+    var at = REKHA_WOFF2_HDR_LEN;
+    var i = 0;
+    while (i < ntab) {
+        var d = desc + i * 32;
+        var tag = load64(d);
+        var xf = load64(d + 8);
+        var idx = known_index(tag);
+        store8(out + at, (idx & 63) | ((xf & 3) << 6));
+        at = at + 1;
+        if (idx == 63) {
+            rekha_wr_u32(out, at, tag);
+            at = at + 4;
+        }
+        at = put128(out, at, load64(d + 16));
+        if (rekha_w2_has_tlen(tag, xf) == 1) { at = put128(out, at, load64(d + 24)); }
+        i = i + 1;
+    }
+    # CollectionHeader: version u32, numFonts 255UInt16
+    rekha_wr_u32(out, at, 0x00010000);
+    at = at + 4;
+    at = put255(out, at, nfaces);
+    var f = 0;
+    while (f < nfaces) {
+        var fr = g_fdesc + f * 32;
+        var cnt = load64(fr);
+        at = put255(out, at, cnt);
+        rekha_wr_u32(out, at, load64(fr + 8));
+        at = at + 4;
+        var k = 0;
+        while (k < cnt) {
+            at = put255(out, at, load64(g_fidx + (load64(fr + 16) + k) * 8));
+            k = k + 1;
+        }
+        f = f + 1;
+    }
+    var clen = brotli_store(g_blk, blklen, out + at);
+    rekha_wr_u32(out, 20, clen);
+    rekha_wr_u32(out, 8, at + clen);
+    return at + clen;
+}
+
+# Build a collection over the SFNT at `s`: face 0 every table, face 1 the seven rekha reads, face 2
+# every table again but with its OWN glyf/loca pair — a second pair in one collection, which the
+# spec allows and which the pairing rules exist for. `xform` transforms both pairs.
+fn w2_build_coll(s, out, desc, xform): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var glyf_off = face_table(s, REKHA_TAG_GLYF2, 0);
+    var loca_off = face_table(s, REKHA_TAG_LOCA2, 0);
+    var head_off = face_table(s, REKHA_TAG_HEAD2, 0);
+    var maxp_off = face_table(s, REKHA_TAG_MAXP2, 0);
+    var ng = rekha_rd_u16(s, maxp_off + 4);
+    var ifmt = rekha_rd_u16(s, head_off + 50);
+    var gxlen = 0;
+    if (xform != 0) {
+        glyf_transform(s, ng, ifmt, glyf_off, loca_off, 0);
+        gxlen = g_nc_at;
+        memcpy(g_gx2, g_gx, gxlen);
+        g_gx2len = gxlen;
+    }
+
+    # the table directory: every table of the face, then a SECOND glyf/loca pair for face 2.
+    # ⛔ Spec 5.5: in a collection each loca must IMMEDIATELY follow its glyf, so the pairs are
+    # emitted adjacent and the second pair goes at the end.
+    var blk = 0;
+    var ntab = 0;
+    var gi0 = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var e = 12 + i * 16;
+        var tag = rekha_rd_u32(s, e);
+        if (tag == REKHA_TAG_LOCA2) { i = i + 1; } else {
+            var off = rekha_rd_u32(s, e + 8);
+            var olen = rekha_rd_u32(s, e + 12);
+            var xf = 0;
+            var dlen = olen;
+            var src = s + off;
+            if (tag == REKHA_TAG_GLYF2) {
+                gi0 = ntab;
+                if (xform != 0) {
+                    dlen = gxlen;
+                    src = g_gx;
+                } else { xf = 3; }
+            }
+            var d = desc + ntab * 32;
+            store64(d, tag);
+            store64(d + 8, xf);
+            store64(d + 16, olen);
+            store64(d + 24, dlen);
+            if (dlen > 0) { memcpy(g_blk + blk, src, dlen); }
+            blk = blk + dlen;
+            ntab = ntab + 1;
+            if (tag == REKHA_TAG_GLYF2) {                # its loca, immediately after
+                var lolen = rekha_rd_u32(s, 12 + 16 * 0);
+                var lo = face_table(s, REKHA_TAG_LOCA2, 0);
+                var ll = face_table(s, REKHA_TAG_LOCA2, 1);
+                var d2 = desc + ntab * 32;
+                store64(d2, REKHA_TAG_LOCA2);
+                store64(d2 + 8, 3);
+                store64(d2 + 16, ll);
+                store64(d2 + 24, ll);
+                if (xform != 0) {
+                    store64(d2 + 8, 0);
+                    store64(d2 + 24, 0);
+                } else {
+                    memcpy(g_blk + blk, s + lo, ll);
+                    blk = blk + ll;
+                }
+                ntab = ntab + 1;
+            }
+            i = i + 1;
+        }
+    }
+    # the second glyf/loca pair, for face 2
+    var gi1 = ntab;
+    var dg = desc + ntab * 32;
+    store64(dg, REKHA_TAG_GLYF2);
+    store64(dg + 16, face_table(s, REKHA_TAG_GLYF2, 1));
+    if (xform != 0) {
+        store64(dg + 8, 0);
+        store64(dg + 24, gxlen);
+        memcpy(g_blk + blk, g_gx2, gxlen);
+        blk = blk + gxlen;
+    } else {
+        store64(dg + 8, 3);
+        store64(dg + 24, face_table(s, REKHA_TAG_GLYF2, 1));
+        memcpy(g_blk + blk, s + glyf_off, face_table(s, REKHA_TAG_GLYF2, 1));
+        blk = blk + face_table(s, REKHA_TAG_GLYF2, 1);
+    }
+    ntab = ntab + 1;
+    var dl = desc + ntab * 32;
+    store64(dl, REKHA_TAG_LOCA2);
+    store64(dl + 16, face_table(s, REKHA_TAG_LOCA2, 1));
+    if (xform != 0) {
+        store64(dl + 8, 0);
+        store64(dl + 24, 0);
+    } else {
+        store64(dl + 8, 3);
+        store64(dl + 24, face_table(s, REKHA_TAG_LOCA2, 1));
+        memcpy(g_blk + blk, s + loca_off, face_table(s, REKHA_TAG_LOCA2, 1));
+        blk = blk + face_table(s, REKHA_TAG_LOCA2, 1);
+    }
+    ntab = ntab + 1;
+
+    # three faces over those entries
+    g_fnidx = 0;
+    var total = 12 + 3 * 4;
+    var f = 0;
+    while (f < 3) {
+        var fr = g_fdesc + f * 32;
+        store64(fr + 8, rekha_rd_u32(s, 0));
+        store64(fr + 16, g_fnidx);
+        var cnt = 0;
+        var j = 0;
+        while (j < ntab) {
+            var tg = load64(desc + j * 32);
+            var take = 1;
+            if (f == 1) {
+                take = 0;
+                if (tg == REKHA_TAG_HEAD2 || tg == REKHA_TAG_MAXP2) { take = 1; }
+                if (tg == REKHA_TAG_HHEA2 || tg == REKHA_TAG_HMTX2) { take = 1; }
+                if (tg == REKHA_TAG_CMAP) { take = 1; }
+                if (j == gi0 || j == gi0 + 1) { take = 1; }
+            }
+            if (f == 2) {
+                if (j == gi0 || j == gi0 + 1) { take = 0; }        # face 2 uses the second pair
+            }
+            if (f != 2) {
+                if (j == gi1 || j == gi1 + 1) { take = 0; }        # and only face 2 uses it
+            }
+            if (take != 0) {
+                store64(g_fidx + g_fnidx * 8, j);
+                g_fnidx = g_fnidx + 1;
+                cnt = cnt + 1;
+            }
+            j = j + 1;
+        }
+        store64(fr, cnt);
+        total = total + 12 + cnt * 16;
+        f = f + 1;
+    }
+    var t2 = 0;
+    while (t2 < ntab) {
+        total = total + rekha_pad4(load64(desc + t2 * 32 + 16));
+        t2 = t2 + 1;
+    }
+    g_blklen = blk;
+    return w2_assemble_coll(out, ntab, desc, blk, total, 3);
+}
+
+fn t_coll(): i64 {
+    g_group = "E collections";
+    var want = font_digest(rekha_font_open(g_face, g_face_len));
+    var xform = 0;
+    while (xform < 2) {
+        g_wlen = w2_build_coll(g_face, g_w, g_desc, xform);
+        check(g_wlen > 0, 1);
+        check(rekha_woff2_face_count(g_w, g_wlen), 3);
+        var blk = rekha_woff2_block_size(g_w, g_wlen);
+        check(blk > 0, 1);
+        var td = alloc(blk);
+        check(rekha_woff2_inflate(g_w, g_wlen, td, blk), blk);
+        var size = rekha_woff2_sfnt_size(g_w, g_wlen, td, blk);
+        check(size > 0, 1);
+        memset(g_out, 0xEE, WCAP);
+        check(rekha_woff2_decode(g_w, g_wlen, td, blk, g_out, WCAP), size);
+        # ⭐ it rebuilds to a real .ttc, which rekha's own collection reader then opens
+        check(rekha_rd_u32(g_out, 0), 0x74746366);
+        check(rekha_ttc_count(g_out, size), 3);
+        var i = 0;
+        while (i < 3) {
+            var f = rekha_font_open_index(g_out, size, i);
+            check(f != 0, 1);
+            check(font_digest(f), want);
+            i = i + 1;
+        }
+        # faces 0 and 1 SHARE their glyf; face 2 has its own copy at a different offset
+        var f0 = rekha_font_open_index(g_out, size, 0);
+        var f1 = rekha_font_open_index(g_out, size, 1);
+        var f2 = rekha_font_open_index(g_out, size, 2);
+        check(rekha_find_table(f0, REKHA_TAG_GLYF2), rekha_find_table(f1, REKHA_TAG_GLYF2));
+        check(rekha_find_table(f2, REKHA_TAG_GLYF2) != rekha_find_table(f0, REKHA_TAG_GLYF2), 1);
+        check(rekha_find_table(f0, REKHA_TAG_HEAD2), rekha_find_table(f2, REKHA_TAG_HEAD2));
+        check(rekha_font_num_tables(f1), 7);
+        check(rekha_font_num_tables(f1) < rekha_font_num_tables(f0), 1);
+        check(pad_is_zero(g_out), 1);
+        # and the sniffing entry gives face 0 of it
+        check(font_digest(rekha_font_open_woff2(g_w, g_wlen)), want);
+        check(font_digest(rekha_font_open_any(g_w, g_wlen)), want);
+        check(font_digest(rekha_font_open_woff2_index(g_w, g_wlen, 2)), want);
+        check(rekha_font_open_woff2_index(g_w, g_wlen, 3), 0);
+        check(rekha_font_open_woff2_index(g_w, g_wlen, 0 - 1), 0);
+        xform = xform + 1;
+    }
+    # a plain (non-collection) WOFF2 answers 1 face
+    g_wlen = w2_build_null(g_face, g_face_len, g_w, g_desc, 1);
+    check(rekha_woff2_face_count(g_w, g_wlen), 1);
+    check(rekha_font_open_woff2_index(g_w, g_wlen, 1), 0);
+    return 0;
+}
+
+fn t_coll_refuse(): i64 {
+    g_group = "E collection refusals";
+    g_wlen = w2_build_coll(g_face, g_w, g_desc, 1);
+    var cd = 0;
+    # find the CollectionHeader: it follows the table directory, whose end we recompute by parsing
+    var ents = alloc(600 * 72);
+    var out = alloc(16);
+    check(rekha_w2_dir(g_w, g_wlen, ents, 600, out) > 0, 1);
+    cd = load64(out);
+    memcpy(g_b, g_w, g_wlen);
+    check(refuse(g_wlen), 1);                                  # the control really is accepted
+    memcpy(g_b, g_w, g_wlen); rekha_wr_u32(g_b, cd + 4, 0);    # numFonts 0 (a one-byte 255UInt16)
+    store8(g_b + cd + 4, 0);
+    check(refuse(g_wlen), 0);
+    memcpy(g_b, g_w, g_wlen); store8(g_b + cd + 4, 200);       # numFonts past what the file holds
+    check(refuse(g_wlen), 0);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     g_face_len = rekha_face_default_len();
@@ -1181,6 +1463,9 @@ fn main(): i64 {
     g_sbm = alloc(8192);
     g_sov = alloc(8192);
     g_b = alloc(WCAP);
+    g_gx2 = alloc(WCAP);
+    g_fdesc = alloc(8 * 32);
+    g_fidx = alloc(4096 * 8);
     g_g = alloc(WCAP);
     g_t = alloc(WCAP);
     t_store();
@@ -1190,6 +1475,8 @@ fn main(): i64 {
     t_refuse();
     t_refuse_block();
     t_guard();
+    t_coll();
+    t_coll_refuse();
     if (g_fails == 0) {
         var ok = "woff2_test: PASS (";
         syscall(1, 1, ok, strlen(ok));

@@ -109,10 +109,28 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
-- **v0.4.10 — the fixture that hid the scaled readers (shipped).** No library code changed.
-  `programs/cff_test.cyr` declared `head` at offset 76 with five directory entries, so it lay
-  INSIDE the directory (dir_end is 92); rekha refused the table — correctly — and every CFF fixture
-  the suite built reported `unitsPerEm` **0**.
+- **v0.4.10 — WOFF2 collections, and the fixture that hid the scaled readers (shipped).** A
+  `ttcf`-flavoured WOFF2 — refused since 0.4.6 — now rebuilds to a real `.ttc`:
+  `rekha_woff2_face_count` says how many faces, `rekha_font_open_woff2_index` opens one, and
+  `rekha_woff2_decode` produces the whole collection with **one copy of each shared table** for
+  `rekha_font_open_index` (0.4.8) to walk.
+  ⭐ **Checked against the collections it was built from**: a 2-face `.ttc` whose faces share 17 of
+  18 tables and a 3-face one of unrelated fonts, each compressed to WOFF2 with real Brotli and
+  decoded back — every face identical to its source face (2,298 glyphs), and the rebuilt files the
+  same byte length as the originals. In the 2-face one both faces resolve `glyf` to the **same
+  offset**, so the sharing survives the round trip.
+  ⚠ **There is no independent WOFF2-collection decoder to check against**: fontTools has no
+  collection support in its WOFF2 reader or writer at all (no `ttcf`, no `numFonts`, no
+  CollectionHeader), so the encoder above is rekha's own. What anchors it is the *outcome* — the
+  rebuilt `.ttc` must match a `.ttc` fontTools authored, face for face — not the WOFF2 layer itself.
+  ⛔ The decoder MUSTs the spec spells out are enforced: one entry per tag **within a face** (though
+  duplicate tags across a collection are correct, since the table directory holds one entry per
+  unique *table*), each `loca` immediately following its `glyf`, and every face's `glyf`/`loca`
+  indices naming that same pair.
+  **Also in 0.4.10, and unrelated: the fixture that hid the scaled readers.** No library code
+  changed for this half. `programs/cff_test.cyr` declared `head` at offset 76 with five directory
+  entries, so it lay INSIDE the directory (dir_end is 92); rekha refused the table — correctly —
+  and every CFF fixture the suite built reported `unitsPerEm` **0**.
   ⚠ **The defect and the coverage gap were the same fact.** No check noticed, because
   `units_per_em`, `char_to_sdpath` and `char_advance` appeared nowhere in the suite; 678 checks
   stayed green with the whole upem-scaled path dark on CFF faces. `rekha_advance_width` passed
@@ -219,9 +237,7 @@ shim, no external binaries.
      (the axes and their defaults), `avar` (the mapping), the ItemVariationStore's region list, and
      the scalar product per region — at which point `blend` applies its deltas instead of dropping
      them, and `gvar` would give TrueType outlines the same treatment.
- 10. **WOFF2 collections** — `dist/rekha-woff.cyr` refuses a `ttcf`-flavoured WOFF2 (0.4.6). Now that
-     rekha reads a plain `.ttc`, what is left is the CollectionDirectory that sits between the table
-     directory and the compressed data, mapping each face to indices in the shared table directory.
+ 10. ~~**WOFF2 collections**~~ — shipped in 0.4.10, below.
 - **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
   sizes.
 

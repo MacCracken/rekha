@@ -3200,8 +3200,23 @@ var REKHA_WOFF2_HDR_LEN   = 48;
 # real font is near it: the largest faces on the dev host declare under 30.
 var REKHA_WOFF2_MAXTABLES = 512;
 # One parsed directory entry, i64 slots: tag · xform · origLength · dataLength (what it occupies in
-# the inflated block) · dataOffset (where, in that block) · outLength (rebuilt) · outOffset.
-var REKHA_W2_ENT          = 56;
+# the inflated block) · dataOffset (where, in that block) · outLength (rebuilt) · outOffset · done
+# (1 once a transform has measured or written it — a table SHARED by several faces of a collection
+# is reconstructed once and pointed at twice) · checkSum (computed once, written into every face's
+# directory that names the table).
+var REKHA_W2_ENT          = 72;
+# A collection's faces, and the total table references across all of them. Nothing real is near
+# either: the largest CJK collections carry a couple of dozen faces of a couple of dozen tables.
+var REKHA_WOFF2_MAXFONTS  = 256;
+var REKHA_WOFF2_MAXREFS   = 8192;
+# The decode context: one record threaded through layout and write instead of six arguments.
+#   +0 unique tables · +8 compressed-data offset · +16 ents · +24 faces · +32 face records
+#   +40 the flat index array · +48 its length · +56 1 when the file is a collection · +64 flavor
+var REKHA_W2_CTX          = 80;
+# One face of the output: tables · flavor · where its slice of the index array starts · the byte
+# offset of its offset table in the rebuilt file.
+var REKHA_W2_FONT         = 32;
+var REKHA_TAG_TTCF2       = 0x74746366;   # 'ttcf'
 # The 36-byte fixed head of a transformed glyf, ahead of its seven substreams.
 var REKHA_W2_GLYFHDR      = 36;
 
@@ -3335,11 +3350,8 @@ fn rekha_w2_dir(buf, len, ents, maxn, out): i64 {
     if (buf == 0) { return 0; }
     if (len < REKHA_WOFF2_HDR_LEN) { return 0; }
     if (rekha_rd_u32(buf, 0) != REKHA_WOFF2_SIG) { return 0; }
-    # ⛔ A font COLLECTION ('ttcf') carries a CollectionDirectory between the table directory and
-    # the compressed data (spec 4.2), which rekha does not read — roadmap v0.4.x item 8, alongside
-    # plain .ttc. Refused here rather than part-way: the data offset this function returns would
-    # otherwise point into that directory and every table would decode from the wrong bytes.
-    if (rekha_rd_u32(buf, 4) == 0x74746366) { return 0; }
+    var coll = 0;
+    if (rekha_rd_u32(buf, 4) == REKHA_TAG_TTCF2) { coll = 1; }
     var wlen = rekha_rd_u32(buf, 8);
     if (wlen > len) { return 0; }
     if (wlen < REKHA_WOFF2_HDR_LEN) { return 0; }
@@ -3395,41 +3407,65 @@ fn rekha_w2_dir(buf, len, ents, maxn, out): i64 {
     }
     if (p > wlen) { return 0; }
 
-    # ⛔ One entry per table (spec 4: "a single entry for each unique font table"). A tag named twice
-    # would give the rebuilt directory two entries claiming one tag, and rekha_find_table would take
-    # whichever came first — so it is refused instead. O(n^2) over n <= 512.
-    var a = 0;
-    while (a < n) {
-        var b = a + 1;
-        while (b < n) {
-            if (load64(ents + a * REKHA_W2_ENT) == load64(ents + b * REKHA_W2_ENT)) { return 0; }
-            b = b + 1;
+    # ⛔ One entry per unique TABLE (spec 4). For a single font that is also one entry per TAG, and
+    # a tag named twice would give the rebuilt directory two entries claiming one tag — refused.
+    # ⚠ A COLLECTION is the exception and the spec is explicit about it: "the table directory
+    # contains a single entry for each unique table in the entire collection", so two faces with
+    # DIFFERENT glyf tables contribute two 'glyf' entries and duplicate tags are correct there.
+    # Each face's own directory still gets one entry per tag, which the per-face index list enforces.
+    if (coll == 0) {
+        var a = 0;
+        while (a < n) {
+            var b = a + 1;
+            while (b < n) {
+                if (load64(ents + a * REKHA_W2_ENT) == load64(ents + b * REKHA_W2_ENT)) { return 0; }
+                b = b + 1;
+            }
+            a = a + 1;
         }
-        a = a + 1;
     }
 
-    # ⛔ Spec 5.5: loca MUST follow glyf, and 5.3: the two transforms must agree. Both are checked
-    # here rather than at reconstruction, because the glyf reconstruction is what WRITES loca — an
-    # order it could not satisfy is a font it must not begin decoding.
+    # ⛔ Spec 5.5: loca MUST follow glyf, and 5.3: the two transforms must agree. Checked here rather
+    # than at reconstruction, because the glyf reconstruction is what WRITES loca — an order it could
+    # not satisfy is a font it must not begin decoding.
+    # ⚠ In a COLLECTION a loca must follow its glyf IMMEDIATELY (spec 5.5), which makes the pair
+    # unambiguous when several are present; a single font may have other tables between them.
     var gi = 0 - 1;
     var li = 0 - 1;
+    var ng2 = 0;
+    var nl2 = 0;
     i = 0;
     while (i < n) {
         var t = load64(ents + i * REKHA_W2_ENT);
-        if (t == REKHA_TAG_GLYF2) { gi = i; }
-        if (t == REKHA_TAG_LOCA2) { li = i; }
+        if (t == REKHA_TAG_GLYF2) {
+            gi = i;
+            ng2 = ng2 + 1;
+            if (coll != 0) {
+                if (i + 1 >= n) { return 0; }
+                if (load64(ents + (i + 1) * REKHA_W2_ENT) != REKHA_TAG_LOCA2) { return 0; }
+                if (load64(ents + i * REKHA_W2_ENT + 8) != load64(ents + (i + 1) * REKHA_W2_ENT + 8)) {
+                    return 0;
+                }
+            }
+        }
+        if (t == REKHA_TAG_LOCA2) {
+            li = i;
+            nl2 = nl2 + 1;
+            # A transformed loca consumes NO bytes of the data stream; its size comes from the glyf
+            # header. Its origLength is checked against numGlyphs once that header is inflated.
+            if (load64(ents + i * REKHA_W2_ENT + 8) == 0) {
+                if (load64(ents + i * REKHA_W2_ENT + 24) != 0) { return 0; }
+            }
+        }
         i = i + 1;
     }
-    if (gi >= 0 || li >= 0) {
-        if (gi < 0) { return 0; }
-        if (li < 0) { return 0; }
-        if (li < gi) { return 0; }
-        if (load64(ents + gi * REKHA_W2_ENT + 8) != load64(ents + li * REKHA_W2_ENT + 8)) { return 0; }
-        # A transformed loca consumes NO bytes of the data stream; its size comes from the glyf
-        # header. Checked here so the block size is right; its origLength is checked against
-        # numGlyphs once the glyf header has been inflated (rekha_w2_layout).
-        if (load64(ents + li * REKHA_W2_ENT + 8) == 0) {
-            if (load64(ents + li * REKHA_W2_ENT + 24) != 0) { return 0; }
+    if (ng2 != nl2) { return 0; }
+    if (coll == 0) {
+        if (gi >= 0) {
+            if (li < gi) { return 0; }
+            if (load64(ents + gi * REKHA_W2_ENT + 8) != load64(ents + li * REKHA_W2_ENT + 8)) {
+                return 0;
+            }
         }
     }
 
@@ -3954,13 +3990,16 @@ fn rekha_w2_glyf_all(st, td, dst, gat, lat): i64 {
 # SFNT reassembly.
 # ================================================================
 
-# The entry for `tag`, or 0.
-fn rekha_w2_find(ents, n, tag): i64 {
-    var i = 0;
-    while (i < n) {
-        var e = ents + i * REKHA_W2_ENT;
+# The entry for `tag` among the `cnt` index references a face owns, starting at idxs[start], or 0.
+# ⚠ A COLLECTION's table directory holds one entry per unique TABLE, so two faces with different
+# glyf tables put two 'glyf' entries in it. Looking a tag up globally would find whichever came
+# first; a face's tables are only ever the ones its own index list names.
+fn rekha_w2_ffind(ents, idxs, start, cnt, tag): i64 {
+    var k = 0;
+    while (k < cnt) {
+        var e = ents + load64(idxs + (start + k) * 8) * REKHA_W2_ENT;
         if (load64(e) == tag) { return e; }
-        i = i + 1;
+        k = k + 1;
     }
     return 0;
 }
@@ -4045,111 +4084,290 @@ fn rekha_w2_checksum(dst, off, len): i64 {
     return sum;
 }
 
-# Swap two directory entries whole. The rebuilt SFNT directory is sorted by tag (spec 4.1: "It is a
-# decoder responsibility to sort and reorder the reconstructed table directory"), while the WOFF2
-# directory is in the PHYSICAL order the tables were compressed in — so the sort happens only after
-# every entry already carries its offset into the inflated block.
-fn rekha_w2_swap(a, b): i64 {
-    var i = 0;
-    while (i < REKHA_W2_ENT) {
-        var t = load64(a + i);
-        store64(a + i, load64(b + i));
-        store64(b + i, t);
-        i = i + 8;
+# ================================================================
+# The faces. ⭐ A plain WOFF2 is treated as a COLLECTION OF ONE, so layout and write have a single
+# path and the collection case is not a second implementation of either.
+# ================================================================
+
+# Parse the CollectionDirectory that follows the table directory of a 'ttcf' WOFF2 (spec 4.2), or
+# synthesise the one-face view of a plain font. 1 on success, 0 on refusal. On success ctx holds the
+# face count, the face records, the flat index array and its length — and, for a collection, ctx+8
+# is advanced past the collection directory to where the compressed data really begins.
+#
+# CollectionHeader:    version u32 · numFonts 255UInt16
+# CollectionFontEntry: numTables 255UInt16 · flavor u32 · index[numTables] 255UInt16
+# ⚠ The header's `version` is the ORIGINAL TTC header version and is read past, not used: a v2.0 TTC
+# header carries a digital-signature triple, and the spec lets a decoder either null it or emit a
+# version 1.0 header instead. rekha emits 1.0, which is the simpler of the two permissions.
+fn rekha_w2_coll(buf, len, ctx): i64 {
+    var n = load64(ctx);
+    var ents = load64(ctx + 16);
+    var tmp: i64[1];
+    if (load64(ctx + 56) == 0) {
+        var fonts1 = sd_alloc(REKHA_W2_FONT);
+        if (fonts1 == 0) { return 0; }
+        var idxs1 = sd_alloc(n * 8);
+        if (idxs1 == 0) { return 0; }
+        store64(fonts1, n);
+        store64(fonts1 + 8, load64(ctx + 64));
+        store64(fonts1 + 16, 0);
+        store64(fonts1 + 24, 0);
+        var q = 0;
+        while (q < n) {
+            store64(idxs1 + q * 8, q);
+            q = q + 1;
+        }
+        store64(ctx + 24, 1);
+        store64(ctx + 32, fonts1);
+        store64(ctx + 40, idxs1);
+        store64(ctx + 48, n);
+        return 1;
+    }
+
+    var wlen = rekha_rd_u32(buf, 8);
+    var p = load64(ctx + 8);
+    if (p + 4 > wlen) { return 0; }
+    p = p + 4;                                           # CollectionHeader.version
+    p = rekha_w2_rd255(buf, p, wlen, &tmp);
+    if (p < 0) { return 0; }
+    var nf = load64(&tmp);
+    if (nf < 1) { return 0; }
+    if (nf > REKHA_WOFF2_MAXFONTS) { return 0; }
+    var fonts = sd_alloc(nf * REKHA_W2_FONT);
+    if (fonts == 0) { return 0; }
+    var idxs = sd_alloc(REKHA_WOFF2_MAXREFS * 8);
+    if (idxs == 0) { return 0; }
+
+    var total = 0;
+    var f = 0;
+    while (f < nf) {
+        p = rekha_w2_rd255(buf, p, wlen, &tmp);
+        if (p < 0) { return 0; }
+        var nt = load64(&tmp);
+        if (nt < 1) { return 0; }
+        if (nt > n) { return 0; }
+        if (total + nt > REKHA_WOFF2_MAXREFS) { return 0; }
+        if (p + 4 > wlen) { return 0; }
+        var fr = fonts + f * REKHA_W2_FONT;
+        store64(fr, nt);
+        store64(fr + 8, rekha_rd_u32(buf, p));
+        store64(fr + 16, total);
+        store64(fr + 24, 0);
+        p = p + 4;
+        var k = 0;
+        while (k < nt) {
+            p = rekha_w2_rd255(buf, p, wlen, &tmp);
+            if (p < 0) { return 0; }
+            var ix = load64(&tmp);
+            if (ix < 0 || ix >= n) { return 0; }
+            store64(idxs + (total + k) * 8, ix);
+            k = k + 1;
+        }
+        # ⛔ One entry per TAG within a FACE, whatever the collection as a whole holds: a face naming
+        # two 'glyf' tables would give its rebuilt directory two entries for one tag.
+        var a = 0;
+        while (a < nt) {
+            var ta = load64(ents + load64(idxs + (total + a) * 8) * REKHA_W2_ENT);
+            var b = a + 1;
+            while (b < nt) {
+                if (ta == load64(ents + load64(idxs + (total + b) * 8) * REKHA_W2_ENT)) { return 0; }
+                b = b + 1;
+            }
+            a = a + 1;
+        }
+        # ⛔ Spec 4.2, and it is a decoder MUST: "check CollectionFontEntry indices to make sure that
+        # referenced 'glyf' and 'loca' tables are paired with each other, and MUST reject a font
+        # collection if a mismatch in table pairing is found". The table directory already put each
+        # loca immediately after its glyf, so the pair is (ix, ix + 1) — a face that names one and
+        # not the other, or names a loca whose glyf is a different face's, is refused here.
+        k = 0;
+        while (k < nt) {
+            var ix2 = load64(idxs + (total + k) * 8);
+            var tg = load64(ents + ix2 * REKHA_W2_ENT);
+            if (tg == REKHA_TAG_GLYF2) {
+                if (rekha_w2_ref(idxs, total, nt, ix2 + 1) == 0) { return 0; }
+            }
+            if (tg == REKHA_TAG_LOCA2) {
+                if (ix2 < 1) { return 0; }
+                if (rekha_w2_ref(idxs, total, nt, ix2 - 1) == 0) { return 0; }
+            }
+            k = k + 1;
+        }
+        total = total + nt;
+        f = f + 1;
+    }
+    if (p > wlen) { return 0; }
+    store64(ctx + 8, p);                                 # the compressed data starts past all this
+    store64(ctx + 24, nf);
+    store64(ctx + 32, fonts);
+    store64(ctx + 40, idxs);
+    store64(ctx + 48, total);
+    return 1;
+}
+
+# 1 when the face's index slice names entry `ix`.
+fn rekha_w2_ref(idxs, start, cnt, ix): i64 {
+    var k = 0;
+    while (k < cnt) {
+        if (load64(idxs + (start + k) * 8) == ix) { return 1; }
+        k = k + 1;
     }
     return 0;
 }
 
-# numGlyphs from maxp and indexToLocFormat from head, for a font whose glyf was NOT transformed —
-# where the transformed glyf's own header would have carried both. 0 - 1 if either table is missing
-# or too short to hold the field.
-fn rekha_w2_ng_from_maxp(ents, n, td): i64 {
-    var e = rekha_w2_find(ents, n, REKHA_TAG_MAXP2);
-    if (e == 0) { return 0 - 1; }
-    if (load64(e + 24) < 6) { return 0 - 1; }
-    return rekha_rd_u16(td, load64(e + 32) + 4);
-}
-
-fn rekha_w2_ifmt_from_head(ents, n, td): i64 {
-    var e = rekha_w2_find(ents, n, REKHA_TAG_HEAD2);
-    if (e == 0) { return 0 - 1; }
-    if (load64(e + 24) < 54) { return 0 - 1; }
-    var v = rekha_rd_u16(td, load64(e + 32) + 50);
-    if (v > 1) { return 0 - 1; }
-    return v;
-}
-
-# Measure every table's REBUILT length, sort the directory by tag, and assign each table its offset
-# in the SFNT. Returns the SFNT byte length, or 0 for any refusal. `st` is the caller's
-# REKHA_W2_GST-byte glyf cursor block; on return it is initialised for the transformed glyf, if
-# there is one, so rekha_w2_write does not have to re-read the head.
-fn rekha_w2_layout(ents, n, td, tdlen, st): i64 {
-    var i = 0;
-    while (i < n) {
-        var e = ents + i * REKHA_W2_ENT;
-        if (load64(e + 32) + load64(e + 24) > tdlen) { return 0; }
-        store64(e + 40, load64(e + 16));                # default: the table is its own length
-        i = i + 1;
-    }
-
-    var ge = rekha_w2_find(ents, n, REKHA_TAG_GLYF2);
-    var le = rekha_w2_find(ents, n, REKHA_TAG_LOCA2);
-    var ng = 0;
-    var ifmt = 0;
+# numGlyphs and indexToLocFormat for ONE face: from its transformed glyf's own header when it has
+# one, else from its maxp and head. ng lands at out+0, indexFormat at out+8. 1 on success.
+fn rekha_w2_face_ng(ents, idxs, start, cnt, td, st, out): i64 {
+    var ge = rekha_w2_ffind(ents, idxs, start, cnt, REKHA_TAG_GLYF2);
     if (ge != 0) {
         if (load64(ge + 8) == 0) {
-            ng = rekha_w2_gst_init(td, load64(ge + 32), load64(ge + 24), st);
+            var ng = rekha_w2_gst_init(td, load64(ge + 32), load64(ge + 24), st);
             if (ng == 0) { return 0; }
-            ifmt = load64(st + 152);
-            var glen = rekha_w2_glyf_all(st, td, 0, 0, 0);
-            if (glen < 0) { return 0; }
-            store64(ge + 40, glen);
-            # ⛔ Spec 5.3: a transformed loca's origLength MUST be exactly (numGlyphs + 1) entries of
-            # the size indexFormat names. It is the one field that says how big the table rekha is
-            # about to write should be, so a disagreement is a refusal, not a resize.
-            var llen = (ng + 1) * 2;
-            if (ifmt == 1) { llen = (ng + 1) * 4; }
-            if (load64(le + 16) != llen) { return 0; }
-            store64(le + 40, llen);
-        } else {
-            ng = rekha_w2_ng_from_maxp(ents, n, td);
-            ifmt = rekha_w2_ifmt_from_head(ents, n, td);
-            if (ng < 0 || ifmt < 0) { return 0; }
+            store64(out, ng);
+            store64(out + 8, load64(st + 152));
+            return 1;
         }
     }
+    var me = rekha_w2_ffind(ents, idxs, start, cnt, REKHA_TAG_MAXP2);
+    var he = rekha_w2_ffind(ents, idxs, start, cnt, REKHA_TAG_HEAD2);
+    if (me == 0 || he == 0) { return 0; }
+    if (load64(me + 24) < 6) { return 0; }
+    if (load64(he + 24) < 54) { return 0; }
+    var v = rekha_rd_u16(td, load64(he + 32) + 50);
+    if (v > 1) { return 0; }
+    store64(out, rekha_rd_u16(td, load64(me + 32) + 4));
+    store64(out + 8, v);
+    return 1;
+}
 
-    var he = rekha_w2_find(ents, n, REKHA_TAG_HMTX2);
-    if (he != 0) {
-        if (load64(he + 8) == 1) {
-            # ⛔ Spec 5.4: the transform reconstructs left side bearings from glyf's xMin values, so
-            # it is defined only for a TrueType-flavoured font. Without glyf there is nothing to
-            # reconstruct from.
-            if (ge == 0) { return 0; }
-            var hh = rekha_w2_find(ents, n, REKHA_TAG_HHEA2);
-            if (hh == 0) { return 0; }
-            if (load64(hh + 24) < 36) { return 0; }
-            var nhm = rekha_rd_u16(td, load64(hh + 32) + 34);
-            var hlen = rekha_w2_hmtx(td, load64(he + 32), load64(he + 24), ng, nhm, 0, 0, 0, 0, 0, ifmt);
-            if (hlen < 0) { return 0; }
-            store64(he + 40, hlen);
-        }
-    }
-
+# Sort one face's index slice by the tag its entry carries — the rebuilt directory of every face is
+# tag-ordered, as an SFNT's must be, while the table directory itself keeps the physical order the
+# compressed stream is in. Insertion sort over at most REKHA_WOFF2_MAXTABLES references.
+fn rekha_w2_sortface(ents, idxs, start, cnt): i64 {
     var a = 1;
-    while (a < n) {
+    while (a < cnt) {
         var b = a;
         while (b > 0) {
-            var p1 = ents + (b - 1) * REKHA_W2_ENT;
-            var p2 = ents + b * REKHA_W2_ENT;
-            if (load64(p1) <= load64(p2)) { b = 0; } else {
-                rekha_w2_swap(p1, p2);
+            var p1 = idxs + (start + b - 1) * 8;
+            var p2 = idxs + (start + b) * 8;
+            var t1 = load64(ents + load64(p1) * REKHA_W2_ENT);
+            var t2 = load64(ents + load64(p2) * REKHA_W2_ENT);
+            if (t1 <= t2) { b = 0; } else {
+                var sw = load64(p1);
+                store64(p1, load64(p2));
+                store64(p2, sw);
                 b = b - 1;
             }
         }
         a = a + 1;
     }
+    return 0;
+}
 
-    var at = REKHA_SFNT_OFFTAB_LEN + n * REKHA_SFNT_DIRENT_LEN;
+# Measure every table's REBUILT length, order each face's directory, and assign every table its
+# offset in the output. Returns the output byte length, or 0 for any refusal.
+fn rekha_w2_layout(ctx, td, tdlen, st): i64 {
+    var n = load64(ctx);
+    var ents = load64(ctx + 16);
+    var nf = load64(ctx + 24);
+    var fonts = load64(ctx + 32);
+    var idxs = load64(ctx + 40);
+    var total = load64(ctx + 48);
+    var i = 0;
+    while (i < n) {
+        var e = ents + i * REKHA_W2_ENT;
+        if (load64(e + 32) + load64(e + 24) > tdlen) { return 0; }
+        store64(e + 40, load64(e + 16));                 # default: the table is its own length
+        store64(e + 48, 0);                              # reference count, until offsets are assigned
+        store64(e + 56, 0);
+        store64(e + 64, 0);
+        i = i + 1;
+    }
+    # ⛔ Every entry must be named by some face. An unreferenced one would be data the output cannot
+    # reach, and for a transformed glyf it would also never be measured — so its length would silently
+    # stay the origLength the spec calls "only a reference point".
+    i = 0;
+    while (i < total) {
+        var er = ents + load64(idxs + i * 8) * REKHA_W2_ENT;
+        store64(er + 48, load64(er + 48) + 1);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        if (load64(ents + i * REKHA_W2_ENT + 48) == 0) { return 0; }
+        i = i + 1;
+    }
+
+    var nginfo: i64[2];
+    var f = 0;
+    while (f < nf) {
+        var fr = fonts + f * REKHA_W2_FONT;
+        var cnt = load64(fr);
+        var st0 = load64(fr + 16);
+        var ge = rekha_w2_ffind(ents, idxs, st0, cnt, REKHA_TAG_GLYF2);
+        if (ge != 0) {
+            if (load64(ge + 8) == 0) {
+                if (load64(ge + 56) == 0) {
+                    var le = rekha_w2_ffind(ents, idxs, st0, cnt, REKHA_TAG_LOCA2);
+                    if (le == 0) { return 0; }
+                    var ng = rekha_w2_gst_init(td, load64(ge + 32), load64(ge + 24), st);
+                    if (ng == 0) { return 0; }
+                    var ifmt = load64(st + 152);
+                    var glen = rekha_w2_glyf_all(st, td, 0, 0, 0);
+                    if (glen < 0) { return 0; }
+                    store64(ge + 40, glen);
+                    store64(ge + 56, 1);
+                    # ⛔ Spec 5.3: a transformed loca's origLength MUST be exactly (numGlyphs + 1)
+                    # entries of the size indexFormat names.
+                    var llen = (ng + 1) * 2;
+                    if (ifmt == 1) { llen = (ng + 1) * 4; }
+                    if (load64(le + 16) != llen) { return 0; }
+                    store64(le + 40, llen);
+                    store64(le + 56, 1);
+                }
+            }
+        }
+        f = f + 1;
+    }
+
+    f = 0;
+    while (f < nf) {
+        var fr2 = fonts + f * REKHA_W2_FONT;
+        var cnt2 = load64(fr2);
+        var s2 = load64(fr2 + 16);
+        var he = rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_HMTX2);
+        if (he != 0) {
+            if (load64(he + 8) == 1) {
+                if (load64(he + 56) == 0) {
+                    # ⛔ Spec 5.4: the transform rebuilds left side bearings from glyf's xMin, so it
+                    # is defined only for a TrueType-flavoured face.
+                    if (rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_GLYF2) == 0) { return 0; }
+                    var hh = rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_HHEA2);
+                    if (hh == 0) { return 0; }
+                    if (load64(hh + 24) < 36) { return 0; }
+                    if (rekha_w2_face_ng(ents, idxs, s2, cnt2, td, st, &nginfo) == 0) { return 0; }
+                    var nhm = rekha_rd_u16(td, load64(hh + 32) + 34);
+                    var hlen = rekha_w2_hmtx(td, load64(he + 32), load64(he + 24), load64(&nginfo),
+                      nhm, 0, 0, 0, 0, 0, load64(&nginfo + 8));
+                    if (hlen < 0) { return 0; }
+                    store64(he + 40, hlen);
+                    store64(he + 56, 1);
+                }
+            }
+        }
+        f = f + 1;
+    }
+
+    var at = 0;
+    if (load64(ctx + 56) != 0) { at = 12 + nf * 4; }     # a TTC header and its offset array
+    f = 0;
+    while (f < nf) {
+        var fr3 = fonts + f * REKHA_W2_FONT;
+        rekha_w2_sortface(ents, idxs, load64(fr3 + 16), load64(fr3));
+        store64(fr3 + 24, at);
+        at = at + REKHA_SFNT_OFFTAB_LEN + load64(fr3) * REKHA_SFNT_DIRENT_LEN;
+        f = f + 1;
+    }
     i = 0;
     while (i < n) {
         var e2 = ents + i * REKHA_W2_ENT;
@@ -4161,63 +4379,101 @@ fn rekha_w2_layout(ents, n, td, tdlen, st): i64 {
     return at;
 }
 
-# Write the whole reconstructed SFNT into `dst` (already sized by rekha_w2_layout, which also sorted
-# `ents` and assigned every outOffset). Returns `size`, or 0 on refusal.
+# Write the whole reconstructed file into `dst` (already sized and ordered by rekha_w2_layout).
+# Returns `size`, or 0 on refusal.
 # ⛔ ORDER MATTERS ONCE: hmtx is rebuilt LAST, because its transform reconstructs left side bearings
 # from the xMin of each glyph — which it reads back out of the glyf and loca written just above.
-fn rekha_w2_write(buf, ents, n, td, st, dst, size): i64 {
-    var pow2 = 1;
-    var sel = 0;
-    while (pow2 * 2 <= n) {
-        pow2 = pow2 * 2;
-        sel = sel + 1;
-    }
-    rekha_wr_u32(dst, 0, rekha_rd_u32(buf, 4));          # flavor becomes sfntVersion
-    rekha_wr_u16(dst, 4, n);
-    rekha_wr_u16(dst, 6, pow2 * 16);
-    rekha_wr_u16(dst, 8, sel);
-    rekha_wr_u16(dst, 10, n * 16 - pow2 * 16);
+fn rekha_w2_write(ctx, td, st, dst, size): i64 {
+    var n = load64(ctx);
+    var ents = load64(ctx + 16);
+    var nf = load64(ctx + 24);
+    var fonts = load64(ctx + 32);
+    var idxs = load64(ctx + 40);
+    var coll = load64(ctx + 56);
 
-    var i = 0;
-    while (i < n) {
-        var e = ents + i * REKHA_W2_ENT;
-        var d = REKHA_SFNT_OFFTAB_LEN + i * REKHA_SFNT_DIRENT_LEN;
-        var olen = load64(e + 40);
-        var ooff = load64(e + 48);
-        rekha_wr_u32(dst, d, load64(e));
-        rekha_wr_u32(dst, d + 4, 0);                     # checksum, filled in below
-        rekha_wr_u32(dst, d + 8, ooff);
-        rekha_wr_u32(dst, d + 12, olen);
-        # The pad to the next four-byte boundary is part of what a table's checksum covers, so it is
-        # zeroed rather than left as whatever the allocator handed over.
-        var pad = rekha_pad4(olen) - olen;
+    if (coll != 0) {
+        # ⚠ Always version 1.0. A v2.0 TTC header appends a digital-signature triple; spec 4.2 lets a
+        # decoder null those fields OR emit a version 1 header, and emitting 1.0 is the form with no
+        # fields left to get wrong.
+        rekha_wr_u32(dst, 0, REKHA_TAG_TTCF2);
+        rekha_wr_u16(dst, 4, 1);
+        rekha_wr_u16(dst, 6, 0);
+        rekha_wr_u32(dst, 8, nf);
+        var q = 0;
+        while (q < nf) {
+            rekha_wr_u32(dst, 12 + q * 4, load64(fonts + q * REKHA_W2_FONT + 24));
+            q = q + 1;
+        }
+    }
+
+    var f = 0;
+    while (f < nf) {
+        var fr = fonts + f * REKHA_W2_FONT;
+        var cnt = load64(fr);
+        var s0 = load64(fr + 16);
+        var d0 = load64(fr + 24);
+        var pow2 = 1;
+        var sel = 0;
+        while (pow2 * 2 <= cnt) {
+            pow2 = pow2 * 2;
+            sel = sel + 1;
+        }
+        rekha_wr_u32(dst, d0, load64(fr + 8));
+        rekha_wr_u16(dst, d0 + 4, cnt);
+        rekha_wr_u16(dst, d0 + 6, pow2 * 16);
+        rekha_wr_u16(dst, d0 + 8, sel);
+        rekha_wr_u16(dst, d0 + 10, cnt * 16 - pow2 * 16);
         var k = 0;
-        while (k < pad) {
-            store8(dst + ooff + olen + k, 0);
+        while (k < cnt) {
+            var e = ents + load64(idxs + (s0 + k) * 8) * REKHA_W2_ENT;
+            var d = d0 + REKHA_SFNT_OFFTAB_LEN + k * REKHA_SFNT_DIRENT_LEN;
+            rekha_wr_u32(dst, d, load64(e));
+            rekha_wr_u32(dst, d + 4, 0);                 # checksum, filled in below
+            rekha_wr_u32(dst, d + 8, load64(e + 48));
+            rekha_wr_u32(dst, d + 12, load64(e + 40));
             k = k + 1;
         }
+        f = f + 1;
+    }
+
+    # the pad to the next four-byte boundary is part of what a table's checksum covers
+    var i = 0;
+    while (i < n) {
+        var ep = ents + i * REKHA_W2_ENT;
+        var olen = load64(ep + 40);
+        var ooff = load64(ep + 48);
+        var pad = rekha_pad4(olen) - olen;
+        var z = 0;
+        while (z < pad) {
+            store8(dst + ooff + olen + z, 0);
+            z = z + 1;
+        }
+        store64(ep + 56, 0);                             # reused: 1 once this entry's data is written
         i = i + 1;
     }
 
-    var ge = rekha_w2_find(ents, n, REKHA_TAG_GLYF2);
-    var le = rekha_w2_find(ents, n, REKHA_TAG_LOCA2);
-    var ng = 0;
-    var ifmt = 0;
-    if (ge != 0) {
-        if (load64(ge + 8) == 0) {
-            ng = rekha_w2_gst_init(td, load64(ge + 32), load64(ge + 24), st);
-            if (ng == 0) { return 0; }
-            ifmt = load64(st + 152);
-            var r = rekha_w2_glyf_all(st, td, dst, load64(ge + 48), load64(le + 48));
-            if (r < 0) { return 0; }
-            # The measuring pass and the writing pass are the same code over the same streams, so a
-            # disagreement here would mean one of them is not deterministic. Checked, not assumed.
-            if (r != load64(ge + 40)) { return 0; }
-        } else {
-            ng = rekha_w2_ng_from_maxp(ents, n, td);
-            ifmt = rekha_w2_ifmt_from_head(ents, n, td);
-            if (ng < 0 || ifmt < 0) { return 0; }
+    f = 0;
+    while (f < nf) {
+        var fr2 = fonts + f * REKHA_W2_FONT;
+        var cnt2 = load64(fr2);
+        var s2 = load64(fr2 + 16);
+        var ge = rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_GLYF2);
+        if (ge != 0) {
+            if (load64(ge + 8) == 0) {
+                if (load64(ge + 56) == 0) {
+                    var le = rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_LOCA2);
+                    if (rekha_w2_gst_init(td, load64(ge + 32), load64(ge + 24), st) == 0) { return 0; }
+                    var r = rekha_w2_glyf_all(st, td, dst, load64(ge + 48), load64(le + 48));
+                    if (r < 0) { return 0; }
+                    # The measuring pass and the writing pass are the same code over the same
+                    # streams, so a disagreement would mean one of them is not deterministic.
+                    if (r != load64(ge + 40)) { return 0; }
+                    store64(ge + 56, 1);
+                    store64(le + 56, 1);
+                }
+            }
         }
+        f = f + 1;
     }
 
     i = 0;
@@ -4236,44 +4492,105 @@ fn rekha_w2_write(buf, ents, n, td, st, dst, size): i64 {
             if (load64(e3 + 24) > 0) {
                 memcpy(dst + load64(e3 + 48), td + load64(e3 + 32), load64(e3 + 24));
             }
+            store64(e3 + 56, 1);
         }
         i = i + 1;
     }
 
-    var he = rekha_w2_find(ents, n, REKHA_TAG_HMTX2);
-    if (he != 0) {
-        if (load64(he + 8) == 1) {
-            var hh = rekha_w2_find(ents, n, REKHA_TAG_HHEA2);
-            if (hh == 0) { return 0; }
-            var nhm = rekha_rd_u16(td, load64(hh + 32) + 34);
-            var hr = rekha_w2_hmtx(td, load64(he + 32), load64(he + 24), ng, nhm, dst,
-              load64(he + 48), load64(ge + 48), load64(ge + 40),
-              load64(le + 48), ifmt);
-            if (hr < 0) { return 0; }
+    var nginfo: i64[2];
+    f = 0;
+    while (f < nf) {
+        var fr4 = fonts + f * REKHA_W2_FONT;
+        var cnt4 = load64(fr4);
+        var s4 = load64(fr4 + 16);
+        var he = rekha_w2_ffind(ents, idxs, s4, cnt4, REKHA_TAG_HMTX2);
+        if (he != 0) {
+            if (load64(he + 8) == 1) {
+                if (load64(he + 56) == 0) {
+                    var ge4 = rekha_w2_ffind(ents, idxs, s4, cnt4, REKHA_TAG_GLYF2);
+                    var le4 = rekha_w2_ffind(ents, idxs, s4, cnt4, REKHA_TAG_LOCA2);
+                    var hh4 = rekha_w2_ffind(ents, idxs, s4, cnt4, REKHA_TAG_HHEA2);
+                    if (ge4 == 0 || le4 == 0 || hh4 == 0) { return 0; }
+                    if (rekha_w2_face_ng(ents, idxs, s4, cnt4, td, st, &nginfo) == 0) { return 0; }
+                    var nhm4 = rekha_rd_u16(td, load64(hh4 + 32) + 34);
+                    if (rekha_w2_hmtx(td, load64(he + 32), load64(he + 24), load64(&nginfo), nhm4,
+                        dst, load64(he + 48), load64(ge4 + 48), load64(ge4 + 40),
+                        load64(le4 + 48), load64(&nginfo + 8)) < 0) { return 0; }
+                    store64(he + 56, 1);
+                }
+            }
         }
+        f = f + 1;
     }
-
-    # ⛔ Spec 5 makes both of these MUSTs, and neither value survives the transform: "each
-    # reconstructed table directory entry MUST contain a valid 'checkSum' value, the decoder MUST
-    # recalculate the checkSum value for each decoded table... MUST recalculate the
-    # checkSumAdjustment value of the entire font and MUST store the updated value in the head
-    # table." head's own adjustment is zeroed first — it is part of the sum it summarises.
-    var hd = rekha_w2_find(ents, n, REKHA_TAG_HEAD2);
-    var have_head = 0;
-    if (hd != 0) {
-        if (load64(hd + 40) >= 12) { have_head = 1; }
-    }
-    if (have_head == 1) { rekha_wr_u32(dst, load64(hd + 48) + 8, 0); }
     i = 0;
     while (i < n) {
-        var e4 = ents + i * REKHA_W2_ENT;
-        rekha_wr_u32(dst, REKHA_SFNT_OFFTAB_LEN + i * REKHA_SFNT_DIRENT_LEN + 4,
-          rekha_w2_checksum(dst, load64(e4 + 48), load64(e4 + 40)));
+        if (load64(ents + i * REKHA_W2_ENT + 56) == 0) { return 0; }
         i = i + 1;
     }
-    if (have_head == 1) {
-        var whole = rekha_w2_checksum(dst, 0, size);
-        rekha_wr_u32(dst, load64(hd + 48) + 8, (0xB1B0AFBA - whole) & 0xFFFFFFFF);
+
+    # ⛔ Spec 5 makes both of these MUSTs, and neither value survives the transform: every table's
+    # checkSum is recalculated, and head's checkSumAdjustment with it. A table's checksum is over
+    # its bytes, so a SHARED table is summed once and the same number goes into every face's
+    # directory that names it.
+    i = 0;
+    while (i < n) {
+        var e5 = ents + i * REKHA_W2_ENT;
+        if (load64(e5) != REKHA_TAG_HEAD2) {
+            store64(e5 + 64, rekha_w2_checksum(dst, load64(e5 + 48), load64(e5 + 40)));
+        }
+        i = i + 1;
+    }
+    # head's own checksum is defined over the table with checkSumAdjustment ZEROED, so those are
+    # zeroed first and summed after.
+    i = 0;
+    while (i < n) {
+        var e6 = ents + i * REKHA_W2_ENT;
+        if (load64(e6) == REKHA_TAG_HEAD2) {
+            if (load64(e6 + 40) >= 12) { rekha_wr_u32(dst, load64(e6 + 48) + 8, 0); }
+            store64(e6 + 64, rekha_w2_checksum(dst, load64(e6 + 48), load64(e6 + 40)));
+        }
+        i = i + 1;
+    }
+    f = 0;
+    while (f < nf) {
+        var fr5 = fonts + f * REKHA_W2_FONT;
+        var cnt5 = load64(fr5);
+        var s5 = load64(fr5 + 16);
+        var d5 = load64(fr5 + 24);
+        var k5 = 0;
+        while (k5 < cnt5) {
+            var e7 = ents + load64(idxs + (s5 + k5) * 8) * REKHA_W2_ENT;
+            rekha_wr_u32(dst, d5 + REKHA_SFNT_OFFTAB_LEN + k5 * REKHA_SFNT_DIRENT_LEN + 4,
+              load64(e7 + 64));
+            k5 = k5 + 1;
+        }
+        f = f + 1;
+    }
+    # ⚠ checkSumAdjustment is per FACE: the sum of that face's offset table, its directory and its
+    # own tables. For a plain font that is the whole file, which is the OFF rule exactly. For a
+    # collection there is no such thing as "the entire font", and a head SHARED between faces can
+    # hold only one value — the last face written wins, and that is said here rather than discovered.
+    f = 0;
+    while (f < nf) {
+        var fr6 = fonts + f * REKHA_W2_FONT;
+        var cnt6 = load64(fr6);
+        var s6 = load64(fr6 + 16);
+        var d6 = load64(fr6 + 24);
+        var hd = rekha_w2_ffind(ents, idxs, s6, cnt6, REKHA_TAG_HEAD2);
+        if (hd != 0) {
+            if (load64(hd + 40) >= 12) {
+                var whole = rekha_w2_checksum(dst, d6, REKHA_SFNT_OFFTAB_LEN
+                  + cnt6 * REKHA_SFNT_DIRENT_LEN);
+                var k6 = 0;
+                while (k6 < cnt6) {
+                    var e8 = ents + load64(idxs + (s6 + k6) * 8) * REKHA_W2_ENT;
+                    whole = (whole + load64(e8 + 64)) & 0xFFFFFFFF;
+                    k6 = k6 + 1;
+                }
+                rekha_wr_u32(dst, load64(hd + 48) + 8, (0xB1B0AFBA - whole) & 0xFFFFFFFF);
+            }
+        }
+        f = f + 1;
     }
     return size;
 }
@@ -4282,32 +4599,46 @@ fn rekha_w2_write(buf, ents, n, td, st, dst, size): i64 {
 # Public entry points.
 # ================================================================
 
-# Parse the directory of the WOFF2 at (buf, len) into a freshly allocated entry array. Returns the
-# array (the caller's to keep; rekha's seam has no free), or 0. `out` is two i64 slots: numTables
-# lands at +0 and the offset of the compressed data block at +8.
-fn rekha_w2_ents(buf, len, out): i64 {
+# Parse a WOFF2's header, table directory and (for a collection) its collection directory into a
+# freshly allocated context — REKHA_W2_CTX bytes, plus the entry, face and index arrays it points
+# at, all the caller's to keep since rekha's seam has no free. 0 on any refusal.
+fn rekha_w2_ctx(buf, len): i64 {
     if (buf == 0) { return 0; }
     if (len < REKHA_WOFF2_HDR_LEN) { return 0; }
     var n = rekha_rd_u16(buf, 12);
     if (n == 0) { return 0; }
     if (n > REKHA_WOFF2_MAXTABLES) { return 0; }
+    var ctx = sd_alloc(REKHA_W2_CTX);
+    if (ctx == 0) { return 0; }
     var ents = sd_alloc(n * REKHA_W2_ENT);
     if (ents == 0) { return 0; }
-    if (rekha_w2_dir(buf, len, ents, n, out + 8) != n) { return 0; }
-    store64(out, n);
-    return ents;
+    store64(ctx + 16, ents);
+    store64(ctx + 64, rekha_rd_u32(buf, 4));
+    var coll = 0;
+    if (load64(ctx + 64) == REKHA_TAG_TTCF2) { coll = 1; }
+    store64(ctx + 56, coll);
+    if (rekha_w2_dir(buf, len, ents, n, ctx + 8) != n) { return 0; }
+    store64(ctx, n);
+    if (rekha_w2_coll(buf, len, ctx) == 0) { return 0; }
+    return ctx;
+}
+
+# @public — the number of faces a WOFF2 carries: 1 for an ordinary font, and the collection's face
+# count for a 'ttcf'-flavoured one. 0 when (buf, len) is not a WOFF2 rekha accepts.
+fn rekha_woff2_face_count(buf, len): i64 {
+    var ctx = rekha_w2_ctx(buf, len);
+    if (ctx == 0) { return 0; }
+    return load64(ctx + 24);
 }
 
 # @public — the byte length of the inflated table-data block a WOFF2 container carries: the sum of
 # every directory entry's compressed-stream length. 0 when (buf, len) is not a WOFF2 rekha accepts.
 # ⚠ Spec 5 makes this an EQUALITY with what Brotli produces, so it is both the buffer to allocate
-# and the length the inflate must return. Allocates the entry array (see rekha_w2_ents).
+# and the length the inflate must return.
 fn rekha_woff2_block_size(buf, len): i64 {
-    var out = sd_alloc(16);
-    if (out == 0) { return 0; }
-    var ents = rekha_w2_ents(buf, len, out);
-    if (ents == 0) { return 0; }
-    return rekha_w2_block_size(ents, load64(out));
+    var ctx = rekha_w2_ctx(buf, len);
+    if (ctx == 0) { return 0; }
+    return rekha_w2_block_size(load64(ctx + 16), load64(ctx));
 }
 
 # @public — inflate a WOFF2's compressed font data into `td` (`cap` bytes). Returns the byte length,
@@ -4315,15 +4646,13 @@ fn rekha_woff2_block_size(buf, len): i64 {
 # to more fails closed inside sankoch (ERR_OUTPUT_LIMIT) and one that expands to less fails here,
 # so the "no extraneous data between table entries" rule cannot be sidestepped in either direction.
 fn rekha_woff2_inflate(buf, len, td, cap): i64 {
-    var out = sd_alloc(16);
-    if (out == 0) { return 0; }
-    var ents = rekha_w2_ents(buf, len, out);
-    if (ents == 0) { return 0; }
-    var want = rekha_w2_block_size(ents, load64(out));
+    var ctx = rekha_w2_ctx(buf, len);
+    if (ctx == 0) { return 0; }
+    var want = rekha_w2_block_size(load64(ctx + 16), load64(ctx));
     if (want <= 0) { return 0; }
     if (cap < want) { return 0; }
     if (td == 0) { return 0; }
-    var doff = load64(out + 8);
+    var doff = load64(ctx + 8);
     var wlen = rekha_rd_u32(buf, 8);
     var clen = rekha_rd_u32(buf, 20);                    # totalCompressedSize
     if (clen < 1) { return 0; }
@@ -4332,49 +4661,49 @@ fn rekha_woff2_inflate(buf, len, td, cap): i64 {
     return want;
 }
 
-# @public — the byte length of the SFNT a WOFF2 rebuilds to, given its already-inflated table-data
-# block at (td, tdlen). 0 for any refusal. ⚠ Unlike WOFF 1.0's rekha_woff_sfnt_size, this CANNOT be
-# answered from the container alone: a transformed glyf's rebuilt size is a property of its point
-# data, and the spec says plainly that the origLength beside it "should be treated only as a
-# reference". The measuring pass is the same code that writes.
+# @public — the byte length of the SFNT (or, for a collection, the TTC) a WOFF2 rebuilds to, given
+# its already-inflated table-data block at (td, tdlen). 0 for any refusal. ⚠ Unlike WOFF 1.0's
+# rekha_woff_sfnt_size, this CANNOT be answered from the container alone: a transformed glyf's
+# rebuilt size is a property of its point data, and the spec says the origLength beside it "should
+# be treated only as a reference". The measuring pass is the same code that writes.
 fn rekha_woff2_sfnt_size(buf, len, td, tdlen): i64 {
-    var out = sd_alloc(16);
-    if (out == 0) { return 0; }
-    var ents = rekha_w2_ents(buf, len, out);
-    if (ents == 0) { return 0; }
-    var n = load64(out);
-    if (rekha_w2_block_size(ents, n) != tdlen) { return 0; }
+    var ctx = rekha_w2_ctx(buf, len);
+    if (ctx == 0) { return 0; }
+    if (rekha_w2_block_size(load64(ctx + 16), load64(ctx)) != tdlen) { return 0; }
     var st = sd_alloc(REKHA_W2_GST);
     if (st == 0) { return 0; }
-    return rekha_w2_layout(ents, n, td, tdlen, st);
+    return rekha_w2_layout(ctx, td, tdlen, st);
 }
 
-# @public — rebuild the SFNT of the WOFF2 at (buf, len), whose inflated table data is at
-# (td, tdlen), into `dst` (`cap` bytes). Returns the SFNT byte length, or 0 when the container is
+# @public — rebuild the SFNT (or TTC) of the WOFF2 at (buf, len), whose inflated table data is at
+# (td, tdlen), into `dst` (`cap` bytes). Returns its byte length, or 0 when the container is
 # invalid, `cap` is short, or a transform refuses. On 0 the contents of `dst` are unspecified.
+# ⭐ A 'ttcf' WOFF2 rebuilds to a real .ttc — a TTC header, one offset table per face and ONE copy of
+# each shared table — which rekha_font_open_index then opens face by face (0.4.8).
 fn rekha_woff2_decode(buf, len, td, tdlen, dst, cap): i64 {
-    var out = sd_alloc(16);
-    if (out == 0) { return 0; }
-    var ents = rekha_w2_ents(buf, len, out);
-    if (ents == 0) { return 0; }
-    var n = load64(out);
-    if (rekha_w2_block_size(ents, n) != tdlen) { return 0; }
+    var ctx = rekha_w2_ctx(buf, len);
+    if (ctx == 0) { return 0; }
+    if (rekha_w2_block_size(load64(ctx + 16), load64(ctx)) != tdlen) { return 0; }
     var st = sd_alloc(REKHA_W2_GST);
     if (st == 0) { return 0; }
-    var size = rekha_w2_layout(ents, n, td, tdlen, st);
+    var size = rekha_w2_layout(ctx, td, tdlen, st);
     if (size == 0) { return 0; }
     if (dst == 0) { return 0; }
     if (cap < size) { return 0; }
-    return rekha_w2_write(buf, ents, n, td, st, dst, size);
+    return rekha_w2_write(ctx, td, st, dst, size);
 }
 
-# @public — open a WOFF2 font: inflate its table data, rebuild the SFNT, and rekha_font_open it.
-# Returns 0 for an invalid container, a failed inflate or transform, an allocation failure, or an
-# SFNT rekha_font_open refuses.
+# @public — open face `index` of a WOFF2: inflate its table data, rebuild, and open that face.
+# Returns 0 for an invalid container, a failed inflate or transform, an allocation failure, an index
+# past the collection, or an SFNT rekha_font_open refuses.
+# ⚠ THIS REBUILDS THE WHOLE FILE PER CALL. Opening every face of a five-face collection this way
+# rebuilds it five times; a caller that wants more than one should inflate and rekha_woff2_decode
+# ONCE and then walk the result with rekha_ttc_count / rekha_font_open_index.
 # ⚠ TWO allocations that outlive the call, plus the RekhaFont: the inflated table-data block and the
-# rebuilt SFNT. The block is scratch — nothing reads it once the SFNT is built — but rekha's seam
-# has no free, so it stays charged to the allocator. Open a WOFF2 once, outside a per-frame hook.
-fn rekha_font_open_woff2(buf, len): i64 {
+# rebuilt file. The block is scratch — nothing reads it once the rebuild is done — but rekha's seam
+# has no free, so it stays charged. Open a WOFF2 once, outside a per-frame hook.
+fn rekha_font_open_woff2_index(buf, len, index): i64 {
+    if (index < 0) { return 0; }
     var tdlen = rekha_woff2_block_size(buf, len);
     if (tdlen <= 0) { return 0; }
     var td = sd_alloc(tdlen);
@@ -4385,14 +4714,20 @@ fn rekha_font_open_woff2(buf, len): i64 {
     var dst = sd_alloc(size);
     if (dst == 0) { return 0; }
     if (rekha_woff2_decode(buf, len, td, tdlen, dst, size) != size) { return 0; }
-    return rekha_font_open(dst, size);
+    return rekha_font_open_index(dst, size, index);
+}
+
+# @public — open a WOFF2 font: face 0, which for an ordinary WOFF2 is the only one there is.
+fn rekha_font_open_woff2(buf, len): i64 {
+    return rekha_font_open_woff2_index(buf, len, 0);
 }
 
 # @public — open font bytes of ANY container rekha reads: a WOFF 1.0 file ('wOFF') goes through
 # rekha_font_open_woff, a WOFF2 file ('wOF2') through rekha_font_open_woff2, anything else straight
 # through rekha_font_open. 0 as whichever would return.
 # ⚠ It lives here, not in src/woff.cyr where 0.4.1 put it, because the sniffing entry has to know
-# every container and woff.cyr does not know this one.
+# every container and woff.cyr does not know this one. A collection — a plain '.ttc' or a 'ttcf'
+# WOFF2 — gives face 0, the same as rekha_font_open does.
 fn rekha_font_open_any(buf, len): i64 {
     if (buf == 0) { return 0; }
     if (len >= 4) {

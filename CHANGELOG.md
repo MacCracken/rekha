@@ -5,9 +5,84 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.4.10] - 2026-09-20 — the fixture that hid the scaled readers
+## [0.4.10] - 2026-09-20 — WOFF2 collections, and the fixture that hid the scaled readers
 
-**No library code changes.** `programs/cff_test.cyr` built every one of its fonts with `head`
+Two unrelated things, and the second one is why the first is not alone: the fixture fix was already
+sitting unreleased under this number when the collection work landed.
+
+### Added — WOFF2 collections (roadmap v0.4.x item 10)
+
+A `ttcf`-flavoured WOFF2 has been refused since 0.4.6. It now rebuilds to a real `.ttc`:
+`rekha_woff2_face_count` says how many faces it carries, `rekha_font_open_woff2_index` opens one,
+and `rekha_woff2_decode` produces the whole collection — a TTC header, one offset table per face and
+**one copy of each shared table** — which `rekha_font_open_index` (0.4.8) then walks.
+
+⭐ **CHECKED AGAINST THE COLLECTIONS IT WAS BUILT FROM.** Two `.ttc` files fontTools authored — a
+2-face one whose faces share **17 of 18** tables, and a 3-face one of unrelated fonts — each
+compressed to WOFF2 with real Brotli and decoded back:
+
+| | faces | glyphs | rebuilt | source `.ttc` |
+|---|---:|---:|---:|---:|
+| two faces from one font | 2 | 1,350 | 135,624 B | 135,624 B |
+| three unrelated fonts | 3 | 948 | 247,168 B | 247,168 B |
+
+Every face identical to its source face. ⭐ In the first, both faces resolve `glyf` to the **same
+offset** in the rebuilt file, so the sharing that is the whole point of a collection survives.
+
+⚠ **AND THERE IS NO INDEPENDENT DECODER TO CHECK AGAINST, which is worth saying plainly.** fontTools
+has no WOFF2 collection support in either direction — its `woff2.py` contains no `ttcf`, no
+`numFonts` and no CollectionHeader — so the encoder that produced those two files is rekha's own and
+the WOFF2 layer itself is not independently witnessed. What anchors the result is the *outcome*: the
+rebuilt `.ttc` must match a `.ttc` fontTools authored, face for face, through rekha's collection
+reader, which 0.4.8 validated separately. An error in the decoder that the encoder does not mirror
+exactly shows up; one mirrored in both would not.
+
+#### Changed — the reassembly is now per FACE, and a plain font is a collection of one
+
+⭐ **The single-font path was not left alone beside a collection path.** `rekha_w2_layout` and
+`rekha_w2_write` now work from a list of faces, each owning a list of table-directory indices, and a
+plain WOFF2 becomes a one-face collection whose list is `0..n-1`. One code path, so the collection
+case cannot drift from the case 280 real files exercise. Everything the restructure touched still
+passes: the 280-file differential is unchanged, and the suite's 127 pre-existing checks are green.
+
+- The in-place sort of the table directory is gone — it would have invalidated the very indices a
+  CollectionFontEntry names. Each face's own index list is sorted by tag instead.
+- An entry carries a `done` flag and a cached checksum, so a table SHARED by several faces is
+  transformed once, written once and summed once, and every directory naming it gets that number.
+- ⛔ **Every entry must be named by some face.** An unreferenced one is data the output cannot reach,
+  and for a transformed glyf it would never be measured — its length would silently stay the
+  `origLength` the spec calls "only a reference point".
+
+#### The decoder MUSTs, enforced
+
+- ⚠ **Duplicate tags are CORRECT in a collection** and refused everywhere else: the table directory
+  holds one entry per unique *table*, so two faces with different glyf tables contribute two `glyf`
+  entries. One entry per *tag* is enforced **within each face** instead.
+- ⛔ Spec 5.5: in a collection each `loca` must IMMEDIATELY follow its `glyf` in the table directory,
+  which is what makes a pair unambiguous when several are present.
+- ⛔ Spec 4.2, verbatim a decoder MUST: a face's CollectionFontEntry indices must name a `glyf` and
+  `loca` that are *that* pair. A face naming one without the other, or naming another face's `loca`,
+  is refused.
+- ⚠ `checkSumAdjustment` is computed **per face**, over that face's offset table, directory and own
+  tables — which for a plain font is the whole file, the OFF rule exactly. For a collection there is
+  no "entire font", and a `head` shared between faces can hold only one value: the last face written
+  wins. Said here rather than discovered.
+- ⚠ The rebuilt TTC header is always **version 1.0**. A v2.0 header appends a digital-signature
+  triple; spec 4.2 lets a decoder null those fields *or* emit a version 1 header, and 1.0 is the
+  form with no fields left to get wrong.
+
+#### Added — `programs/woff2_test.cyr` group E (127 → **183 checks**)
+
+A three-face collection built from the embedded face, with and without the glyf/loca transform, and
+carrying **two** glyf/loca pairs: faces 0 and 1 share one, face 2 has its own. Face 1 names only the
+seven tables rekha reads, so a subset face must still decode to the same digest. The group asserts
+the rebuilt file is a `ttcf`, that `rekha_ttc_count` sees three faces, that all three digest to the
+embedded face, that faces 0 and 1 resolve `glyf` to one offset while face 2 does not, and that a
+plain WOFF2 answers one face and refuses index 1.
+
+### Fixed — the fixture that hid the scaled readers
+
+**No library code changes in this half.** `programs/cff_test.cyr` built every one of its fonts with `head`
 declared INSIDE the table directory, so rekha refused the table — correctly — and every CFF fixture
 the suite has ever produced reported `unitsPerEm` **0**. Nothing noticed, because no upem-scaled
 reader appeared anywhere in the suite: the defect and the coverage gap were the same fact, and each
