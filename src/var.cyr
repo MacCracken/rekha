@@ -154,6 +154,21 @@ fn rekha_var_avar(font, i, coord): i64 {
 #   - at the peak exactly, the factor is 1;
 #   - at or beyond either edge, the WHOLE region is zero and the product stops.
 # Anywhere else the factor is how far the coordinate has travelled from the edge toward the peak.
+# ONE axis's contribution to a region or tuple scalar, in 16.16. 0 - 1 means "this whole region is
+# off"; REKHA_VAR_ONE means "this axis does not constrain it", which is NOT the same thing and is
+# the distinction three of the five branches below exist to make.
+# ⭐ Shared by CFF2's variation regions and gvar's tuples (0.4.12) — the tent is the same shape in
+# both, and the only difference is where the three coordinates are read from.
+fn rekha_var_axis_factor(v, lo, pk, hi): i64 {
+    if (pk == 0) { return REKHA_VAR_ONE; }              # the region does not use this axis
+    if (lo > pk || pk > hi) { return REKHA_VAR_ONE; }   # a malformed triple: ignored, not zeroed
+    if (lo < 0 && hi > 0) { return REKHA_VAR_ONE; }     # a region spanning the default: likewise
+    if (v == pk) { return REKHA_VAR_ONE; }
+    if (v <= lo || v >= hi) { return 0 - 1; }           # at or past an edge: the WHOLE region is off
+    if (v < pk) { return rekha_fx_div(v - lo, pk - lo); }
+    return rekha_fx_div(hi - v, hi - pk);
+}
+
 fn rekha_var_region_scalar(font, rl, naxes, r): i64 {
     var buf = load64(font);
     var coords = load64(font + 312);
@@ -161,25 +176,13 @@ fn rekha_var_region_scalar(font, rl, naxes, r): i64 {
     var base = rl + 4 + r * naxes * 6;
     var a = 0;
     while (a < naxes) {
-        var lo = rekha_rd_i16(buf, base + a * 6) * 4;
-        var pk = rekha_rd_i16(buf, base + a * 6 + 2) * 4;
-        var hi = rekha_rd_i16(buf, base + a * 6 + 4) * 4;
         var v = 0;
         if (a < load64(font + 280)) { v = load64(coords + a * 8); }
-        var skip = 0;
-        if (pk == 0) { skip = 1; }
-        if (lo > pk || pk > hi) { skip = 1; }
-        if (lo < 0 && hi > 0) { skip = 1; }
-        if (skip == 0) {
-            if (v != pk) {
-                if (v <= lo || v >= hi) { return 0; }
-                if (v < pk) {
-                    scalar = rekha_fx_mul(scalar, rekha_fx_div(v - lo, pk - lo));
-                } else {
-                    scalar = rekha_fx_mul(scalar, rekha_fx_div(hi - v, hi - pk));
-                }
-            }
-        }
+        var fct = rekha_var_axis_factor(v, rekha_rd_i16(buf, base + a * 6) * 4,
+          rekha_rd_i16(buf, base + a * 6 + 2) * 4,
+          rekha_rd_i16(buf, base + a * 6 + 4) * 4);
+        if (fct < 0) { return 0; }
+        if (fct != REKHA_VAR_ONE) { scalar = rekha_fx_mul(scalar, fct); }
         a = a + 1;
     }
     return scalar;
@@ -266,6 +269,22 @@ fn rekha_var_set_axis(font, i, value): i64 {
     store64(c + i * 8, rekha_var_avar(font, i, nc));
     rekha_var_build_scalars(font, load64(font + 264));
     return 1;
+}
+
+# 1 when any axis is off its default — i.e. when something might actually vary. Every apply path
+# checks this first, so a font nobody has instanced pays one load.
+fn rekha_var_live(font): i64 {
+    if (font == 0) { return 0; }
+    var n = load64(font + 280);
+    if (n < 1) { return 0; }
+    var c = load64(font + 312);
+    if (c == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load64(c + i * 8) != 0) { return 1; }
+        i = i + 1;
+    }
+    return 0;
 }
 
 # @public — put every axis back at its default, which is the instance rekha decodes without this

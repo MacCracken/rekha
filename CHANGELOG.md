@@ -5,6 +5,76 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.12] - 2026-09-20 — `gvar`: instancing for TrueType outlines
+
+The other half of variable fonts. 0.4.11 gave CFF2 outlines their axes; `gvar` does the same for
+TrueType, and it is its own release because it is its own format: where a CFF2 charstring carries
+its deltas inline and names every value it blends, a `gvar` tuple carries them **out of line**,
+**packed**, and may name only SOME of a glyph's points — the rest are inferred by interpolating
+between their touched neighbours around the contour. Roadmap v0.4.x item 12. The axis machinery
+(`fvar`, `avar`, the region scalars) is 0.4.11's and is shared unchanged.
+
+⭐ **CHECKED AGAINST fontTools' OWN GLYPH SET, POINT FOR POINT:**
+
+| | instances | points | result |
+|---|---:|---:|---|
+| simple glyphs, four weights, incl. a sparse tuple only IUP can complete | 20 | 508 | all identical |
+| composite glyphs, three weights | 9 | 519 | all identical |
+
+⚠ **One ±1 disagreement turned out to be the reference, not rekha**, and is worth recording because
+the next person will hit it: Python's `round()` is banker's rounding and fontTools' own `otRound` is
+half-up, so a first pass at the comparison script reported a one-unit difference on every delta that
+landed exactly on .5. rekha rounds half up, which is what fontTools does internally.
+
+### Added — `src/gvar.cyr`
+
+- The table, its per-glyph offsets (**16-bit offsets are stored HALVED**), the tuple headers with
+  their shared / embedded / intermediate peaks, and the two packed formats: packed point numbers
+  (run-length, byte or word, cumulative) and packed deltas (with a zero-run that carries no bytes
+  at all).
+- ⭐ **IUP, per contour and per tuple.** A tuple that names only some points has the rest inferred
+  BEFORE its deltas are scaled in, not after the tuples are summed. ⛔ A contour the tuple names
+  nothing in keeps ZERO deltas — it does not inherit its neighbour's, which is what makes the
+  difference between one contour moving and the whole glyph moving.
+- ⛔ **The equal-coordinate case in IUP is a rule, not a rounding worry**: when an untouched point's
+  two touched neighbours sit at the same coordinate, it takes their shared delta if they agree and
+  **nothing** if they disagree.
+- ⭐ **Composites vary too**, through their component offsets: each component counts as one point,
+  and the delta goes on the STORED offset — before `SCALED_COMPONENT_OFFSET` scales it, since the
+  other order would scale the variation as well as the placement.
+- ⚠ Every glyph has four phantom points past its real ones and a tuple's deltas cover them. rekha
+  decodes them (a tuple naming them must still be read to the end) and applies only the real points:
+  phantom deltas are METRICS variations, now roadmap item 13.
+- `rekha_var_axis_factor` was factored out of 0.4.11's region scalar and is now shared — the tent is
+  the same shape for a CFF2 region and a `gvar` tuple, and only the source of the three coordinates
+  differs. ⚠ Without an intermediate region a tuple's tent is `(min(peak, 0), peak, max(peak, 0))`.
+
+### Fixed — the default that made every full-glyph tuple silently do nothing
+
+⛔ A tuple with no private point numbers falls back to the glyph's SHARED point numbers; when the
+glyph declares none either, the spec says the tuple provides deltas for **every** point. The first
+cut defaulted that to "names nothing", so every tuple in a font without shared point numbers decoded
+cleanly and applied zero deltas — no refusal, no warning, just an outline that never moved. Caught
+by `programs/gvar_test.cyr` group B, whose font is exactly that shape.
+
+### Added — `programs/gvar_test.cyr` (207 checks)
+
+A TrueType font built in code — head / maxp / hhea / hmtx / loca / glyf / fvar / gvar — with one
+two-contour glyph and three tuples chosen so each drives a different part of the decoder: a
+shared-tuple tuple naming all points, a private-point tuple naming two points of ONE contour, and an
+intermediate-region tuple whose tent is not derived from its peak. Every expected coordinate is
+worked out from those tents and deltas by hand.
+
+Group C is the one to read: the sparse tuple names points 0 and 2 of contour 0 with opposite deltas,
+so points 1 and 3 must take an endpoint's delta whole (they sit at the extremes of their
+neighbours' coordinates, not between them) — and **contour 1 must not move at all**. Group E is the
+refusals, each leaving the outline exactly as stored; group F a guard differential, a truncation
+sweep and a **bit-flip sweep over every byte of the `gvar` table**.
+
+⚠ Two builder bugs found while writing it, both mine and both in the fixture: `loca` needs
+`numGlyphs + 1` entries, not `numGlyphs`, and the glyph record is 56 bytes rather than the 48 first
+written down. `REKHA_FONT_SIZE` **336 → 360**.
+
 ## [0.4.11] - 2026-09-20 — variable-font instancing, for CFF2
 
 `rekha_var_set_axis(font, i, value)` puts axis `i` at a user value and every later

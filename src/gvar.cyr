@@ -1,0 +1,443 @@
+# @internal — gvar: TrueType outline variations (0.4.12).
+#
+# gvar.cyr — apply a variable font's glyph deltas to an outline glyf.cyr has just decoded, at the
+# axis settings src/var.cyr holds. 0.4.11 gave CFF2 outlines this; `gvar` is the same idea over a
+# completely different delta format, which is why it is its own module and its own release.
+#
+# ⛔ WHAT MAKES gvar DIFFERENT FROM CFF2's `blend`. A CFF2 charstring carries its deltas inline, one
+# group per blended number, and every value it blends is named. A gvar tuple carries them OUT of
+# line, PACKED, and may name only SOME of a glyph's points — the rest are inferred by interpolating
+# between their touched neighbours around the contour (IUP). So the work here is three decoders and
+# an interpolation, where CFF2's was a weighted sum.
+#
+# gvar header: majorVersion u16 (1) · minorVersion u16 · axisCount u16 · sharedTupleCount u16 ·
+#   sharedTuplesOffset u32 · glyphCount u16 · flags u16 (bit 0: 32-bit offsets) ·
+#   glyphVariationDataArrayOffset u32 · glyphVariationDataOffsets[glyphCount + 1].
+#   ⚠ A 16-bit offset is stored HALVED, so it is doubled on the way in.
+# GlyphVariationData: tupleVariationCount u16 (bits 0-11 the count, 0x8000 SHARED_POINT_NUMBERS) ·
+#   dataOffset u16 · that many TupleVariationHeaders · then the serialized data.
+# TupleVariationHeader: variationDataSize u16 · tupleIndex u16 (bits 0-11 a shtup-tuple index,
+#   0x8000 EMBEDDED_PEAK_TUPLE, 0x4000 INTERMEDIATE_REGION, 0x2000 PRIVATE_POINT_NUMBERS) · then the
+#   embedded peak and intermediate tuples the flags call for, each axisCount F2Dot14.
+#
+# ⚠ EVERY GLYPH HAS FOUR PHANTOM POINTS past its real ones — the two side bearings and the two
+# vertical ones — and a tuple's deltas cover them too. rekha decodes them (a tuple that names them
+# must still be read to the end) and applies only the real points. Phantom deltas are METRICS
+# variations, which belong with `HVAR` / `MVAR` over rekha's advance readers — roadmap v0.4.x item
+# 13, filed when this one shipped (see CHANGELOG 0.4.12).
+#
+# ⛔ WHAT IS REFUSED — and a refusal here leaves the outline at its DEFAULT, never half-varied:
+#   - a major version other than 1, or a header, offset array or data slice outside the table;
+#   - a glyph whose variation data claims more points than the glyph has (+ 4 phantom);
+#   - a packed point-number or delta run that would read past its tuple's declared size;
+#   - a shtup-tuple index past sharedTupleCount.
+
+var REKHA_TAG_GVAR = 0x67766172;   # 'gvar'
+# Tuples applied to one glyph. The format allows 4,095; no real font is near it, and the cap bounds
+# the work one rekha_load_glyph can be made to do.
+var REKHA_GVAR_MAXTUPLE = 512;
+
+# ================================================================
+# The two packed formats
+# ================================================================
+
+# Packed point numbers (OpenType "Packed Point Numbers"). Writes the indices to `out` and their
+# count to `cnt_out`; a count of 0 in the font means ALL points, which is passed on as -1 because it
+# is a different thing from naming none. Returns the offset past the data, or 0 - 1.
+fn rekha_gvar_points(buf, p, end, out, maxpts, cnt_out): i64 {
+    store64(cnt_out, 0);
+    if (p >= end) { return 0 - 1; }
+    var n = load8(buf + p);
+    p = p + 1;
+    if ((n & 128) != 0) {
+        if (p >= end) { return 0 - 1; }
+        n = ((n & 127) << 8) | load8(buf + p);
+        p = p + 1;
+    }
+    if (n == 0) {
+        store64(cnt_out, 0 - 1);
+        return p;
+    }
+    if (n > maxpts) { return 0 - 1; }
+    var got = 0;
+    var acc = 0;
+    while (got < n) {
+        if (p >= end) { return 0 - 1; }
+        var ctl = load8(buf + p);
+        p = p + 1;
+        var run = (ctl & 127) + 1;
+        if (got + run > n) { run = n - got; }
+        var words = ctl & 128;
+        var k = 0;
+        while (k < run) {
+            if (words != 0) {
+                if (p + 2 > end) { return 0 - 1; }
+                acc = acc + rekha_rd_u16(buf, p);
+                p = p + 2;
+            } else {
+                if (p >= end) { return 0 - 1; }
+                acc = acc + load8(buf + p);
+                p = p + 1;
+            }
+            if (acc >= maxpts) { return 0 - 1; }
+            store64(out + got * 8, acc);
+            got = got + 1;
+            k = k + 1;
+        }
+    }
+    store64(cnt_out, n);
+    return p;
+}
+
+# Packed deltas: `n` signed values into `out`. A run's control byte has 0x80 DELTAS_ARE_ZERO (no
+# data bytes at all) and 0x40 DELTAS_ARE_WORDS; the low six bits plus one are the run length.
+# Returns the offset past the data, or 0 - 1.
+fn rekha_gvar_deltas(buf, p, end, out, n): i64 {
+    var got = 0;
+    while (got < n) {
+        if (p >= end) { return 0 - 1; }
+        var ctl = load8(buf + p);
+        p = p + 1;
+        var run = (ctl & 63) + 1;
+        if (got + run > n) { run = n - got; }
+        var k = 0;
+        if ((ctl & 128) != 0) {
+            while (k < run) {
+                store64(out + got * 8, 0);
+                got = got + 1;
+                k = k + 1;
+            }
+        } else {
+            while (k < run) {
+                if ((ctl & 64) != 0) {
+                    if (p + 2 > end) { return 0 - 1; }
+                    store64(out + got * 8, rekha_rd_i16(buf, p));
+                    p = p + 2;
+                } else {
+                    if (p >= end) { return 0 - 1; }
+                    store64(out + got * 8, rekha_rd_i8(buf, p));
+                    p = p + 1;
+                }
+                got = got + 1;
+                k = k + 1;
+            }
+        }
+    }
+    return p;
+}
+
+# ================================================================
+# IUP — inferring the points a tuple did not name
+# ================================================================
+
+# One coordinate of one untouched point, given its nearest touched neighbours `a` (before) and `b`
+# (after) in contour order. `c*` are the DEFAULT coordinates, `d*` the deltas already decided.
+# ⛔ The equal-coordinate case is not a degenerate rounding worry, it is a rule: when the two
+# neighbours sit at the same coordinate the point cannot be placed between them, so it takes their
+# shtup delta if they agree and NOTHING if they disagree.
+fn rekha_gvar_iup1(cp, ca, cb, da, db): i64 {
+    if (ca == cb) {
+        if (da == db) { return da; }
+        return 0;
+    }
+    var lo = ca;
+    var hi = cb;
+    var dlo = da;
+    var dhi = db;
+    if (ca > cb) {
+        lo = cb;
+        hi = ca;
+        dlo = db;
+        dhi = da;
+    }
+    if (cp <= lo) { return dlo; }
+    if (cp >= hi) { return dhi; }
+    return dlo + rekha_fx_mul(dhi - dlo, rekha_fx_div((cp - lo) << 16, (hi - lo) << 16));
+}
+
+# Fill in the untouched points of one contour [first, last]. `tch` is one byte per point.
+fn rekha_gvar_iup_contour(xs, ys, dx, dy, tch, first, last): i64 {
+    var n = last - first + 1;
+    if (n < 1) { return 0; }
+    # the first touched point of the contour, if any
+    var t0 = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        if (load8(tch + first + i) != 0) {
+            t0 = i;
+            i = n;
+        }
+        i = i + 1;
+    }
+    # ⚠ A contour no tuple touched keeps its zero deltas — NOT the deltas of some other contour.
+    if (t0 < 0) { return 0; }
+    var a = t0;
+    var seen = 0;
+    while (seen < n) {
+        var b = a + 1;
+        if (b >= n) { b = 0; }
+        var span = 0;
+        while (load8(tch + first + b) == 0) {
+            b = b + 1;
+            if (b >= n) { b = 0; }
+            span = span + 1;
+            if (span > n) { return 0; }
+        }
+        # everything strictly between a and b, going forward and wrapping
+        var k = a + 1;
+        if (k >= n) { k = 0; }
+        while (k != b) {
+            var pi = first + k;
+            var ai = first + a;
+            var bi = first + b;
+            store64(dx + pi * 8, rekha_gvar_iup1(load64(xs + pi * 8), load64(xs + ai * 8),
+                load64(xs + bi * 8), load64(dx + ai * 8),
+                load64(dx + bi * 8)));
+            store64(dy + pi * 8, rekha_gvar_iup1(load64(ys + pi * 8), load64(ys + ai * 8),
+                load64(ys + bi * 8), load64(dy + ai * 8),
+                load64(dy + bi * 8)));
+            k = k + 1;
+            if (k >= n) { k = 0; }
+            seen = seen + 1;
+        }
+        seen = seen + 1;
+        a = b;
+        if (a == t0) { seen = n; }
+    }
+    return 0;
+}
+
+# ================================================================
+# The tuple walk
+# ================================================================
+
+# The scalar of one tuple, given its peak and (when INTERMEDIATE_REGION says so) its start and end,
+# each an array of axisCount F2Dot14 at the offsets given. 16.16; 0 means the tuple contributes
+# nothing and its data can be skipped unread.
+# ⚠ Without an intermediate region the tent is (min(peak, 0), peak, max(peak, 0)) — the shape every
+# other implementation derives, and the reason a tuple peaking at +1 ramps linearly from 0.
+fn rekha_gvar_scalar(font, naxes, pk, st, en): i64 {
+    var buf = load64(font);
+    var coords = load64(font + 312);
+    var scalar = REKHA_VAR_ONE;
+    var a = 0;
+    while (a < naxes) {
+        var peak = rekha_rd_i16(buf, pk + a * 2) * 4;
+        var lo = peak;
+        var hi = peak;
+        if (lo > 0) { lo = 0; }
+        if (hi < 0) { hi = 0; }
+        if (st != 0) {
+            lo = rekha_rd_i16(buf, st + a * 2) * 4;
+            hi = rekha_rd_i16(buf, en + a * 2) * 4;
+        }
+        var v = 0;
+        if (a < load64(font + 280)) { v = load64(coords + a * 8); }
+        var fct = rekha_var_axis_factor(v, lo, peak, hi);
+        if (fct < 0) { return 0; }
+        if (fct != REKHA_VAR_ONE) { scalar = rekha_fx_mul(scalar, fct); }
+        a = a + 1;
+    }
+    return scalar;
+}
+
+# The scratch one glyph's variation needs, allocated once per font and reused. Laid out in units of
+# REKHA_GVAR_SCRATCH: dx at 0, dy at 8, the shared point list at 16, one TOUCHED BYTE per point at
+# 24, a private point list at 25, and the raw x / y delta runs at 33 and 41 — 49 units in all.
+var REKHA_GVAR_SCRATCH = 4100;      # REKHA_COMPOSITE_MAXP + 4 phantom points
+
+fn rekha_gvar_scratch(font): i64 {
+    var sc = load64(font + 344);
+    if (sc != 0) { return sc; }
+    sc = sd_alloc(REKHA_GVAR_SCRATCH * 49);
+    if (sc == 0) { return 0; }
+    store64(font + 344, sc);
+    return sc;
+}
+
+# Apply `gvar` to a glyph whose points glyf.cyr has already decoded into xs / ys, with `nc` contours
+# ending at `eps`. Returns 1 when the outline was varied, 0 when it was left exactly as it was —
+# which covers "no gvar", "no axes set", "this glyph has no variation data" and every refusal.
+# ⛔ A refusal never half-varies: the deltas of a tuple are accumulated and only added to xs / ys
+# once that tuple has been read in full.
+fn rekha_gvar_apply(font, gid, xs, ys, np, nc, eps): i64 {
+    if (rekha_var_live(font) == 0) { return 0; }
+    var gvar = load64(font + 336);
+    if (gvar == 0) { return 0; }
+    var buf = load64(font);
+    var end = load64(font + 352);
+    if (gvar + 20 > end) { return 0; }
+    if (rekha_rd_u16(buf, gvar) != 1) { return 0; }
+    var naxes = rekha_rd_u16(buf, gvar + 4);
+    if (naxes < 1 || naxes > REKHA_VAR_MAXAXES) { return 0; }
+    var nshared = rekha_rd_u16(buf, gvar + 6);
+    var shtup = gvar + rekha_rd_u32(buf, gvar + 8);
+    var ngl = rekha_rd_u16(buf, gvar + 12);
+    var longoff = rekha_rd_u16(buf, gvar + 14) & 1;
+    var darray = gvar + rekha_rd_u32(buf, gvar + 16);
+    if (gid < 0 || gid >= ngl) { return 0; }
+    var o0 = 0;
+    var o1 = 0;
+    if (longoff != 0) {
+        if (gvar + 20 + (ngl + 1) * 4 > end) { return 0; }
+        o0 = rekha_rd_u32(buf, gvar + 20 + gid * 4);
+        o1 = rekha_rd_u32(buf, gvar + 20 + gid * 4 + 4);
+    } else {
+        if (gvar + 20 + (ngl + 1) * 2 > end) { return 0; }
+        o0 = rekha_rd_u16(buf, gvar + 20 + gid * 2) * 2;
+        o1 = rekha_rd_u16(buf, gvar + 20 + gid * 2 + 2) * 2;
+    }
+    if (o1 <= o0) { return 0; }                          # this glyph simply does not vary
+    var gs = darray + o0;
+    var ge = darray + o1;
+    if (ge > end || gs < darray) { return 0; }
+    if (gs + 4 > ge) { return 0; }
+    if (nshared > 0) {
+        if (shtup + nshared * naxes * 2 > end) { return 0; }
+    }
+
+    var tvc = rekha_rd_u16(buf, gs);
+    var ntup = tvc & 4095;
+    if (ntup < 1 || ntup > REKHA_GVAR_MAXTUPLE) { return 0; }
+    var dstart = gs + rekha_rd_u16(buf, gs + 2);
+    if (dstart > ge || dstart < gs) { return 0; }
+
+    var total = np + 4;                                  # the four phantom points ride along
+    if (total > REKHA_GVAR_SCRATCH) { return 0; }
+    var sc = rekha_gvar_scratch(font);
+    if (sc == 0) { return 0; }
+    var dx = sc;
+    var dy = sc + REKHA_GVAR_SCRATCH * 8;
+    var pts = sc + REKHA_GVAR_SCRATCH * 16;
+    var tch = sc + REKHA_GVAR_SCRATCH * 24;
+
+    # shtup point numbers, when the glyph declares them, come first in the serialized data
+    var sp = dstart;
+    var scnt: i64[1];
+    # ⛔ -1 IS "ALL POINTS", and it is the right DEFAULT, not just what an explicit count of 0
+    # decodes to. A tuple with no private point numbers falls back to the glyph's shared ones; when
+    # the glyph declares none either, the spec says the tuple provides deltas for every point.
+    # Starting this at 0 instead means "names nothing", and every such tuple silently does nothing.
+    store64(&scnt, 0 - 1);
+    var shpts = sc + REKHA_GVAR_SCRATCH * 25;            # only read when a tuple is private
+    if ((tvc & 32768) != 0) {
+        sp = rekha_gvar_points(buf, sp, ge, pts, total, &scnt);
+        if (sp < 0) { return 0; }
+    }
+    var shared_cnt = load64(&scnt);
+    var shared_at = sp;                                  # where the per-tuple data begins
+
+    var hdr = gs + 4;
+    var data = sp;
+    var varied = 0;
+    var t = 0;
+    while (t < ntup) {
+        if (hdr + 4 > ge) { return 0; }
+        var dsize = rekha_rd_u16(buf, hdr);
+        var tidx = rekha_rd_u16(buf, hdr + 2);
+        hdr = hdr + 4;
+        var pk = 0;
+        if ((tidx & 32768) != 0) {                       # EMBEDDED_PEAK_TUPLE
+            pk = hdr;
+            hdr = hdr + naxes * 2;
+        } else {
+            var si = tidx & 4095;
+            if (si >= nshared) { return 0; }
+            pk = shtup + si * naxes * 2;
+        }
+        var st = 0;
+        var en = 0;
+        if ((tidx & 16384) != 0) {                       # INTERMEDIATE_REGION
+            st = hdr;
+            en = hdr + naxes * 2;
+            hdr = hdr + naxes * 4;
+        }
+        if (hdr > ge) { return 0; }
+        var dend = data + dsize;
+        if (dend > ge) { return 0; }
+
+        var scalar = rekha_gvar_scalar(font, naxes, pk, st, en);
+        if (scalar != 0) {
+            var q = data;
+            var cnt = shared_cnt;
+            var plist = pts;
+            if ((tidx & 8192) != 0) {                    # PRIVATE_POINT_NUMBERS
+                q = rekha_gvar_points(buf, q, dend, shpts, total, &scnt);
+                if (q < 0) { return 0; }
+                cnt = load64(&scnt);
+                plist = shpts;
+            }
+            var npd = cnt;
+            if (cnt < 0) { npd = total; }                # a count of 0 meant ALL points
+            if (npd > total) { return 0; }
+            var i = 0;
+            while (i < total) {
+                store64(dx + i * 8, 0);
+                store64(dy + i * 8, 0);
+                store8(tch + i, 0);
+                i = i + 1;
+            }
+            # the x deltas, then the y deltas, both `npd` long
+            var xd = sc + REKHA_GVAR_SCRATCH * 33;
+            var yd = sc + REKHA_GVAR_SCRATCH * 41;
+            q = rekha_gvar_deltas(buf, q, dend, xd, npd);
+            if (q < 0) { return 0; }
+            q = rekha_gvar_deltas(buf, q, dend, yd, npd);
+            if (q < 0) { return 0; }
+            i = 0;
+            while (i < npd) {
+                var pi = i;
+                if (cnt >= 0) { pi = load64(plist + i * 8); }
+                if (pi < total) {
+                    store64(dx + pi * 8, load64(xd + i * 8));
+                    store64(dy + pi * 8, load64(yd + i * 8));
+                    store8(tch + pi, 1);
+                }
+                i = i + 1;
+            }
+            # ⭐ IUP, per contour and per tuple: a tuple that named only some points has the rest
+            # inferred BEFORE its deltas are scaled in, not after the tuples are summed.
+            if (cnt >= 0) {
+                var first = 0;
+                var ci = 0;
+                while (ci < nc) {
+                    var last = load64(eps + ci * 8);
+                    if (last >= np) { last = np - 1; }
+                    rekha_gvar_iup_contour(xs, ys, dx, dy, tch, first, last);
+                    first = last + 1;
+                    ci = ci + 1;
+                }
+            }
+            i = 0;
+            while (i < np) {
+                var ddx = load64(dx + i * 8);
+                var ddy = load64(dy + i * 8);
+                if (ddx != 0) {
+                    store64(xs + i * 8, load64(xs + i * 8) + sd_asr(ddx * scalar + 32768, 16));
+                }
+                if (ddy != 0) {
+                    store64(ys + i * 8, load64(ys + i * 8) + sd_asr(ddy * scalar + 32768, 16));
+                }
+                i = i + 1;
+            }
+            varied = 1;
+        }
+        data = dend;
+        t = t + 1;
+    }
+    return varied;
+}
+
+# Resolve `gvar` into the RekhaFont cache. Never fails an open.
+fn rekha_gvar_resolve(f): i64 {
+    store64(f + 336, 0);
+    store64(f + 344, 0);
+    store64(f + 352, load64(f + 8));
+    var c: i64[1];
+    var g = rekha_find_table_len(f, REKHA_TAG_GVAR, &c);
+    if (g == 0) { return 0; }
+    if (load64(&c) < 20) { return 0; }
+    store64(f + 336, g);
+    store64(f + 352, load64(f + 8));
+    return 1;
+}

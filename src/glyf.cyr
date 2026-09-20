@@ -142,7 +142,7 @@ fn rekha_load_abort(ctx): i64 {
 # design units. Empty for a truncated glyph, for endPtsOfContours that do not
 # strictly increase, for np > REKHA_COMPOSITE_MAXP, and for more points than the
 # remaining bytes could carry as flags. 0 only on OOM.
-fn rekha_load_simple(font, start, end, nc, ctx): i64 {
+fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     var buf = rekha_font_data(font);
     var p = start + 10;                    # skip numberOfContours(2) + bbox(8)
     if (p + nc * 2 > end) { return rekha_outline_empty(); }
@@ -264,6 +264,12 @@ fn rekha_load_simple(font, start, end, nc, ctx): i64 {
         yi = yi + 1;
     }
 
+    # ⭐ VARIATIONS, and the one place they touch a TrueType outline: the points are decoded, the
+    # contours are known, and nothing has been scaled or emitted yet — which is exactly what gvar's
+    # deltas and its per-contour interpolation need. At the default location, or in a font with no
+    # gvar, this is one load and a return (0.4.12).
+    rekha_gvar_apply(font, gid, xs, ys, np, nc, end_pts);
+
     store64(o, nc);
     store64(o + 8, np);
     store64(o + 16, end_pts);
@@ -350,7 +356,7 @@ fn rekha_comp_record(buf, p, end, rec): i64 {
 # ARGS_ARE_XY_VALUES is clear, whatever moves child point arg2 (transformed) onto
 # merged point arg1. Empty when the merge exceeds REKHA_COMPOSITE_MAXP /
 # REKHA_COMPOSITE_MAXC or a point number is out of range; 0 only on OOM.
-fn rekha_load_composite(font, start, end, depth, ctx): i64 {
+fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
     var buf = rekha_font_data(font);
     var rec: i64[8];
 
@@ -389,6 +395,26 @@ fn rekha_load_composite(font, start, end, depth, ctx): i64 {
     if (pts_left < 0) { return rekha_load_abort(ctx); }
     store64(ctx + 8, pts_left);
 
+    # ⭐ gvar VARIES A COMPOSITE THROUGH ITS COMPONENT OFFSETS: each component counts as ONE point,
+    # the four phantom points follow, and there is no interpolation to do — a component no tuple
+    # names keeps a zero delta, which is what per-point contours would have produced anyway. Only
+    # allocated when something can actually vary (0.4.12).
+    var cdx = 0;
+    var cdy = 0;
+    if (rekha_var_live(font) != 0) {
+        if (load64(font + 336) != 0) {
+            cdx = sd_alloc(n * 16);
+            if (cdx == 0) { return 0; }
+            cdy = cdx + n * 8;
+            var zc = 0;
+            while (zc < n * 2) {
+                store64(cdx + zc * 8, 0);
+                zc = zc + 1;
+            }
+            rekha_gvar_apply(font, gid, cdx, cdy, n, 0, 0);
+        }
+    }
+
     var o = sd_alloc(REKHA_OUTLINE_SIZE + tot_ctr * 8 + tot_pts * 17);
     if (o == 0) { return 0; }
     var eps = o + REKHA_OUTLINE_SIZE;
@@ -418,6 +444,12 @@ fn rekha_load_composite(font, start, end, depth, ctx): i64 {
         if ((flags & 2) != 0) {                # ARGS_ARE_XY_VALUES
             dx = load64(&rec + 16);
             dy = load64(&rec + 24);
+            # ⚠ The delta adjusts the STORED offset, so it goes on before SCALED_COMPONENT_OFFSET
+            # scales it — the other order would scale the variation as well as the placement.
+            if (cdx != 0) {
+                dx = dx + load64(cdx + k * 8);
+                dy = dy + load64(cdy + k * 8);
+            }
             if ((flags & 0x1800) == 0x800) {   # SCALED_COMPONENT_OFFSET, not UNSCALED
                 var sdx = sd_asr(xx * dx + yx * dy + 8192, 14);
                 dy = sd_asr(xy * dx + yy * dy + 8192, 14);
@@ -494,8 +526,8 @@ fn rekha_load_glyph_d(font, gid, depth, ctx): i64 {
     if (start + 10 > end) { return rekha_outline_empty(); }
     var nc = rekha_rd_i16(buf, start);
     if (nc == 0) { return rekha_outline_empty(); }
-    if (nc > 0) { return rekha_load_simple(font, start, end, nc, ctx); }
-    return rekha_load_composite(font, start, end, depth, ctx);
+    if (nc > 0) { return rekha_load_simple(font, gid, start, end, nc, ctx); }
+    return rekha_load_composite(font, gid, start, end, depth, ctx);
 }
 
 # @public — load glyph `gid`'s outline (simple OR composite) into a

@@ -147,6 +147,9 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +296 avar        (i64 — the avar table, 0 = none)   +304 file_len (bounds every variation read)
 #   +312 var_coords  (i64 — normalized coordinates, one 16.16 per axis; 0 until an axis is set)
 #   +320 var_scalars (i64 — one 16.16 scalar per region of the CFF2 variation store; 0 until set)
+#   +336 gvar        (i64 — the 'gvar' table, 0 = the font has none)
+#   +344 gvar_scratch (i64 — the per-glyph delta / touched scratch, allocated on first use)
+#   +352 file_len     (again, so gvar's reads are bounded without another indirection). 0.4.12.
 #   +328 var_nregion (i64 — how many of them are live; 0 IS the default instance). 0.4.11.
 #   +248 min_table  (i64 — the lowest byte offset a table of THIS face may start at. For a plain
 #                      SFNT that is the end of its own directory, which is the rule rekha has always
@@ -170,7 +173,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 336;
+var REKHA_FONT_SIZE = 360;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -261,7 +264,7 @@ fn rekha_font_open_index(buf, len, index): i64 {
     return f;
 }
 
-# Fill the table cache (+40..+335) of a RekhaFont whose +0..+32 header fields are set.
+# Fill the table cache (+40..+359) of a RekhaFont whose +0..+32 header fields are set.
 # Every table goes through rekha_find_table_len (extent rule) and, where a fixed field is read,
 # a minimum declared length. Stack cell only — 0 B of heap.
 fn rekha_font_resolve(f): i64 {

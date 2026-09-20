@@ -61,3 +61,6 @@ include "src/cff2.cyr"
 # var.cyr reads fvar / avar and turns axis settings into the region scalars cff2.cyr's `blend`
 # weights its deltas by. It follows cff.cyr, whose fixed-point helpers and readers it uses.
 include "src/var.cyr"
+# gvar.cyr applies a variable font's TrueType outline deltas, at the axis settings var.cyr holds.
+# It follows var.cyr (whose tent maths and axis state it shares) and glyf.cyr calls into it.
+include "src/gvar.cyr"

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.11
+Version: 0.4.12
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,17 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.12 — `gvar`: instancing for TrueType outlines (shipped).** The other half of variable
+  fonts. 0.4.11 gave CFF2 outlines their axes; `gvar` does the same for TrueType, over a completely
+  different delta format — a per-glyph tuple store, packed point numbers, packed deltas, and IUP to
+  infer the points a tuple does not name.
+  ⭐ **Checked against fontTools' own glyph set, point for point: 1,027 points across 29 glyph
+  instances, all identical** — 508 over 20 simple-glyph instances at four weights (including a
+  sparse tuple that only IUP can complete) and 519 over 9 composite instances, where the deltas move
+  the component OFFSETS rather than any outline.
+  ⛔ IUP is **per contour**, and a contour a tuple names nothing in keeps zero deltas rather than
+  inheriting its neighbour's. That is what `programs/gvar_test.cyr` group C exists to pin.
+  ⚠ Phantom-point deltas are decoded and not applied: they are METRICS variations, which is item 13.
 - **v0.4.11 — variable-font instancing, for CFF2 (shipped).** `rekha_var_set_axis` puts an axis at
   a user value; every later `rekha_load_glyph` draws the font there. 0.4.9 decoded a CFF2 at its
   default location because every region scalar is zero there and a `blend` keeps its defaults; this
@@ -246,11 +257,13 @@ shim, no external binaries.
      NON-default axis coordinates, which needs `fvar` / `avar` and the region scalars rekha does not
      read — item 11.
  11. ~~**Variable-font instancing**~~ — shipped in 0.4.11, below, for **CFF2**.
- 12. **`gvar`** — the same instancing for TrueType outlines. ⚠ Split out of item 11 when the CFF2
-     half shipped: the axis machinery (`fvar`, `avar`, the region scalars) is done and shared, but
-     `gvar`'s deltas are a different format entirely — a per-glyph tuple variation store with
-     shared point numbers, private tuples, and IUP to infer the points a tuple does not name. The
-     metrics variations (`HVAR`, `MVAR`) are the same store over rekha's advance readers.
+ 12. ~~**`gvar`**~~ — shipped in 0.4.12, below.
+ 13. **`HVAR` / `MVAR`** — METRICS variations, the last piece of the variable-font picture rekha
+     reads. An instanced glyph's OUTLINE varies (0.4.11 for CFF2, 0.4.12 for TrueType) but its
+     ADVANCE does not: `rekha_advance_width` reads hmtx in design units and never consults a
+     variation store. `HVAR` is an ItemVariationStore over advance widths and side bearings, which
+     0.4.11's region scalars already know how to weight; the four phantom points `gvar` carries per
+     glyph are the older mechanism for the same thing.
  10. ~~**WOFF2 collections**~~ — shipped in 0.4.10, below.
 - **after 0.4.x:** TrueType hinting (the `fpgm`/`prep`/glyph bytecode interpreter) for small
   sizes.
