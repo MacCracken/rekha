@@ -1,4 +1,9 @@
 # @public — stable API surface for rekha error handling.
+#
+# ⚠ NOTHING IN rekha PRODUCES ONE YET. The codes, the record and the accessors are here; every
+# entry point still fails to a sentinel (0, or an empty outline). Wiring the refusal sites to this
+# vocabulary is its own milestone — docs/development/roadmap.md, 0.7.x — and until then this file
+# is a declared surface, which by rekha's own rule is a promise rather than a feature.
 # error.cyr — rekha vector/outline font error codes + Result helpers.
 #
 # RekhaErr is a 16-byte record (code + optional detail pointer). Error
@@ -67,9 +72,11 @@ fn rekha_err_name(code): i64 {
     return "unknown error";
 }
 
-# Print an error name to stderr (fd 2).
-fn rekha_err_print_name(code): i64 {
-    var name = rekha_err_name(code);
-    syscall(1, 2, name, strlen(name));
-    return 0;
-}
+# ⛔ rekha_err_print_name WAS HERE AND IS GONE (0.5.0). It wrote the name to fd 2 through a raw
+# `syscall(1, 2, ...)` — correct on x86_64 Linux and on AGNOS, and WRONG on aarch64, where write is
+# 64 and 1 is `io_destroy`. It shipped in both bundles and was the only syscall in library code.
+# ⭐ Removed rather than fixed: taking the stdlib's dispatched SYS_WRITE would add the `syscalls`
+# leaf to dist/rekha.deps — a tax on every consumer for a debug helper nothing calls — and 0.4.4 /
+# 0.4.5 spent two releases cutting that list to ONE. A pure parser that makes no syscall at all is
+# the better invariant, and CI now gates exactly that. `rekha_err_name` returns the cstring; a
+# caller that wants it on a fd writes it with its own I/O.

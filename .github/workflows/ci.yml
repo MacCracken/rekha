@@ -70,7 +70,7 @@ jobs:
         # captured with `|| rc=$?` so -e does not end the loop at the first failing file.
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do
+          for f in src/*.cyr programs/*.cyr; do
             [ -e "$f" ] || continue
             rc=0
             out=$(cyrius lint "$f" --strict 2>&1) || rc=$?
@@ -93,7 +93,7 @@ jobs:
         # ⚠ rekha's own files do NOT drift — measured, 0 of 33 in src/ + programs/ under the 6.6.6
         # formatter, and `--check` agrees on all 33. This is the gate being repaired, not the tree.
         run: |
-          for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do
+          for f in src/*.cyr programs/*.cyr; do
             [ -e "$f" ] || continue
             cyrius fmt "$f" > /dev/null 2>&1 || { echo "fmt: failed to format $f"; exit 1; }
           done
@@ -263,12 +263,32 @@ jobs:
       - name: Verify ELF
         run: '[ "$(xxd -l 4 -p build/smoke-dce1)" = "7f454c46" ]'
 
-      - name: Test (native tcyr suites)
+      - name: Cross-target link-check (aarch64 + AGNOS)
+        # ⭐ WHY THIS GATE EXISTS. rekha's first line calls it "a subsystem for AGNOS", and nothing
+        # had ever built it for AGNOS or for aarch64 — CI is one x86_64 host. 0.5.0 found what that
+        # hides: src/error.cyr wrote to fd 2 through the LITERAL x86_64 write number, `syscall(1, 2,
+        # ...)`, and shipped it in dist/rekha.cyr and dist/rekha-woff.cyr. On aarch64 `write` is 64
+        # and 1 is `io_destroy`. The function is gone (library code now makes no syscall at all, and
+        # the security scan below gates that), but the BLIND SPOT is what this step closes.
+        # ⚠ Link-check only: these binaries are not run, there being no aarch64 or AGNOS host here.
+        # programs/ keeps its raw write/exit numbers deliberately — host-only tests, never
+        # cross-compiled — so the smoke program is what is built, and it links the full include
+        # chain through src/lib.cyr.
+        # Same shape as sadish's own step, which is where rekha took it from.
         run: |
-          for f in tests/tcyr/*.tcyr; do
-            [ -e "$f" ] || continue
-            cyrius test "$f" || exit 1
+          mkdir -p build
+          fail=0
+          for tgt in aarch64 agnos; do
+            echo "== --$tgt =="
+            out=$(cyrius build "--$tgt" programs/smoke.cyr "build/smoke-$tgt" 2>&1) || {
+              echo "$out"; echo "cross: --$tgt failed to build"; fail=1; continue; }
+            echo "$out"
+            if grep -qE 'raw syscall|warning|undefined function|refusing to emit' <<< "$out"; then
+              echo "cross: --$tgt build log is not clean"; fail=1; continue
+            fi
+            echo "  ok: $(wc -c < "build/smoke-$tgt") bytes"
           done
+          [ $fail -eq 0 ] || { echo "cross-target link-check failed"; exit 1; }
 
       - name: Bench (hot path — visibility only, never gates)
         # Shared runners are noisy: numbers are printed, never thresholded. Allocation cost is
@@ -292,12 +312,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Scan for process spawning and non-allowlisted syscalls
-        # ALLOWLIST, not a denylist of spellings: rekha is a pure parser. Library code (src/, the
-        # shipped dist/ bundle, the fonts/ data module) may make exactly one raw syscall shape,
-        # `syscall(1, 2, ` (write to stderr); every other tracked .cyr/.tcyr may also write (1) and
-        # exit (60). Any process-spawn wrapper, constant, name, process/dlopen include or inline
-        # `asm` block fails anywhere. Matches code lines only — a line
-        # whose first non-blank character is `#` is a comment.
+        # ALLOWLIST, not a denylist of spellings: rekha is a pure parser. ⛔ Library code (src/,
+        # the shipped dist/ bundles, the fonts/ data module) may make NO raw syscall at all — it
+        # computes and returns, and every byte it writes goes into a buffer the caller owns. That
+        # was not true before 0.5.0: src/error.cyr's rekha_err_print_name wrote to fd 2 through the
+        # literal x86_64 write number, which is `io_destroy` on aarch64, and it shipped in both
+        # bundles. Removing it (rather than taking the stdlib's dispatched SYS_WRITE, which would
+        # have added a leaf to dist/rekha.deps) makes the invariant the simple one gated here.
+        # Test programs may write (1) and exit (60); they are host-only and never cross-compiled.
+        # Any process-spawn wrapper, constant, name, process/dlopen include or inline `asm` block
+        # fails anywhere. Matches code lines only — a line whose first non-blank character is `#`
+        # is a comment.
         run: |
           export LC_ALL=C
           shopt -s nullglob
@@ -335,8 +360,8 @@ jobs:
             "$(code_lines 'include[[:space:]]*"lib/(process|fdlopen|dynlib|cffi)' "${LIB[@]}" "${PROG[@]}")"
           # `asm { 0x0F; 0x05; }` is a raw syscall no `syscall(` pattern can see.
           report "inline asm" "$(code_lines '\basm\b' "${LIB[@]}" "${PROG[@]}")"
-          report "raw syscall other than write(2, ...) in library code" \
-            "$(syscall_offenders 'syscall[(]1, 2, ' "${LIB[@]}")"
+          report "raw syscall in library code (src/, dist/, fonts/ must make none)" \
+            "$(code_lines 'syscall[[:space:]]*[(]' "${LIB[@]}")"
           report "raw syscall other than write/exit in programs" \
             "$(syscall_offenders 'syscall[(](1|60), ' "${PROG[@]}")"
           echo "security scan complete (fail: $FAIL)"

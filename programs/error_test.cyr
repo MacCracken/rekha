@@ -119,10 +119,15 @@ fn main(): i64 {
     }
     check(nonnull, 1);                                                 # 44
 
-    # ── rekha_err_print_name writes the name to fd 2 and returns 0 ──
-    var pre = "error_test: rekha_err_print_name -> ";
+    # ── 0.5.0: rekha_err_print_name is GONE from src/. It wrote the name to fd 2 through a raw
+    # `syscall(1, 2, ...)`, which is `write` on x86_64 and AGNOS and `io_destroy` on aarch64, and
+    # it was the only syscall in library code. Printing is the HARNESS's job; the library hands
+    # back the cstring and nothing else. This is that same line, done here. ──
+    var pre = "error_test: rekha_err_name -> ";
     syscall(1, 2, pre, strlen(pre));
-    check(rekha_err_print_name(REKHA_ERR_TRUNCATED), 0);               # 45
+    var nm = rekha_err_name(REKHA_ERR_TRUNCATED);
+    syscall(1, 2, nm, strlen(nm));
+    check(strlen(nm) > 0, 1);                                          # 45
     syscall(1, 2, "\n", 1);
 
     if (g_fails == 0) {

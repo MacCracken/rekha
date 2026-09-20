@@ -18,10 +18,14 @@
 # avar: majorVersion u16 · minorVersion u16 · reserved u16 · axisSegmentMapCount u16; then one
 #   SegmentMap per axis: positionMapCount u16 · that many (fromCoordinate, toCoordinate) F2Dot14
 #   pairs, both in normalized space.
-# ⛔ avar 2.0 adds a variation store on top of the segment maps, and rekha takes majorVersion 1
-# ONLY — `rekha_var_resolve` caches the table just for version 1, so a 2.0 table is dropped WHOLE,
-# the segment maps it keeps unchanged from 1.0 included. That leaves such an axis UNMAPPED rather
-# than half-mapped. Accepting 2.0's maps is roadmap work: docs/development/roadmap.md.
+# ⭐ avar 2.0 IS ACCEPTED FOR ITS SEGMENT MAPS (0.5.0). 2.0 keeps 1.0's axisSegmentMaps unchanged
+# and in the same place — its additions (axisIndexMapOffset, varStoreOffset) sit AFTER them — so a
+# 2.0 table parses here exactly as a 1.0 one does. Through 0.4.12 the version gate took 1 only and
+# dropped such a table WHOLE, discarding mapping rekha already knew how to apply.
+# ⛔ Its variation store is still NOT applied: that needs a DeltaSetIndexMap reader rekha does not
+# have (docs/development/roadmap.md). So a 2.0 axis is mapped by its segments and not refined by
+# its store — which is what 2.0's own design makes the safe subset, since a 2.0 font that does all
+# its work in the store carries identity segment maps and is unaffected either way.
 #
 # ⚠ FIXED POINT. Axis values and normalized coordinates are 16.16 here, because that is what fvar's
 # own Fixed fields are and what the charstring interpreter already works in. A region's coordinates
@@ -40,11 +44,19 @@ fn rekha_fx_mul(a, b): i64 {
     return sd_asr(a * b + 32768, 16);
 }
 
-# 16.16 / 16.16 -> 16.16. Both arguments are positive at every call site (each is a difference
-# between a coordinate and the edge of the interval it lies inside), so no sign handling is needed.
+# 16.16 / 16.16 -> 16.16, ROUNDED HALF UP. Both arguments are positive at every call site (each is
+# a difference between a coordinate and the edge of the interval it lies inside), so no sign
+# handling is needed and `+ b / 2` before the divide is the whole of the rounding.
+# ⭐ IT TRUNCATED UNTIL 0.5.0, and `rekha_fx_mul` beside it has always rounded half up — the pair
+# disagreed. Every caller here divides one interval by another to get a ratio in [0, 1]: axis
+# NORMALIZATION, the avar segment walk, and a region's tent scalar. Truncating biased all three low
+# by up to one ulp, and one ulp of scalar is enough to move a point: MEASURED against fontTools on
+# a 31-region CFF2 at wght 550, where the exact coordinate is 51.5 — rekha normalized 150 / 500 to
+# 19660 (0.2999878) instead of 19661 (0.3000031) and rounded the point DOWN to 51 where fontTools
+# gave 52. 19661 is also simply the closer of the two to 0.3.
 fn rekha_fx_div(a, b): i64 {
     if (b == 0) { return 0; }
-    return (a << 16) / b;
+    return ((a << 16) + b / 2) / b;
 }
 
 # ================================================================
@@ -339,7 +351,8 @@ fn rekha_var_resolve(f): i64 {
     var avar = rekha_find_table_len(f, REKHA_TAG_AVAR, &c);
     if (avar != 0) {
         if (avar + 8 <= avar + load64(&c)) {
-            if (rekha_rd_u16(buf, avar) == 1) { store64(f + 296, avar); }
+            var av = rekha_rd_u16(buf, avar);
+            if (av == 1 || av == 2) { store64(f + 296, avar); }
         }
     }
     return 1;

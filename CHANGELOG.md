@@ -5,6 +5,119 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-09-20 — conformance: the stack CFF2 asks for, and the target rekha is named for
+
+The 0.4.x line added formats. 0.5.x fixes the places rekha was **wrong or unproven** on a font it
+already claimed to read — the milestone the roadmap cleanup opened, and the reason it is a minor
+bump rather than another patch. Four of its five items land here; `FontMatrix` is 0.5.1.
+
+⭐ **THE HEADLINE, AND IT IS A BEFORE AND AFTER.** A variable CFF2 built in Python, read from the
+SAME BYTES by fontTools 4.65.0 and by rekha, swept over five region counts (2, 8, 16, 31, 63) x
+five `wght` settings x four glyph shapes:
+
+| | glyph instances | points | result |
+|---|---:|---:|---|
+| **0.5.0** | 100 | **550** | all identical |
+| 0.4.12's ceiling, same harness | 100 | 125 of 550 ever produced | **60 instances came back EMPTY** |
+
+The harness is committed as **`scripts/cff2_wide_diff.py`** — unlike rekha's other differentials it
+needs no font corpus, only fontTools, because it builds its own input. It is not a CI gate, for the
+same reason `scripts/cff_stdenc.py verify` is not: fontTools is not a dependency of this repo.
+
+⛔ **And the blank glyphs include the DEFAULT location.** The overflow happens while operands are
+being PUSHED, before any scalar arithmetic, so a consumer that never touched an axis still got
+nothing. That is worse than the roadmap stated.
+
+### Fixed — CFF2 charstrings ran on CFF's argument stack
+
+`REKHA_CFF_MAXSTACK = 48` was one constant for both dialects. A CFF2 `blend` of `nb` values over
+`k` regions needs `nb + nb x k` operands **resident** when the operator runs, so 48 capped a
+conformant font at `floor(48 / (k + 1))` blended values — 3 at 15 regions, 2 at 23. The CFF2
+chapter says **513**, and overflowing was not graceful: the push guard sets `RC_BAD`, so the glyph
+came back EMPTY rather than at its default.
+
+- The ceiling is now per-run state (`RC_SMAX`), set from the dialect: `REKHA_CFF_MAXSTACK` 48 for
+  CFF, new `REKHA_CFF2_MAXSTACK` 513 for CFF2. ⛔ **CFF stays at 48** — that is the format's own
+  limit and a CFF pushing a 49th operand is malformed. `programs/cff_test.cyr`'s B2 pins it.
+- One `i64[513]` argument stack (4,104 B of frame, once per `rekha_cff_load`, not per point).
+- ⚠ **Why no suite caught it:** every CFF2 fixture rekha had was two regions wide and one.
+  `programs/cff2_test.cyr` gains **group W** — a 16-region store whose tents are identical, so at
+  the axis maximum every scalar is 1 and a blended value is exactly its default plus the SUM of its
+  deltas. It drives a 69-operand blend, the 511-operand one that 513 just allows, and a 545-operand
+  one that must still be refused.
+
+### Fixed — a wrong syscall number shipped in both bundles
+
+`src/error.cyr`'s `rekha_err_print_name` wrote to fd 2 through the literal x86_64 write number,
+`syscall(1, 2, ...)`. On aarch64 `write` is **64** and **1 is `io_destroy`**. It was the only
+syscall in library code, and it shipped in `dist/rekha.cyr` and `dist/rekha-woff.cyr`.
+
+- ⭐ **Removed rather than repaired.** Taking the stdlib's dispatched `SYS_WRITE` would add the
+  `syscalls` leaf to `dist/rekha.deps` — a tax on every consumer for a debug helper nothing calls,
+  one release after 0.4.4 and 0.4.5 spent two releases cutting that list to ONE. A pure parser that
+  makes **no syscall at all** is the better invariant, and CI now gates exactly that: the security
+  scan's library allowlist went from "may write to fd 2" to "must make none".
+- `rekha_err_name` is unchanged and still returns the cstring; a caller that wants it on a fd uses
+  its own I/O, which is what `programs/error_test.cyr` now does.
+- ⛔ **This is a removal from a declared public surface.** rekha has not frozen its API (that is
+  0.9.0) and nothing consumed this, but it is called out rather than slipped in.
+
+### Added — CI builds for aarch64 and AGNOS
+
+rekha's first line calls it "a subsystem for AGNOS" and nothing had ever built it for AGNOS or for
+aarch64: all three CI jobs are one x86_64 host, and `scripts/ci-install-cyrius.sh` has committed an
+aarch64 tarball hash since 0.4.5 without ever using it. A **cross-target link-check** step now
+builds `programs/smoke.cyr` — which links the whole include chain — under `--aarch64` and
+`--agnos`, failing on a build error or any warning. Same shape as sadish's own step, which is where
+it came from. ⚠ Link-check only: the binaries are not run, there being no such host here, and
+`programs/` keeps its raw write/exit numbers deliberately.
+
+### Fixed — an `avar` 2.0 table was dropped whole, segment maps included
+
+The version gate took `majorVersion == 1` only. avar 2.0 keeps 1.0's `axisSegmentMaps` unchanged
+and in the same place — its additions sit AFTER them — so rekha was discarding mapping it already
+knew how to apply, and such an axis landed UNMAPPED rather than merely un-refined. Version 2 is now
+accepted for its segment maps. ⛔ Its variation store is still not applied: that needs a
+`DeltaSetIndexMap` reader rekha does not have. A 2.0 font that does all its work in the store
+carries identity segment maps and is unaffected either way, which is what makes this the safe
+subset.
+
+### Fixed — `rekha_fx_div` truncated where `rekha_fx_mul` rounds
+
+⭐ **Found by the differential above, and not one of the five.** The two 16.16 primitives sitting
+next to each other disagreed: `rekha_fx_mul` rounds half up, `rekha_fx_div` truncated. Every caller
+divides one interval by another to get a ratio in [0, 1] — axis **normalization**, the `avar`
+segment walk, and a region's **tent scalar** — so all three were biased low by up to one ulp.
+
+⚠ One ulp of scalar is enough to move a point. MEASURED on the 31-region font at `wght` 550, where
+the exact coordinate is **51.5**: rekha normalized 150 / 500 to 19660 (0.2999878) instead of 19661
+(0.3000031) and rounded the point DOWN to 51 where fontTools gave 52. 19661 is also simply the
+closer of the two to 0.3. `programs/cff2_test.cyr` pins the normalized value directly.
+
+### Removed — the `tests/tcyr` tier that never existed
+
+`ls -d tests` fails and `git ls-files | grep '^tests/'` returns nothing, yet three CI steps globbed
+it — including one named *Test (native tcyr suites)* that looped over an empty glob and could not
+fail. ⚠ **Coverage was never absent**: the 25 `programs/*_test.cyr` RUN suites gate the library
+under `CYRIUS_DCE=0` and `1`. What was wrong is a step advertising a tier the repo does not have.
+The globs and the step are gone; if a `.tcyr` tier is ever added, the step comes back with it.
+
+### Fixed — `programs/cff2_test.cyr`'s INDEX writer
+
+Not library code, and worth recording because it looked exactly like a library bug. `idx32`
+hardcoded `offSize = 1` with the note *"every object here is small"*, which held until group W's
+charstrings — a 30-value blend over 16 regions is 510 operands, ~517 bytes — overflowed a one-byte
+offset and handed rekha an INDEX whose objects overlapped. The glyph came back empty and read as a
+refusal. offSize is now computed. `pt()` is bounds-checked too: the first run of group W under the
+old ceiling died of SIGSEGV walking past an empty outline instead of printing which check failed.
+
+### Filed
+
+- `cyrius/docs/development/proposals/2026-09-20-coverage-should-accept-run-programs-as-a-corpus.md`
+- `cyrius/docs/development/proposals/2026-09-20-fuzz-poison-should-follow-a-custom-allocator-seam.md`
+
+Both from the roadmap cleanup that preceded this release; both had lived only as a CI comment.
+
 ## [0.4.12] - 2026-09-20 — `gvar`: instancing for TrueType outlines
 
 The other half of variable fonts. 0.4.11 gave CFF2 outlines their axes; `gvar` does the same for

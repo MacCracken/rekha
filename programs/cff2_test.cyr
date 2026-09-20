@@ -96,19 +96,34 @@ fn tab_add(): i64 {
     return 0;
 }
 
-# A CFF2 INDEX (u32 count, 1-byte offsets — every object here is small). Returns its byte length.
+# A CFF2 INDEX (u32 count, then offSize-byte offsets). Returns its byte length.
+# ⚠ offSize IS COMPUTED, and it did not used to be. It was hardcoded to 1 with the note "every
+# object here is small", which held until group W's charstrings — a 30-value blend over 16 regions
+# is 510 operands, ~517 bytes — overflowed a one-byte offset and handed rekha an INDEX whose
+# objects overlapped. The glyph came back EMPTY and it looked exactly like the library refusing it.
 fn idx32(at, first, cnt): i64 {
     put_u32(FB, at, cnt);
     if (cnt == 0) { return 4; }
-    store8(FB + at + 4, 1);
+    var sum = 1;
+    var j = 0;
+    while (j < cnt) {
+        sum = sum + load64(g_tab + (first + j) * 16 + 8);
+        j = j + 1;
+    }
+    var osz = 1;
+    if (sum > 255) { osz = 2; }
+    if (sum > 65535) { osz = 4; }
+    store8(FB + at + 4, osz);
     var total = 1;
     var i = 0;
     while (i <= cnt) {
-        store8(FB + at + 5 + i, total);
+        if (osz == 1) { store8(FB + at + 5 + i, total); }
+        if (osz == 2) { put_u16(FB, at + 5 + i * 2, total); }
+        if (osz == 4) { put_u32(FB, at + 5 + i * 4, total); }
         if (i < cnt) { total = total + load64(g_tab + (first + i) * 16 + 8); }
         i = i + 1;
     }
-    var data = at + 5 + cnt + 1;
+    var data = at + 5 + (cnt + 1) * osz;
     i = 0;
     var w = 0;
     while (i < cnt) {
@@ -117,7 +132,7 @@ fn idx32(at, first, cnt): i64 {
         w = w + ln;
         i = i + 1;
     }
-    return 5 + cnt + 1 + w;
+    return 5 + (cnt + 1) * osz + w;
 }
 
 fn d_int(at, v): i64 {
@@ -136,6 +151,8 @@ var o_fdsel = 0;        # 0 = none, 3 = format 3, 4 = format 4 (which rekha must
 var o_privvs = 0 - 1;   # >= 0 = write that vsindex into the Private DICT
 var o_fvar = 0;         # 1 = emit an fvar with one 'wght' axis, 100 / 400 / 900
 var o_avar = 0;         # 1 = emit an avar mapping the positive half through 0.3 -> 0.8
+var o_avar2 = 0;        # 1 = stamp that avar majorVersion 2 instead of 1
+var o_wide = 0;         # > 0 = ONE IVD over that many identical regions, instead of the pair
 
 fn opts_reset(): i64 {
     o_major = 2;
@@ -147,6 +164,8 @@ fn opts_reset(): i64 {
     o_privvs = 0 - 1;
     o_fvar = 0;
     o_avar = 0;
+    o_avar2 = 0;
+    o_wide = 0;
     return 0;
 }
 
@@ -207,6 +226,7 @@ fn build(): i64 {
         put_u32(FB, de, 0x61766172); put_u32(FB, de + 8, avar_at); put_u32(FB, de + 12, avlen);
         de = de + 16;
         put_u16(FB, avar_at, 1);
+        if (o_avar2 != 0) { put_u16(FB, avar_at, 2); }
         put_u16(FB, avar_at + 6, 1);                    # one SegmentMap
         put_u16(FB, avar_at + 8, 4);                    # four positions
         put_u16(FB, avar_at + 10, 49152); put_u16(FB, avar_at + 12, 49152);   # -1 -> -1
@@ -283,9 +303,45 @@ fn build(): i64 {
     memcpy(FB + p + 7, FB + fd_at, fdlen);
     p = p + 7 + fdlen;
 
-    # the ItemVariationStore: two subtables over two regions, 2 and 1 regions wide
+    # the ItemVariationStore: two subtables over two regions, 2 and 1 regions wide — or,
+    # when o_wide is set, ONE subtable over that many regions (group W).
     var vstore_at = p;
-    if (o_vstore != 0) {
+    if (o_vstore != 0 && o_wide > 0) {
+        # ⭐ EVERY REGION IS THE SAME TENT: start 0, peak +1, end +1. So at the default
+        # location every scalar is 0 (defaults survive) and at the axis maximum every
+        # scalar is exactly 1 — a blend's result is its default plus the SUM of its
+        # deltas, which is the arithmetic a wide `blend` has to get right.
+        var nr = o_wide;
+        var wivs = p + 2;
+        var wivd = 12;
+        var wrl = wivd + 6 + nr * 2;
+        put_u16(FB, wivs, 1);                           # format
+        put_u32(FB, wivs + 2, wrl);
+        put_u16(FB, wivs + 6, 1);                       # itemVariationDataCount
+        put_u32(FB, wivs + 8, wivd);
+        put_u16(FB, wivs + wivd, 0);
+        put_u16(FB, wivs + wivd + 2, 0);
+        put_u16(FB, wivs + wivd + 4, nr);               # regionIndexCount = nr
+        var wi = 0;
+        while (wi < nr) {
+            put_u16(FB, wivs + wivd + 6 + wi * 2, wi);
+            wi = wi + 1;
+        }
+        put_u16(FB, wivs + wrl, 1);                     # axisCount
+        put_u16(FB, wivs + wrl + 2, nr);                # regionCount
+        wi = 0;
+        while (wi < nr) {
+            var rw = wivs + wrl + 4 + wi * 6;
+            put_u16(FB, rw, 0);
+            put_u16(FB, rw + 2, 16384);
+            put_u16(FB, rw + 4, 16384);
+            wi = wi + 1;
+        }
+        var wlen = wrl + 4 + nr * 6;
+        put_u16(FB, p, wlen);
+        p = p + 2 + wlen;
+    }
+    if (o_vstore != 0 && o_wide == 0) {
         var ivs = p + 2;
         var ivd0 = 16;
         var ivd1 = ivd0 + 10;
@@ -357,7 +413,14 @@ fn load(gid): i64 {
     return rekha_outline_n_points(g_o);
 }
 
+# ⚠ BOUNDS-CHECKED, because a FAILING check must report and not crash. Group W's first run under
+# the 0.4.12 ceiling returned an EMPTY outline; the next pt() walked past it and the suite died of
+# SIGSEGV instead of printing which check failed and why.
 fn pt(k, x, y, flag): i64 {
+    if (k >= rekha_outline_n_points(g_o)) {
+        check(0 - 1, k);                                # reports the index that is not there
+        return 0;
+    }
     check(load64(rekha_outline_xs(g_o) + k * 8), x);
     check(load64(rekha_outline_ys(g_o) + k * 8), y);
     check(load8(rekha_outline_on_curve(g_o) + k), flag);
@@ -718,6 +781,21 @@ fn t_avar(): i64 {
     check(rekha_var_coord(g_f, 0), 0);                   # the default is a fixed point of the map
     check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
     check(rekha_var_coord(g_f, 0), 65536);               # so is the top
+    # ⭐ 150 / 500 IS 0.3, AND 0.3 IS NOT REPRESENTABLE IN 16.16. The two neighbours are 19660
+    # (0.2999878) and 19661 (0.3000031); 19661 is the closer, and it is what a half-up divide
+    # gives. rekha_fx_div TRUNCATED until 0.5.0 while rekha_fx_mul beside it rounded — the pair
+    # disagreed, and one ulp of normalized coordinate is enough to move a point. MEASURED against
+    # fontTools on a 31-region CFF2 at this very setting, where the exact answer is 51.5: rekha
+    # rounded the point down to 51 and fontTools gave 52.
+    opts_reset();
+    o_fvar = 1;
+    check(open_it() > 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 19661);
+    opts_reset();
+    o_fvar = 1;
+    o_avar = 1;
+    check(open_it() > 0, 1);
     # wght 550 normalizes to +0.3, which the map sends to +0.8 — past region 0's peak, on its way
     # down: scalar = (1 - 0.8) / (1 - 0.5) = 0.4
     check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
@@ -732,6 +810,114 @@ fn t_avar(): i64 {
     check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
     check(load(0), 2);
     pt(0, 106, 218, 1);                                  # 100 + 0.6*10, 200 + 0.6*30
+
+    # ⭐ THE SAME TABLE STAMPED majorVersion 2 MAPS IDENTICALLY (0.5.0). avar 2.0 keeps 1.0's
+    # axisSegmentMaps unchanged and in the same place — its additions sit AFTER them — so the only
+    # honest reading of a 2.0 table is the one 1.0 gets. Through 0.4.12 the gate took version 1
+    # alone and dropped a 2.0 table WHOLE, which is these three checks landing on the UNMAPPED
+    # numbers above (106 / 218) instead of the mapped ones.
+    # ⛔ Its variation store is still not applied; that needs a DeltaSetIndexMap reader rekha does
+    # not have. A 2.0 axis is mapped by its segments and not refined by its store.
+    opts_reset();
+    o_fvar = 1;
+    o_avar = 1;
+    o_avar2 = 1;
+    check(open_it() > 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(rekha_var_coord(g_f, 0) > 52000, 1);
+    check(rekha_var_coord(g_f, 0) < 53000, 1);
+    check(load(0), 2);
+    pt(0, 104, 212, 1);                                  # the MAPPED result, as for version 1
+    return 0;
+}
+
+# ── W) a wide `blend`: the argument stack CFF2 actually specifies ────────────────
+# ⭐ WHAT THIS EXISTS TO PROVE. Through 0.4.12 both dialects shared REKHA_CFF_MAXSTACK = 48, which
+# is CFF's ceiling. A CFF2 `blend` of nb values over k regions needs nb + nb x k operands RESIDENT
+# when the operator runs, so 48 capped a font at floor(48 / (k + 1)) blended values — 3 at 15
+# regions. Overflow is not graceful: the push guard sets RC_BAD and the glyph comes back EMPTY, so
+# a conformant font rendered blank. The CFF2 chapter says 513, and 0.5.0 makes the ceiling
+# dialect-specific: CFF keeps 48 (group `t_refuse` in cff_test pins that), CFF2 gets 513.
+# ⚠ Every region here is the SAME tent — start 0, peak +1, end +1 — so at the default every scalar
+# is 0 and at the axis maximum every scalar is 1. A blended value is then exactly its default plus
+# the SUM of its deltas, which is what makes the expected numbers below checkable by hand.
+fn t_widestack(): i64 {
+    g_group = "W a wide blend";
+    tab_reset();
+
+    # 0: two blends over 16 regions. The first needs 2 + 32 + 1 = 35 operands and always fitted;
+    # the SECOND needs 4 + 64 + 1 = 69, which is what 48 refused.
+    cs_reset();
+    cs_n(100); cs_n(200);
+    var i = 0;
+    while (i < 16) { cs_n(1); i = i + 1; }                 # dx over every region
+    i = 0;
+    while (i < 16) { cs_n(2); i = i + 1; }                 # dy over every region
+    cs_n(2); cs_op(16);                                    # blend -> dx, dy
+    cs_op(21);                                             # rmoveto
+    cs_n(10); cs_n(0); cs_n(0); cs_n(10);
+    i = 0;
+    while (i < 64) { cs_n(1); i = i + 1; }                 # 4 values x 16 regions, all +1
+    cs_n(4); cs_op(16);                                    # blend -> four values
+    cs_op(5);                                              # rlineto: two lines
+    tab_add();
+
+    # 1: the widest blend the new ceiling ALLOWS — 30 values over 16 regions is 30 + 480 + 1 = 511.
+    cs_reset();
+    cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 30) { cs_n(1); i = i + 1; }                 # thirty defaults, fifteen (+1, +1) steps
+    i = 0;
+    while (i < 480) { cs_n(1); i = i + 1; }                # 30 x 16 deltas, all +1
+    cs_n(30); cs_op(16);
+    cs_op(5);
+    tab_add();
+
+    # 2: one step past it — 32 values over 16 regions is 32 + 512 + 1 = 545. ⛔ EMPTY, and that is
+    # the right answer: 513 is the format's own ceiling, so a font needing more is malformed.
+    cs_reset();
+    cs_n(0); cs_n(0); cs_op(21);
+    i = 0;
+    while (i < 32) { cs_n(1); i = i + 1; }
+    i = 0;
+    while (i < 512) { cs_n(1); i = i + 1; }
+    cs_n(32); cs_op(16);
+    cs_op(5);
+    tab_add();
+
+    opts_reset();
+    o_fvar = 1;
+    o_wide = 16;
+    check(open_it() > 0, 1);
+    check(g_f != 0, 1);
+
+    # at the default location every scalar is zero: the defaults stand, exactly as before 0.5.0
+    check(load(0), 3);
+    pt(0, 100, 200, 1);
+    pt(1, 110, 200, 1);
+    pt(2, 110, 210, 1);
+
+    # ⭐ at the axis maximum all sixteen scalars are 1, so each value takes the SUM of its deltas:
+    # (100 + 16 x 1, 200 + 16 x 2) = (116, 232), then two steps of (10 + 16, 0 + 16) and
+    # (0 + 16, 10 + 16).
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(load(0), 3);
+    pt(0, 116, 232, 1);
+    pt(1, 142, 248, 1);
+    pt(2, 158, 274, 1);
+
+    # 511 operands resident: decodes, and every one of the fifteen steps took its sixteen deltas
+    check(load(1), 16);
+    pt(0, 0, 0, 1);
+    pt(1, 17, 17, 1);
+    pt(15, 255, 255, 1);
+
+    # 545: past 513, so EMPTY — not a wrong outline
+    empty(2);
+
+    check(rekha_var_reset(g_f), 1);
+    check(load(0), 3);
+    pt(0, 100, 200, 1);
     return 0;
 }
 
@@ -748,8 +934,9 @@ fn main(): i64 {
     t_guard();
     t_instance();
     t_avar();
+    t_widestack();
     if (g_fails == 0) {
-        var ok = "cff2_test: PASS (container, shapes, blend, instancing, avar, refusals, guard; ";
+        var ok = "cff2_test: PASS (container, shapes, blend, instancing, avar, wide stack, refusals, guard; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);

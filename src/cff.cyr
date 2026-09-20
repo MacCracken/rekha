@@ -19,8 +19,9 @@
 # inside its own object's bytes (a subroutine inside its own). Offsets a DICT carries are refused when
 # negative or past the extent.
 # ⛔ WORK. One glyph decode is bounded whatever the font says: 65,536 interpreted operators and
-# numbers per pass, subroutine nesting 10, an argument stack of 48, REKHA_COMPOSITE_MAXP points (the
-# glyf ceiling) — past any of them the glyph is EMPTY — and the load budget rekha_load_glyph carries.
+# numbers per pass, subroutine nesting 10, an argument stack of 48 in CFF and 513 in CFF2 (each
+# format's own ceiling — see REKHA_CFF2_MAXSTACK), REKHA_COMPOSITE_MAXP points (the glyf ceiling) —
+# past any of them the glyph is EMPTY — and the load budget rekha_load_glyph carries.
 #
 # DECODE CONTRACT (what programs/cff_test.cyr and the reference differential pin):
 #   - coordinates accumulate in 16.16; each point is rounded floor(v + 1/2) into design units
@@ -46,6 +47,13 @@
 var REKHA_CFF_MAXOPS    = 65536;
 var REKHA_CFF_MAXDEPTH  = 10;
 var REKHA_CFF_MAXSTACK  = 48;
+# ⛔ CFF2 IS 513, NOT 48, AND THE DIFFERENCE IS NOT COSMETIC. A `blend` of `nb` values over `k`
+# regions needs nb + nb x k operands resident when the operator runs, so a 48-entry ceiling caps a
+# font at floor(48 / (k + 1)) blended values — 3 at 15 regions, 2 at 23. The CFF2 chapter raises
+# the interpreter stack to 513 for exactly that reason, and overflowing it here is not graceful:
+# the push guard sets RC_BAD, so a conformant font comes back EMPTY rather than at its default.
+# ⚠ CFF STAYS AT 48. It is that format's own limit, and a CFF pushing a 49th operand is malformed.
+var REKHA_CFF2_MAXSTACK = 513;
 
 # ================================================================
 # INDEX + DICT readers
@@ -402,7 +410,7 @@ var RC_OC    = 136;
 var RC_EPS   = 144;
 var RC_BAD   = 152;   # a rule was broken: the glyph is empty
 var RC_NPMAX = 160;   # the most points ever held at once (a dropped moveto point counts)
-var RC_STK   = 168;   # pointer to the i64[48] argument stack
+var RC_STK   = 168;   # pointer to the argument stack (i64[REKHA_CFF2_MAXSTACK]; RC_SMAX bounds it)
 # The four-argument endchar (`seac`) parks its request here rather than recursing from inside the
 # interpreter: rekha_cff_run picks it up once the charstring has ended. 0.4.7.
 var RC_SEAC  = 176;   # 1 = the charstring ended with seac arguments
@@ -423,7 +431,10 @@ var RC_VSOK  = 240;   # 1 while a `vsindex` is still permitted (before any blend
 var RC_IVD   = 248;   # the ItemVariationData the current vsindex names, for its region INDEXES
 var RC_SCAL  = 256;   # the font's region-scalar array, or 0
 var RC_NSCAL = 264;   # how many scalars are live; 0 = the default instance
-var RC_SLOTS = 34;
+# The argument-stack ceiling for THIS run: REKHA_CFF_MAXSTACK or REKHA_CFF2_MAXSTACK. It is state
+# rather than a constant because one interpreter serves both dialects and they do not agree.
+var RC_SMAX  = 272;
+var RC_SLOTS = 35;
 
 fn rekha_cff_arg(s, i): i64 { return load64(load64(s + RC_STK) + i * 8); }
 
@@ -563,7 +574,7 @@ fn rekha_cff_exec(s, a, b, depth): i64 {
                     }
                 }
             }
-            if (sp >= REKHA_CFF_MAXSTACK) { store64(s + RC_BAD, 1); return 0 - 1; }
+            if (sp >= load64(s + RC_SMAX)) { store64(s + RC_BAD, 1); return 0 - 1; }
             store64(stk + sp * 8, num);
             store64(s + RC_SP, sp + 1);
         } else {
@@ -685,7 +696,7 @@ fn rekha_cff_op(s, op, depth): i64 {
         sp = sp - 1;
         store64(s + RC_SP, sp);
         store64(s + RC_VSOK, 0);
-        if (nb < 0 || nb > REKHA_CFF_MAXSTACK) { store64(s + RC_BAD, 1); return 0 - 1; }
+        if (nb < 0 || nb > load64(s + RC_SMAX)) { store64(s + RC_BAD, 1); return 0 - 1; }
         # ⭐ THE DEFAULT INSTANCE, AND WHY IT IS THIS CHEAP. The stack holds n default values, then
         # n x k deltas, then n. At the default location every region's scalar is zero, so each
         # blended value IS its default — which is already sitting in place, below the deltas. So the
@@ -1021,6 +1032,8 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
     store64(s + RC_STK, stk);
     var v2 = load64(font + 256);
     store64(s + RC_V2, v2);
+    store64(s + RC_SMAX, REKHA_CFF_MAXSTACK);
+    if (v2 != 0) { store64(s + RC_SMAX, REKHA_CFF2_MAXSTACK); }
     store64(s + RC_VST, load64(font + 264));
     store64(s + RC_VSOK, v2);
     if (load64(font + 200) != 0) {                  # CID-keyed, or ANY CFF2: FDArray[FDSelect(gid)]
@@ -1073,8 +1086,11 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
 # ⚠ No load context: a CFF glyph has no components, so one decode is one load, and its points are
 # already capped at REKHA_COMPOSITE_MAXP — below any budget a context would carry.
 fn rekha_cff_load(font, gid): i64 {
-    var s: i64[34];
-    var stk: i64[48];
+    var s: i64[35];
+    # ⚠ ONE array, sized for the larger dialect (4,104 B of frame), and RC_SMAX is what actually
+    # bounds a run — a CFF still refuses its 49th operand. Sizing it per dialect would need two
+    # frames or an allocation, and rekha_cff_load is called once per glyph, not per point.
+    var stk: i64[513];
     if (rekha_cff_run(font, gid, &s, &stk, 0) == 0) { return rekha_outline_empty(); }
     var np = load64(&s + RC_NP);
     var nc = load64(&s + RC_NC);

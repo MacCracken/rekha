@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.4.12**.
+> **Last updated:** 2026-09-20, at **0.5.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -18,7 +18,7 @@ holds, and no published name that does nothing.
 
 | milestone | what it closes |
 |---|---|
-| **0.5.x — conformance and the target** | Five things that are *wrong or unproven*, not missing. Correctness before surface. |
+| **0.5.x — conformance and the target** | Things that are *wrong or unproven*, not missing. Correctness before surface. **0.5.0 closed four of five**; `FontMatrix` is what is left. |
 | **0.6.x — the font's own answers** | The tables rekha transports and never reads. A consumer cannot compute any of them from outlines, so today it must parse the SFNT itself — the one thing rekha exists to stop. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published and has no producer. |
 | **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. |
@@ -32,62 +32,13 @@ explicit **non-goal**.
 
 ## 0.5.x — conformance and the target
 
-Correctness work. Each of these is a claim rekha makes that the code does not keep.
+Correctness work: claims rekha makes that the code does not keep. **0.5.0 closed four of the five**
+— the CFF2 argument stack, the aarch64 / AGNOS target and the syscall number that hid there,
+`avar` 2.0's segment maps, and the `tests/tcyr` tier that never existed — plus one the differential
+turned up on its own, `rekha_fx_div` truncating where `rekha_fx_mul` rounds. See CHANGELOG 0.5.0.
+One is left.
 
-### 1. CFF2 charstrings run on CFF's 48-entry stack, not the format's 513
-
-`src/cff.cyr:48` — `var REKHA_CFF_MAXSTACK  = 48;`, one constant for both dialects. The push guard
-at `src/cff.cyr:566` refuses at 48; `blend` bounds itself by the same number at `:688` / `:695`.
-
-A CFF2 `blend` of `nb` values over `k` regions needs `nb + nb * k` operands resident when the
-operator runs. At 48 that is `floor(48 / (k + 1))` blended values per operator — **3 at 15 regions,
-2 at 23**. The CFF2 chapter raises the interpreter stack to **513** for exactly this reason.
-
-⛔ **The failure is not graceful.** `:566` sets `RC_BAD`, so the glyph comes back EMPTY, not at its
-default — a conformant font with an ordinary number of regions renders blank, and the cap is
-rekha's, not the format's.
-
-⚠ **Why no suite caught it:** 0.4.9's hand-built variable CFF2 has stores two regions wide and one
-wide, and 0.4.11 instanced the same fonts. Nothing ever approached the ceiling. The fix is a
-dialect-dependent constant and the `RC_STK` allocation behind it (`src/cff.cyr:405`); the test is a
-font with enough regions to need it.
-
-### 2. The AGNOS / aarch64 target is never built, and a wrong syscall number ships
-
-`src/error.cyr:73` — `syscall(1, 2, name, strlen(name));` inside `rekha_err_print_name`. It is in
-both bundles: `dist/rekha.cyr:80`, `dist/rekha-woff.cyr:81`. On x86_64 Linux `1` is `write`; on
-aarch64 it is not — `write` is `64`, and the stdlib already carries the dispatched constant
-(`lib/syscalls_aarch64_linux.cyr`, `SYS_WRITE = 64`).
-
-CI builds one host: `.github/workflows/ci.yml:28`, `:288`, `:347` are all `runs-on: ubuntu-latest`,
-and no step cross-builds. `scripts/ci-install-cyrius.sh` already commits the **aarch64** tarball
-hash, so the toolchain is there and unused.
-
-⭐ **The sibling already gates this.** `sadish/.github/workflows/ci.yml` has a *Cross-target
-link-check (aarch64 + AGNOS)* step whose comment makes the point exactly: *"syscall 8 is `lseek` on
-x86_64 but `getxattr` on ELF-aarch64"*.
-
-⚠ rekha is described in its own first paragraph as a subsystem **for AGNOS**, and the kernel folds
-`fonts/face_data.cyr` into its build today. A 1.0 that has never been compiled for the target it
-names cannot claim it. Note the CI security scan allowlists the literal spelling `syscall(1, 2, `
-for library code, so the allowlist moves with the fix.
-
-### 3. An `avar` 2.0 table is dropped whole, segment maps included
-
-`src/var.cyr:339` — `if (rekha_rd_u16(buf, avar) == 1) { store64(f + 296, avar); }`. With
-majorVersion 2 the pointer stays 0 and `rekha_var_avar` returns the coordinate unmapped
-(`src/var.cyr:105`).
-
-avar 2.0 **keeps** 1.0's `axisSegmentMaps` unchanged and adds a variation store above them. Taking
-version 1 only therefore discards mapping rekha already knows how to apply, and the axis lands
-visibly wrong rather than merely un-refined. Two separable pieces: accept version 2 and apply its
-segment maps (a gate and a test), and separately apply its variation store, which needs the
-`DeltaSetIndexMap` reader that also does not exist (`grep -rni 'deltasetindexmap' src/` → nothing).
-
-⚠ The header comment claimed the lenient behaviour while the code implemented the strict one. The
-comment is corrected as of this cleanup; the behaviour is this item.
-
-### 4. `FontMatrix` is assumed, never read
+### `FontMatrix` is assumed, never read
 
 `src/cff.cyr:27` — *"(charstring units — every CFF face surveyed has FontMatrix = 1 / unitsPerEm)"*.
 The Top DICT operator `12 7` is never looked up (`grep -rni fontmatrix src/` → that one comment).
@@ -97,22 +48,13 @@ Charstring points go to the same scaling path as `glyf` outlines, which divides 
 A CFF whose `FontMatrix` is not `1 / unitsPerEm` — legal, and what a CID font with a per-Font-DICT
 matrix in its FDArray produces — **renders at the wrong scale with no refusal**. 405 surveyed faces
 is strong evidence it is rare, not that it is absent, and a silent wrong scale is a worse failure
-mode than an empty glyph. Reading it also needs the real-number operand format that
-`rekha_cff_dict_op_max` currently skips (`src/cff.cyr:183`, the `b0 == 30` branch discards).
+mode than an empty glyph.
 
-### 5. The `tests/tcyr` tier does not exist, and three CI steps glob it
-
-`ls -d tests` → no such directory; `git ls-files | grep -c '^tests/'` → **0**. Three steps iterate
-it anyway: `.github/workflows/ci.yml:73` and `:96` (lint, fmt) append `tests/tcyr/*.tcyr` to their
-file lists, and `:266` is a step named *Test (native tcyr suites)* that loops over an empty glob.
-
-⚠ **Coverage is not actually absent** — the 25 `programs/*_test.cyr` RUN suites gate the library
-hard, under `CYRIUS_DCE=0` and `1`. What is wrong is a CI step that advertises a tier the repo does
-not have and that cannot fail. Resolve it either way: delete the three fragments, or add `.tcyr`
-suites for the units the RUN suites reach only indirectly (`UIntBase128`, `255UInt16`,
-`rekha_w2_triplet`, `rekha_pad4`, the error-name table).
-
----
+⚠ **It is its own release (0.5.1) because it is two pieces of work, not one.** Reading the operator
+needs the real-number operand format `rekha_cff_dict_op_max` currently skips over (`src/cff.cyr:183`,
+the `b0 == 30` branch discards the value); applying it needs the affine folded into the coordinate
+accumulation before each point is rounded, and composed with the per-Font-DICT matrix a CID font may
+also carry.
 
 ## 0.6.x — the font's own answers
 
@@ -122,9 +64,9 @@ The tables rekha **transports and never reads**. The complete set rekha resolves
 in the codebase lives only inside WOFF2's known-tag strings at `src/woff2.cyr:100-102` — lookup
 bytes, not readers.
 
-### 6. `HVAR` / `MVAR` — metrics variations
+### `HVAR` / `MVAR` — metrics variations
 
-*(Was v0.4.x item 13.)* An instanced glyph's **outline** varies on both formats (0.4.11 CFF2,
+An instanced glyph's **outline** varies on both formats (0.4.11 CFF2,
 0.4.12 `gvar`); its **advance** does not. `rekha_advance_width` reads `hmtx` in design units and
 consults no variation store. `HVAR` is an ItemVariationStore over advances and side bearings, which
 0.4.11's region scalars already know how to weight. The four **phantom points** `gvar` carries per
@@ -134,7 +76,7 @@ points (`src/gvar.cyr:23`).
 ⚠ This is the one item that makes a shipped feature incomplete rather than absent, which is why it
 leads this milestone.
 
-### 7. `OS/2` — the metrics a font *intends*
+### `OS/2` — the metrics a font *intends*
 
 `grep -rn 'OS/2' src/ | grep -v woff2` → nothing. Today `rekha_ascender` / `rekha_descender` /
 `rekha_line_gap` come from `hhea` alone (`src/sfnt.cyr:437-451`). Unread: `sTypoAscender` /
@@ -146,14 +88,14 @@ bit that says which pair the font means), `sxHeight`, `sCapHeight`, `usWeightCla
 invents the number. `dhancha` hard-coded `advf = (h * 6) / 10` for advances until rekha read
 `hmtx`; a UI toolkit with no `sxHeight` will do it again for optical alignment.
 
-### 8. `name` — a font cannot be asked what it is called
+### `name` — a font cannot be asked what it is called
 
 `grep -rn '0x6E616D65' src/` → nothing. No family, subfamily, PostScript name, version or licence
 string. This also strands metadata rekha **already parses past**: `fvar`'s `axisNameID` is in the
 record layout at `src/var.cyr:16` and is never resolved, so a consumer can enumerate axes and
 cannot label them.
 
-### 9. `fvar` named instances, and `STAT`
+### `fvar` named instances, and `STAT`
 
 `src/var.cyr:14` documents `instanceCount` / `instanceSize`; the word `instance` appears nowhere
 else in `src/`, and the `RekhaFont` slot map caches no instance array. `grep -rn '0x53544154' src/`
@@ -163,15 +105,15 @@ Axes themselves **are** enumerable — `rekha_var_axis_count` / `_tag` / `_at` /
 (`src/var.cyr:52+`). What is missing is the layer above: a consumer cannot list "Regular / Bold /
 Condensed" and select one, because the `InstanceRecords` are skipped, and cannot present a name for
 an axis or an instance, because `STAT` — which OpenType makes **required** for a variable font — is
-unread and both tables' nameIDs need item 8. The `fvar` half is a short walk once `name` exists.
+unread and both tables' nameIDs need the `name` reader above. The `fvar` half is a short walk once `name` exists.
 
-### 10. `post` — underline, strikeout, glyph names
+### `post` — underline, strikeout, glyph names
 
 `grep -rn '0x706F7374' src/` → nothing. `underlinePosition` / `underlineThickness` and
 `italicAngle` are in a 32-byte v3 header; glyph names need format 2.0. rekha already resolves glyph
 names inside CFF faces for `seac` (0.4.7) and exposes none of it.
 
-### 11. `kern`, and GPOS pair positioning only
+### `kern`, and GPOS pair positioning only
 
 `grep -rn -E '\bkern\b|GPOS' src/` → only the WOFF2 tag strings. rekha owns advance widths and
 therefore decides inter-glyph spacing, and every pair is placed at its raw advance. Nothing else in
@@ -182,7 +124,7 @@ the stack can supply it: no sibling repo is a shaper.
 marks, cursive attachment, contextual chains — is a positioning engine and belongs to the shaping
 library named under *Out of scope*.
 
-### 12. Vertical metrics — `vhea`, `vmtx`, `VORG`
+### Vertical metrics — `vhea`, `vmtx`, `VORG`
 
 `grep -rn -E 'vhea|vmtx|VORG' src/` → only the WOFF2 tag strings. A CJK face laid out vertically
 needs a per-glyph vertical advance, a vertical line box, and (for CFF faces) a vertical origin that
@@ -197,7 +139,7 @@ today. It is here because it is metrics, not because anything is waiting.
 
 ## 0.7.x — failures that say what failed
 
-### 13. `RekhaErr` is published and nothing produces one
+### `RekhaErr` is published and nothing produces one
 
 `src/error.cyr:1` — *"@public — stable API surface for rekha error handling"*: eight codes, a
 16-byte record, four accessors, a RUN suite. `src/lib.cyr:45` states the fact plainly — *"error.cyr
@@ -221,7 +163,7 @@ designed for it.
 
 ## 0.8.x — hinting
 
-### 14. TrueType hinting — `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter
+### TrueType hinting — `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter
 
 Already the standing "after 0.4.x" item. `grep -rn -E 'fpgm|prep' src/` → only the WOFF2 tag
 strings. This is the last thing between rekha's outlines and a legible 9-pixel glyph.
@@ -234,7 +176,7 @@ the hints themselves. So "hinting" is two jobs, and only the TrueType one has ev
 
 ## 0.9.0 — the freeze
 
-### 15. Declare the public surface, then promise it
+### Declare the public surface, then promise it
 
 `grep -c '@public' src/*.cyr` → **34**, against 172 `fn` in `src/`. `@internal` is a *module*
 header tag, one per file. So the boundary is undeclared: `rekha_font_open`, `rekha_units_per_em`,
@@ -251,7 +193,7 @@ removals, no semantic changes; additions are additive), and record as ADRs the d
 made and currently explained only in scattered comments — the opt-in WOFF bundle, the `sd_alloc`
 seam, the refuse-don't-guess policy, the one-leaf sidecar.
 
-### 16. `SECURITY.md` and `CONTRIBUTING.md`
+### `SECURITY.md` and `CONTRIBUTING.md`
 
 `.github/workflows/ci.yml:362` already names both and prints *"WARN (optional, not yet present)"* —
 deferred, not declined. For a library whose whole job is parsing untrusted input, which shipped a
@@ -272,10 +214,10 @@ a milestone when a consumer asks.
 | **Expert / ExpertSubset charsets** | `src/cff.cyr`, the `seac` refusal list (0.4.7) | Refused rather than guessed. Carrying the two tables would close the last `seac` refusal that is about missing data rather than a malformed font. |
 | **CFF2 FDSelect format 4** | `src/cff2.cyr`, formats 0 and 3 only | Format 4 is the 32-bit-gid form; no observed font needs it. |
 | **cmap formats 2, 8, 10** | `src/cmap.cyr` candidate validator | Format 2 is legacy CJK multi-byte; 8 and 10 are near-extinct. Silently non-candidates today — a font carrying *only* one maps nothing. |
-| **Load caps are compile-time and silent** | `src/glyf.cyr:118-122` | 4,096 points / 128 contours / depth 5 / 64 loads / 16,384 points. A trip yields an EMPTY glyph with no way for the consumer to raise the ceiling or learn it was hit — which is item 13 again. |
+| **Load caps are compile-time and silent** | `src/glyf.cyr:118-122` | 4,096 points / 128 contours / depth 5 / 64 loads / 16,384 points. A trip yields an EMPTY glyph with no way for the consumer to raise the ceiling or learn it was hit — which is `RekhaErr` again. |
 | **WOFF / WOFF2 metadata and private blocks discarded** | `src/woff.cyr:36`; `src/woff2.cyr:46` | Bounds-checked, then dropped. Consistent with rekha's scope, but a named W3C container feature no accessor reaches. |
 | **WOFF2 collections re-inflate per face** | `src/woff2.cyr:1565` (the warning is at the call site) | Opening every face of an *n*-face collection rebuilds the file *n* times, and `sd_alloc` has no free. The two-step escape hatch is public and documented; a cached handle would remove the trap. |
-| **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if item 12 lands: the API shape would need a vertical twin. |
+| **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if the vertical-metrics item lands: the API shape would need a vertical twin. |
 
 ---
 
@@ -285,8 +227,10 @@ Not defects. Places where the evidence is real but unreproducible, written down 
 quietly become permanent.
 
 - ⚠ **Every headline ⭐ differential is a dev-host one-off.** CFF (405 faces / 5,093,070 glyphs),
-  WOFF2 (280 files / 111,732 glyphs), cmap (92 faces), CFF2 and `gvar` (fontTools) — none of it runs
-  in CI. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
+  WOFF2 (280 files / 111,732 glyphs), cmap (92 faces), CFF2 and `gvar` — none of it runs in CI.
+  ⭐ 0.5.0's wide-blend sweep (550 points over 100 glyph instances) is the exception and the model:
+  `scripts/cff2_wide_diff.py` builds its own font, so it needs fontTools and nothing else, and it
+  is committed. The remaining sweeps need corpora that are not. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
   in-repo fixtures are narrower by construction. A regression after 0.4.12 in any of those decoders
   would be caught only by the synthetic suites. Worth having: a scheduled workflow that installs
   fontTools and re-runs the sweeps, or a licence-clean mini-corpus with committed digests.

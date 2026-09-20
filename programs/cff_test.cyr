@@ -623,7 +623,10 @@ fn glyphs_b(): i64 {
     cs_reset(); cs_n(0); cs_n(0); cs_n(128); cs_n(66); cs_op(14); tab_add(cs);
     # B1 an arithmetic operator (12 10 add)
     cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(2); cs_op12(10); cs_op(14); tab_add(cs);
-    # B2 49 arguments
+    # B2 49 arguments. ⛔ THIS MUST STAY REFUSED NOW THAT CFF2 IS 513 (0.5.0). The ceiling became
+    # dialect-specific — REKHA_CFF_MAXSTACK 48 here, REKHA_CFF2_MAXSTACK 513 for a CFF2 charstring,
+    # which needs the room for `blend`. 48 is CFF's OWN limit and a CFF pushing a 49th operand is
+    # malformed, so raising this one too would be a regression, not a relaxation.
     cs_reset(); cs_n(0); cs_n(0); cs_op(21);
     i = 0;
     while (i < 49) { cs_n(1); i = i + 1; }

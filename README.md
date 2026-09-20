@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.12
+Version: 0.5.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -63,9 +63,14 @@ weights the deltas.
 |---|---|---|
 | CFF2 `blend` / `vsindex` | 0.4.11 | fontTools at every location tested — axis defaults, both extremes, a region peak, halfway up one, the negative half, and a kinked `avar` map |
 | `gvar` — packed points, packed deltas, per-contour IUP, composite offsets | 0.4.12 | **1,027 points across 29 glyph instances**, all identical to fontTools |
+| wide stores — up to the 513-operand `blend` CFF2 specifies | 0.5.0 | **550 points across 100 glyph instances** over five region counts, all identical to fontTools |
 
+`fvar` axes are enumerable (`rekha_var_axis_count` / `_tag` / `_min` / `_default` / `_max`); `avar`
+segment maps apply, **version 1 and 2** (0.5.0).
 ⛔ The axis API is deliberately coarse: `rekha_var_set_axis` normalizes, runs `avar` and rebuilds
 every region scalar, so it is a set-the-axes-then-draw call and not a per-glyph one.
+⛔ `avar` 2.0's variation store is not applied — only its segment maps. It needs a
+`DeltaSetIndexMap` reader rekha does not have.
 ⚠ Outlines vary; **advances do not**. Metrics variations lead the roadmap.
 
 ### Characters, metrics, and the sadish seam
@@ -102,7 +107,7 @@ The full list, with the evidence behind every item, is
 
 | milestone | what it closes |
 |---|---|
-| **0.5.x — conformance and the target** | Five things that are wrong or unproven rather than missing: CFF2 charstrings run on CFF's 48-entry argument stack where the format says **513**; the AGNOS / aarch64 target is never built and a wrong syscall number ships in `dist/`; an `avar` 2.0 table is dropped whole, segment maps included; `FontMatrix` is assumed rather than read; and three CI steps glob a `tests/tcyr` tier that does not exist. |
+| **0.5.x — conformance and the target** | Things that are wrong or unproven rather than missing. **0.5.0 shipped four of five**: the CFF2 argument stack is now the format's 513 and not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. Left: **`FontMatrix`**, assumed rather than read, which renders a legal CFF at the wrong scale with no refusal. |
 | **0.6.x — the font's own answers** | The tables rekha transports and never reads — it resolves twelve, and a consumer cannot compute any of the rest from outlines. `HVAR` / `MVAR` first, because an instanced glyph's outline varies and its advance does not; then `OS/2`, `name`, `fvar` named instances + `STAT`, `post`, `kern`, and vertical metrics. |
 | **0.7.x — failures that say what failed** | `RekhaErr` is published, documented, and produced by nothing: every refusal collapses to a 0 or an empty glyph, so a caller cannot tell "not a font" from "truncated" from "over a cap". |
 | **0.8.x — hinting** | `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter, for small sizes. CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
@@ -203,7 +208,7 @@ document / UI text — anywhere scalable glyphs are needed.
   `lib.cyr` defined, so a program using one was refused with *"refusing to emit binary with 1
   reachable undefined function(s)"*); rekha's issue is archived, and the rule that replaced it is
   sankoch's `docs/architecture/003-per-profile-reset-dispatch.md`. The WOFF2 Brotli decoder rekha
-  requested **shipped** in the same release (item 4 of the v0.4.x line). ⚠ rekha does not exercise
+  requested **shipped** in the same release, which is what 0.4.6 was built on. ⚠ rekha does not exercise
   either: `programs/woff_test.cyr` takes the full `lib/sankoch.cyr` leaf from the toolchain pin, not a
   profile bundle, so the profile fix is a consumer's good news rather than a gate here.
   `dist/rekha.cyr` needs no sankoch.
