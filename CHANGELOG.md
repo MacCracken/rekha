@@ -5,6 +5,74 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.5] - 2026-09-20 — `kern`: pairs stop being placed at their raw advance
+
+rekha owns advance widths, so rekha is what decides inter-glyph spacing — and through 0.6.4 every
+pair was placed at its raw advance. This is the first half of fixing that: the legacy `kern` table,
+a sorted array of (left glyph, right glyph, adjustment) and nothing more.
+
+⚠ **The other half is GPOS, and it is where a modern font keeps its kerning.** A face with both is
+common; a face with GPOS alone is normal. `rekha_kern_pair` answers 0 for such a font, which is the
+unkerned spacing rekha has always given and not a wrong number. It is the next roadmap item.
+
+⭐ **CHECKED AGAINST fontTools ON EVERY `kern` FONT ON THE DEV HOST** —
+`scripts/kern_diff.py`, 2,155 font files scanned:
+
+| | |
+|---|---|
+| fonts with a `kern` table | **16** (GNU FreeFont, Liberation) |
+| pairs compared | **163,183 — all identical** |
+| pairs fontTools says are ABSENT, probed | **8,000 — all correctly 0** |
+| fonts with a single applicable subtable | 11 of 16, where the comparison is parse against parse with no rule in between |
+
+⚠ **What fontTools is the reference for.** It PARSES the table — the subtable walk, the endianness,
+the pair array — and that is the half this settles. It does not decide what to do with several
+subtables, so the accumulate / override / skip rule is rekha's in both columns and the script models
+it. FreeSerif carries **five** applicable subtables, so the accumulate path is exercised on real
+fonts and not only on a fixture. ⛔ This is a **dev-host** differential, like rekha's CFF and WOFF2
+corpus sweeps: it reads the machine's installed fonts and cannot run in CI.
+
+### Added — `src/kern.cyr`
+
+`rekha_kern_present`, `rekha_kern_pair`, `rekha_kern_pair_px`, `rekha_char_kern`.
+
+- ⛔ **Two incompatible tables share the tag**, and telling them apart is the first thing this does.
+  Microsoft's is version **0**: a u16 version, a u16 count, subtables with a u16 length and a u16
+  coverage. Apple's is version **0x00010000**: a Fixed version, a u32 count, subtables with a u32
+  length, a coverage BYTE and a separate format byte — and its coverage reads the other way round,
+  with a SET bit meaning vertical. Reading one as the other does not fail; it walks into the middle
+  of a pair array and returns a number.
+- ⭐ **The sort is the lookup.** The array is ordered by the pair packed as `(left << 16) | right`,
+  so a binary search finds one in log2(nPairs) reads — a dozen for a 4,000-pair table. The
+  `searchRange` fields a font supplies are ignored: they are a font's arithmetic about rekha's
+  array, and rekha can do its own.
+- **OVERRIDE is honoured** — such a subtable replaces what earlier ones accumulated — and only when
+  the pair is actually in it. An absent pair overrides nothing.
+- ⚠ `rekha_kern_pair_px` rounds **half up, not half away from zero**: -1.5 px comes back -1, which
+  is what every other rounding in rekha does. The division is written so it never divides a
+  negative, and so does not depend on which way the language truncates.
+
+### Skipped, subtable by subtable, rather than refusing the table
+
+- ⛔ **MINIMUM subtables.** That coverage bit means the value is a FLOOR on the pair's spacing, not
+  an adjustment to it, and adding it as though it were an adjustment is how a minimum becomes a
+  visible gap.
+- Anything not horizontal, anything CROSS_STREAM (which moves text off the baseline), and any
+  format but 0 — format 2's two-dimensional class array is not read, and a font carrying one
+  alongside a format 0 still kerns from the format 0.
+
+### Refused
+
+A version that is neither form; a header or subtable outside the table; ⛔ **a subtable shorter than
+its own header**, which is checked before the step rather than after, because a zero-length one
+would walk the loop forever; and a pair array that does not fit. The subtable walk is capped at 256
+however many the font declares.
+
+`REKHA_FONT_SIZE` **552 -> 568**. ⇒ new `programs/kern_test.cyr`, **78 checks** including a
+**200-pair binary search with every other key deliberately absent** (400 lookups), both table
+forms built from the same pairs, accumulation and override across two subtables, five skips, four
+refusals, and a bit-flip sweep that requires the walk to terminate.
+
 ## [0.6.4] - 2026-09-20 — `post`, and every MVAR tag lands
 
 `OS/2` gives the strikeout pair (0.6.1). `post` gives the **underline** pair, and it is the only

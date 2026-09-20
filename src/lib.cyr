@@ -80,3 +80,6 @@ include "src/stat.cyr"
 # post.cyr is the underline pair and the italic angle, both taking their MVAR deltas, so it
 # follows hvar.cyr. sfnt.cyr calls forward into hvar.cyr for hhea's caret for the same reason.
 include "src/post.cyr"
+# kern.cyr is the legacy pair-kerning table. It calls cmap.cyr for its character-level twin, so
+# it follows cmap.cyr; nothing calls into it.
+include "src/kern.cyr"

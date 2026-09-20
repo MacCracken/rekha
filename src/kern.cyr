@@ -1,0 +1,205 @@
+# @internal — `kern`: the legacy pair-kerning table (0.6.5).
+#
+# kern.cyr — rekha owns advance widths, so rekha is what decides inter-glyph spacing, and through
+# 0.6.4 every pair was placed at its raw advance. This is the first half of fixing that: the legacy
+# `kern` table, which is a sorted array of (left glyph, right glyph, adjustment) and nothing more.
+# ⚠ THE OTHER HALF IS GPOS, and it is where a modern font keeps its kerning. A face with both is
+# common and a face with GPOS alone is normal; `docs/development/roadmap.md` carries it as the next
+# item. Until then `rekha_kern_pair` answers 0 for a GPOS-only font, which is the unkerned spacing
+# it has always given and not a wrong number.
+#
+# ⛔ TWO INCOMPATIBLE TABLES SHARE THE TAG, and telling them apart is the first thing this does.
+# Microsoft's is version **0** — a u16 version, a u16 subtable count, and subtables with a u16
+# length and a u16 coverage. Apple's is version **0x00010000** — a Fixed version, a u32 count, and
+# subtables with a u32 length, a coverage BYTE and a separate format byte. Reading one as the other
+# does not fail; it walks into the middle of a pair array.
+#
+#   Microsoft subtable: version u16 · length u16 · coverage u16
+#     coverage bit 0 HORIZONTAL · bit 1 MINIMUM · bit 2 CROSS_STREAM · bit 3 OVERRIDE ·
+#     the format is the high byte.
+#   Apple subtable: length u32 · coverage u8 · format u8 · tupleIndex u16
+#     coverage bit 7 VERTICAL · bit 6 CROSS_STREAM · bit 5 VARIATION.
+#   Format 0 body, in both: nPairs u16 · searchRange u16 · entrySelector u16 · rangeShift u16 ·
+#     then nPairs of (left u16, right u16, value i16), SORTED by (left, right).
+#
+# ⭐ THE SORT IS THE LOOKUP. The array is ordered by the pair packed as (left << 16) | right, so a
+# binary search finds a pair in log2(nPairs) reads — a dozen for a 4,000-pair table — and the
+# search range fields the font supplies are ignored, because they are a font's arithmetic about
+# rekha's array and rekha can do its own.
+#
+# ⛔ WHAT IS SKIPPED, subtable by subtable, rather than refusing the table:
+#   - a format other than 0. Format 2's two-dimensional class array is rare and is not read; a font
+#     carrying both still kerns from its format 0 subtables.
+#   - anything not HORIZONTAL, and anything CROSS_STREAM, which moves text off the baseline.
+#   - ⛔ MINIMUM subtables. That coverage bit means the value is a FLOOR on the pair's spacing, not
+#     an adjustment to it, and adding it as though it were an adjustment is how a minimum becomes a
+#     visible gap. rekha applies none and says so here.
+# OVERRIDE is honoured: such a subtable REPLACES what earlier ones accumulated, and only when the
+# pair is actually in it — an absent pair overrides nothing.
+#
+# ⛔ WHAT IS REFUSED (the table is absent, and every pair is 0): a version that is neither form, a
+# header or subtable outside the table, a subtable shorter than its own header, or a pair array
+# that does not fit. ⚠ The walk is capped at REKHA_KERN_MAXSUB subtables however many the font
+# declares, because a font chooses that number.
+
+var REKHA_TAG_KERN = 0x6B65726E;   # 'kern'
+var REKHA_KERN_MAXSUB = 256;
+
+fn rekha_kern_resolve(f): i64 {
+    store64(f + 552, 0);
+    store64(f + 560, 0);
+    var c: i64[1];
+    var t = rekha_find_table_len(f, REKHA_TAG_KERN, &c);
+    if (t == 0) { return 0; }
+    var end = t + load64(&c);
+    if (t + 4 > end) { return 0; }
+    var buf = load64(f);
+    var v = rekha_rd_u16(buf, t);
+    if (v == 0) {
+        store64(f + 552, t);
+        store64(f + 560, end);
+        return 1;
+    }
+    # Apple's, whose version is a Fixed 1.0 and whose count is a u32
+    if (rekha_rd_u32(buf, t) == 0x00010000) {
+        if (t + 8 > end) { return 0; }
+        store64(f + 552, t);
+        store64(f + 560, end);
+        return 1;
+    }
+    return 0;
+}
+
+# @public — 1 when the font carries a `kern` table rekha can walk, else 0. ⚠ 0 does NOT mean the
+# font has no kerning: a modern face keeps it in GPOS, which rekha does not read yet.
+fn rekha_kern_present(font): i64 {
+    if (font == 0) { return 0; }
+    if (load64(font + 552) == 0) { return 0; }
+    return 1;
+}
+
+# The adjustment for (l, r) in one format 0 body at `at`, bounded by `sube`. Returns 1 and stores
+# the value in `out` when the pair is there, else 0.
+fn rekha_kern_f0(font, at, sube, l, r, out): i64 {
+    store64(out, 0);
+    var buf = load64(font);
+    if (at + 8 > sube) { return 0; }
+    var n = rekha_rd_u16(buf, at);
+    if (n < 1) { return 0; }
+    var pairs = at + 8;
+    if (pairs + n * 6 > sube) { return 0; }
+    var key = (l << 16) | r;
+    var lo = 0;
+    var hi = n - 1;
+    while (lo <= hi) {
+        var mid = lo + (hi - lo) / 2;
+        var p = pairs + mid * 6;
+        var k = (rekha_rd_u16(buf, p) << 16) | rekha_rd_u16(buf, p + 2);
+        if (k == key) {
+            store64(out, rekha_rd_i16(buf, p + 4));
+            return 1;
+        }
+        if (k < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return 0;
+}
+
+# @public — the horizontal kerning adjustment between glyphs `l` and `r`, in DESIGN units. Usually
+# negative: kerning almost always pulls a pair together. 0 when the font has no `kern`, when the
+# pair is not in it, or when every subtable that could have carried it is one rekha skips.
+fn rekha_kern_pair(font, l, r): i64 {
+    if (rekha_kern_present(font) == 0) { return 0; }
+    if (l < 0 || r < 0) { return 0; }
+    if (l > 65535 || r > 65535) { return 0; }
+    var buf = load64(font);
+    var t = load64(font + 552);
+    var end = load64(font + 560);
+    var apple = 0;
+    var n = rekha_rd_u16(buf, t + 2);
+    var at = t + 4;
+    if (rekha_rd_u32(buf, t) == 0x00010000) {
+        apple = 1;
+        n = rekha_rd_u32(buf, t + 4);
+        at = t + 8;
+    }
+    if (n > REKHA_KERN_MAXSUB) { n = REKHA_KERN_MAXSUB; }
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        var hdr = 6;
+        if (apple != 0) { hdr = 8; }
+        if (at + hdr > end) { return total; }
+        var slen = 0;
+        var fmt = 0;
+        var horiz = 0;
+        var cross = 0;
+        var minimum = 0;
+        var over = 0;
+        if (apple != 0) {
+            slen = rekha_rd_u32(buf, at);
+            var cov = load8(buf + at + 4);
+            fmt = load8(buf + at + 5);
+            if ((cov & 128) == 0) { horiz = 1; }
+            if ((cov & 64) != 0) { cross = 1; }
+        } else {
+            slen = rekha_rd_u16(buf, at + 2);
+            var cw = rekha_rd_u16(buf, at + 4);
+            fmt = (cw >> 8) & 255;
+            if ((cw & 1) != 0) { horiz = 1; }
+            if ((cw & 2) != 0) { minimum = 1; }
+            if ((cw & 4) != 0) { cross = 1; }
+            if ((cw & 8) != 0) { over = 1; }
+        }
+        # ⛔ A subtable that does not declare at least its own header cannot be stepped over, and a
+        # zero-length one would walk this loop forever.
+        if (slen < hdr) { return total; }
+        if (at + slen > end) { return total; }
+        if (fmt == 0 && horiz != 0 && cross == 0 && minimum == 0) {
+            var v: i64[1];
+            if (rekha_kern_f0(font, at + hdr, at + slen, l, r, &v) != 0) {
+                if (over != 0) {
+                    total = load64(&v);
+                } else {
+                    total = total + load64(&v);
+                }
+            }
+        }
+        at = at + slen;
+        i = i + 1;
+    }
+    return total;
+}
+
+# floor(num / den) for den > 0, computed without ever dividing a negative — so it does not depend
+# on which way the language truncates.
+fn rekha_kern_floordiv(num, den): i64 {
+    if (num >= 0) { return num / den; }
+    var m = 0 - num;
+    var q = m / den;
+    if (q * den != m) { q = q + 1; }
+    return 0 - q;
+}
+
+# @public — the same adjustment in whole pixels at `px_size`, rounded HALF UP as every other
+# rounding in rekha is. ⚠ Half up, not half away from zero: -1.5 px comes back -1.
+fn rekha_kern_pair_px(font, l, r, px_size): i64 {
+    var upem = rekha_units_per_em(font);
+    if (upem <= 0) { return 0; }
+    var v = rekha_kern_pair(font, l, r);
+    if (v == 0) { return 0; }
+    return rekha_kern_floordiv(v * px_size + upem / 2, upem);
+}
+
+# @public — the adjustment between two CHARACTERS, mapped through cmap. The convenience twin of
+# rekha_char_advance, and 0 when either codepoint is unmapped.
+fn rekha_char_kern(font, cp1, cp2): i64 {
+    var a = rekha_char_to_glyph(font, cp1);
+    if (a == 0) { return 0; }
+    var b = rekha_char_to_glyph(font, cp2);
+    if (b == 0) { return 0; }
+    return rekha_kern_pair(font, a, b);
+}
