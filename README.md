@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.4.9
+Version: 0.4.10
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -109,6 +109,18 @@ shim, no external binaries.
   to `src/lib.cyr` takes the sidecar to **four** leaves with `distlib --check` staying green, so CI
   now pins the expected list. The positional nature of that fix is filed upstream
   (`cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md`).
+- **v0.4.10 — the fixture that hid the scaled readers (shipped).** No library code changed.
+  `programs/cff_test.cyr` declared `head` at offset 76 with five directory entries, so it lay
+  INSIDE the directory (dir_end is 92); rekha refused the table — correctly — and every CFF fixture
+  the suite built reported `unitsPerEm` **0**.
+  ⚠ **The defect and the coverage gap were the same fact.** No check noticed, because
+  `units_per_em`, `char_to_sdpath` and `char_advance` appeared nowhere in the suite; 678 checks
+  stayed green with the whole upem-scaled path dark on CFF faces. `rekha_advance_width` passed
+  throughout — it reads hmtx in design units and never touches `head` — so metrics coverage looked
+  complete. Found while writing `programs/cff2_test.cyr`.
+  ⇒ Tables now start past the directory, and new **group J** (678 → **697 checks**) pins
+  `unitsPerEm` at 1000 and drives the readers that divide by it, then rebuilds the old layout by
+  hand and requires upem 0 back — so the refusal that was right all along stays gated too.
 - **v0.4.9 — CFF2, at the default instance (shipped).** An OpenType face carrying a `CFF2` table
   instead of `CFF ` now draws. It is a different container — a 5-byte header, a Top DICT that is
   **not** an INDEX, every INDEX counted in u32, a **required** FDArray, an optional FDSelect and an
