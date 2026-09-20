@@ -5,6 +5,71 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-09-20 — `OS/2`: the metrics a font intends, and the MVAR targets 0.6.0 got wrong
+
+`hhea` says how tall a font's glyphs are. **`OS/2` says how the designer meant them to be set** —
+which vertical pair to build a line box from, where the x-height and cap-height sit, how bold and
+how wide the face is, where a strikeout goes. Nothing in the AGNOS stack could read any of it.
+
+### Fixed — 0.6.0 put MVAR's `hasc` / `hdsc` / `hlgp` on the wrong table
+
+⛔ **They target `OS/2`'s sTypo trio, not `hhea`'s ascender, descender and lineGap.** MVAR has no
+tag for hhea's vertical metrics at all — only for its three *caret* fields. 0.6.0 added those
+deltas to hhea, so on a variable font `rekha_ascender` moved when it should not have and
+`sTypoAscender` did not move when it should have.
+
+⚠ **The differential should have caught it and could not.** `scripts/metrics_var_diff.py`'s fixture
+set OS/2's sTypo trio EQUAL to hhea's, so every wrong answer was also a right one — and it is the
+same case fontTools' `verticalMetricsKeptInSync` heuristic papers over, by copying an OS/2 change
+back to hhea when the two started equal. A fixture that cannot tell two behaviours apart is not a
+test of either. The fixture now carries hhea 800 / -200 / 90 against sTypo 750 / -250 / 0, and the
+suites do the same.
+
+⚠ **rekha does not copy that heuristic.** fontTools propagates because "it is common in fonts to
+have the hhea metrics be equal for compat reasons" — a guess about intent. rekha reports what the
+tables say: hhea has no MVAR tag, so `rekha_ascender` does not move at any axis setting. A consumer
+that wants the varying line box reads the typo metrics, which is what `rekha_use_typo_metrics`
+exists to tell it.
+
+⭐ **RE-MEASURED ON THE STRENGTHENED HARNESS**, same bytes to fontTools and rekha, eight locations
+over two axes x (nine OS/2 fields + three hhea fields + eight advances):
+
+| | metric values | identical |
+|---|---:|---|
+| **0.6.1** | 160 | **160** |
+| 0.6.0, same harness | 160 | 68 — nine columns of zeros where OS/2 was unread, and hhea moving where it must not |
+
+### Added — `src/os2.cyr`
+
+`rekha_os2_version` (**-1 when the table is absent**, and the probe to use before trusting a 0 from
+anything else), `rekha_weight_class`, `rekha_width_class`, `rekha_fs_type`, `rekha_fs_selection`,
+`rekha_use_typo_metrics`, `rekha_typo_ascender` / `_descender` / `_line_gap`, `rekha_win_ascent` /
+`_descent`, `rekha_x_height`, `rekha_cap_height`, `rekha_strikeout_size` / `_position`.
+
+- ⭐ **Every one of them varies.** Each field MVAR has a tag for takes its delta here — `hasc`,
+  `hdsc`, `hlgp`, `hcla`, `hcld`, `xhgt`, `cpht`, `strs`, `stro` — so a variable font's x-height
+  moves with its weight.
+- ⛔ **Which vertical pair to use is the CONSUMER'S call.** A face carries three: hhea's, OS/2's
+  sTypo trio, and OS/2's usWin pair. `fsSelection` bit 7 is the font saying "use sTypo". rekha
+  reports the bit and all three pairs and picks none: choosing is layout policy and rekha is a
+  parser.
+- ⚠ **Gated on the DECLARED LENGTH, not the version number**, because the two are allowed to
+  disagree and the length is what bounds the bytes. A table declaring version 4 in 80 bytes answers
+  for `usWinDescent` and returns 0 for `sxHeight`, rather than reading its neighbour. Below the
+  78-byte minimum nothing is cached at all.
+- ⚠ **0 means "the font did not say"** for every metric, which is indistinguishable from a font
+  that says zero — hence the version probe. `fsType` and `fsSelection` return **-1** instead,
+  because 0 is meaningful for both.
+- ⚠ `rekha_weight_class` is the STATIC class; a variable font's `wght` axis is the live one and the
+  two need not agree once an axis is set.
+- `REKHA_FONT_SIZE` **448 -> 464**.
+
+⇒ new `programs/os2_test.cyr`, **85 checks**: a full version 4 table, an absent one, versions 0 and
+1, a version and a length that disagree, a table under the minimum, every MVAR delta landing on the
+field the spec names, and a sweep that flips every bit of OS/2 and MVAR and requires hhea to be
+untouchable from there. `programs/hvar_test.cyr` 169 -> **159 checks**: its group E asserted the old
+wrong behaviour and now asserts that the store resolves every tag while hhea stands still.
+
 ## [0.6.0] - 2026-09-20 — `HVAR` / `MVAR`: the advance follows the axes
 
 0.4.11 and 0.4.12 made a glyph's **outline** follow the axes, for CFF2 and for TrueType. Its

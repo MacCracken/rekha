@@ -1,0 +1,461 @@
+# programs/os2_test.cyr — RUN test for OS/2 (src/os2.cyr): the metrics a font intends.
+#
+# ⭐ THE FONT IS BUILT HERE — head / maxp / hhea / hmtx / loca / glyf / OS/2, optionally with fvar
+# and an MVAR carrying a delta for every OS/2 field that has a tag. The table's version and its
+# DECLARED LENGTH are both options, because they are allowed to disagree and the length is what
+# bounds the bytes.
+#
+# ⛔ hhea AND OS/2 ARE DELIBERATELY DIFFERENT HERE — ascender 800 against sTypoAscender 750,
+# descender -200 against -250, lineGap 90 against 0. That is the whole point of the fixture. 0.6.0
+# put MVAR's `hasc` / `hdsc` / `hlgp` on hhea instead of on OS/2's sTypo trio, and the differential
+# that was supposed to catch it used a font whose two sets were EQUAL, so every wrong answer was
+# also a right one. A fixture that cannot tell two behaviours apart is not a test of either.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "os2_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var FB = 0;
+var FB_CAP = 8192;
+var NG = 2;
+
+fn pu16(off, v): i64 {
+    store8(FB + off, (v >> 8) & 255);
+    store8(FB + off + 1, v & 255);
+    return 0;
+}
+
+fn pu32(off, v): i64 {
+    pu16(off, (v >> 16) & 65535);
+    pu16(off + 2, v & 65535);
+    return 0;
+}
+
+# ── build options ────────────────────────────────
+var o_noos2 = 0;        # omit OS/2
+var o_ver = 4;          # the version to write
+var o_len = 0;          # the DECLARED table length, or 0 for the version's natural one
+var o_typo = 0;         # set fsSelection bit 7, USE_TYPO_METRICS
+var o_nomvar = 1;       # omit MVAR (the default: most groups test the static table)
+var o_nofvar = 1;       # omit fvar
+
+var g_os2 = 0;
+var g_os2len = 0;
+var g_mvar = 0;
+var g_mvarlen = 0;
+var g_flen = 0;
+
+fn os2_natural(v): i64 {
+    if (v == 0) { return 78; }
+    if (v == 1) { return 86; }
+    if (v == 5) { return 100; }
+    return 96;
+}
+
+fn put_os2(at): i64 {
+    pu16(at, o_ver);
+    pu16(at + 2, 600);                                  # xAvgCharWidth
+    pu16(at + 4, 700);                                  # usWeightClass
+    pu16(at + 6, 3);                                    # usWidthClass
+    pu16(at + 8, 8);                                    # fsType
+    pu16(at + 26, 50);                                  # yStrikeoutSize
+    pu16(at + 28, 260);                                 # yStrikeoutPosition
+    var fs = 32;                                        # BOLD
+    if (o_typo != 0) { fs = fs + 128; }
+    pu16(at + 62, fs);
+    pu16(at + 68, 750);                                 # sTypoAscender
+    pu16(at + 70, 0 - 250 & 65535);                     # sTypoDescender
+    pu16(at + 72, 0);                                   # sTypoLineGap
+    pu16(at + 74, 900);                                 # usWinAscent
+    pu16(at + 76, 300);                                 # usWinDescent
+    pu16(at + 86, 500);                                 # sxHeight   (v2+)
+    pu16(at + 88, 700);                                 # sCapHeight (v2+)
+    var n = o_len;
+    if (n == 0) { n = os2_natural(o_ver); }
+    return n;
+}
+
+# One delta per OS/2 tag, over a single region peaking at +1.
+fn mv_tag(i): i64 {
+    if (i == 0) { return 0x68617363; }                  # hasc
+    if (i == 1) { return 0x68647363; }                  # hdsc
+    if (i == 2) { return 0x686C6770; }                  # hlgp
+    if (i == 3) { return 0x68636C61; }                  # hcla
+    if (i == 4) { return 0x68636C64; }                  # hcld
+    if (i == 5) { return 0x63706874; }                  # cpht
+    if (i == 6) { return 0x7374726F; }                  # stro
+    if (i == 7) { return 0x73747273; }                  # strs
+    return 0x78686774;                                  # xhgt
+}
+
+fn mv_delta(i): i64 {
+    if (i == 0) { return 30; }
+    if (i == 1) { return 0 - 20; }
+    if (i == 2) { return 10; }
+    if (i == 3) { return 40; }
+    if (i == 4) { return 15; }
+    if (i == 5) { return 35; }
+    if (i == 6) { return 12; }
+    if (i == 7) { return 5; }
+    return 25;
+}
+
+# ⚠ THE RECORDS MUST BE SORTED BY TAG, which is why mv_tag is in that order and not a tidy one.
+fn put_mvar(at): i64 {
+    var nr = 9;
+    pu16(at, 1);
+    pu16(at + 6, 8);
+    pu16(at + 8, nr);
+    var ivso = 12 + nr * 8;
+    pu16(at + 10, ivso);
+    var i = 0;
+    while (i < nr) {
+        pu32(at + 12 + i * 8, mv_tag(i));
+        pu16(at + 12 + i * 8 + 4, 0);
+        pu16(at + 12 + i * 8 + 6, i);
+        i = i + 1;
+    }
+    var ivs = at + ivso;
+    var ivd = 12;
+    var rl = ivd + 8 + nr * 2;
+    pu16(ivs, 1);
+    pu32(ivs + 2, rl);
+    pu16(ivs + 6, 1);
+    pu32(ivs + 8, ivd);
+    pu16(ivs + ivd, nr);
+    pu16(ivs + ivd + 2, 1);
+    pu16(ivs + ivd + 4, 1);
+    pu16(ivs + ivd + 6, 0);
+    i = 0;
+    while (i < nr) {
+        pu16(ivs + ivd + 8 + i * 2, mv_delta(i) & 65535);
+        i = i + 1;
+    }
+    pu16(ivs + rl, 1);
+    pu16(ivs + rl + 2, 1);
+    pu16(ivs + rl + 4, 0); pu16(ivs + rl + 6, 16384); pu16(ivs + rl + 8, 16384);
+    return ivso + rl + 4 + 6;
+}
+
+fn build(): i64 {
+    memset(FB, 0, FB_CAP);
+    var ntab = 6;
+    if (o_noos2 == 0) { ntab = ntab + 1; }
+    if (o_nofvar == 0) { ntab = ntab + 1; }
+    if (o_nomvar == 0) { ntab = ntab + 1; }
+    pu32(0, 0x00010000);
+    pu16(4, ntab);
+    var at = 12 + ntab * 16;
+    var head_at = at;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var loca_at = hmtx_at + NG * 4;
+    var glyf_at = loca_at + (NG + 1) * 4;
+    var os2_at = glyf_at + 4;
+    g_os2 = os2_at;
+    g_os2len = 0;
+    if (o_noos2 == 0) { g_os2len = put_os2(os2_at); }
+    var fvar_at = os2_at + ((g_os2len + 3) & (0 - 4));
+    var fvlen = 0;
+    if (o_nofvar == 0) { fvlen = 36; }
+    var mvar_at = fvar_at + fvlen;
+    g_mvar = mvar_at;
+    g_mvarlen = 0;
+    if (o_nomvar == 0) { g_mvarlen = put_mvar(mvar_at); }
+
+    pu16(head_at + 18, 1000);
+    pu16(head_at + 50, 1);
+    pu16(maxp_at + 4, NG);
+    # ⛔ NOT the sTypo trio, on purpose: 800 / -200 / 90 against 750 / -250 / 0.
+    pu16(hhea_at + 4, 800);
+    pu16(hhea_at + 6, 0 - 200 & 65535);
+    pu16(hhea_at + 8, 90);
+    pu16(hhea_at + 34, NG);
+    var i = 0;
+    while (i < NG) {
+        pu16(hmtx_at + i * 4, 500);
+        i = i + 1;
+    }
+    i = 0;
+    while (i <= NG) {
+        pu32(loca_at + i * 4, 0);
+        i = i + 1;
+    }
+    if (o_nofvar == 0) {
+        pu16(fvar_at, 1);
+        pu16(fvar_at + 4, 16);
+        pu16(fvar_at + 8, 1);
+        pu16(fvar_at + 10, 20);
+        pu32(fvar_at + 16, 0x77676874);
+        pu32(fvar_at + 20, 100 * 65536);
+        pu32(fvar_at + 24, 400 * 65536);
+        pu32(fvar_at + 28, 900 * 65536);
+        pu16(fvar_at + 34, 256);
+    }
+
+    var d = 12;
+    pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
+    pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, NG * 4); d = d + 16;
+    pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, (NG + 1) * 4); d = d + 16;
+    pu32(d, REKHA_TAG_GLYF); pu32(d + 8, glyf_at); pu32(d + 12, 4); d = d + 16;
+    if (o_noos2 == 0) {
+        pu32(d, REKHA_TAG_OS2); pu32(d + 8, os2_at); pu32(d + 12, g_os2len); d = d + 16;
+    }
+    if (o_nofvar == 0) {
+        pu32(d, 0x66766172); pu32(d + 8, fvar_at); pu32(d + 12, fvlen); d = d + 16;
+    }
+    if (o_nomvar == 0) {
+        pu32(d, REKHA_TAG_MVAR); pu32(d + 8, mvar_at); pu32(d + 12, g_mvarlen); d = d + 16;
+    }
+    g_flen = mvar_at + g_mvarlen;
+    if (g_flen < os2_at + g_os2len) { g_flen = os2_at + g_os2len; }
+    return g_flen;
+}
+
+fn opts_reset(): i64 {
+    o_noos2 = 0;
+    o_ver = 4;
+    o_len = 0;
+    o_typo = 0;
+    o_nomvar = 1;
+    o_nofvar = 1;
+    return 0;
+}
+
+var g_f = 0;
+
+fn openf(): i64 {
+    build();
+    g_f = rekha_font_open(FB, g_flen);
+    return g_f;
+}
+
+# ── A) a full version 4 table ────────────────────────────
+fn t_full(): i64 {
+    g_group = "A version 4";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_os2_version(g_f), 4);
+    check(rekha_weight_class(g_f), 700);
+    check(rekha_width_class(g_f), 3);
+    check(rekha_fs_type(g_f), 8);
+    check(rekha_fs_selection(g_f), 32);
+    check(rekha_use_typo_metrics(g_f), 0);
+    check(rekha_typo_ascender(g_f), 750);
+    check(rekha_typo_descender(g_f), 0 - 250);
+    check(rekha_typo_line_gap(g_f), 0);
+    check(rekha_win_ascent(g_f), 900);
+    check(rekha_win_descent(g_f), 300);
+    check(rekha_x_height(g_f), 500);
+    check(rekha_cap_height(g_f), 700);
+    check(rekha_strikeout_size(g_f), 50);
+    check(rekha_strikeout_position(g_f), 260);
+    # ⛔ AND hhea IS STILL hhea. Three pairs, three different answers, and rekha picks none.
+    check(rekha_ascender(g_f), 800);
+    check(rekha_descender(g_f), 0 - 200);
+    check(rekha_line_gap(g_f), 90);
+    # the bit that says which pair the font means
+    opts_reset();
+    o_typo = 1;
+    check(openf() != 0, 1);
+    check(rekha_fs_selection(g_f), 160);
+    check(rekha_use_typo_metrics(g_f), 1);
+    return 0;
+}
+
+# ── B) absent, and the null handle ──────────────────────────
+fn t_absent(): i64 {
+    g_group = "B absent";
+    opts_reset();
+    o_noos2 = 1;
+    check(openf() != 0, 1);
+    # ⚠ -1 IS THE PROBE. Every metric answers 0, which is indistinguishable from a font that says
+    # zero, so the version is the one accessor that can tell a consumer the table is not there.
+    check(rekha_os2_version(g_f), 0 - 1);
+    check(rekha_weight_class(g_f), 0);
+    check(rekha_fs_type(g_f), 0 - 1);
+    check(rekha_fs_selection(g_f), 0 - 1);
+    check(rekha_use_typo_metrics(g_f), 0);
+    check(rekha_typo_ascender(g_f), 0);
+    check(rekha_win_ascent(g_f), 0);
+    check(rekha_x_height(g_f), 0);
+    check(rekha_strikeout_size(g_f), 0);
+    # ...and hhea, a different table, still answers
+    check(rekha_ascender(g_f), 800);
+    check(rekha_os2_version(0), 0 - 1);
+    check(rekha_weight_class(0), 0);
+    check(rekha_typo_ascender(0), 0);
+    return 0;
+}
+
+# ── C) older versions and short tables ─────────────────────────
+fn t_short(): i64 {
+    g_group = "C short";
+    # version 0 ends at 78: sxHeight and sCapHeight are not in it
+    opts_reset();
+    o_ver = 0;
+    check(openf() != 0, 1);
+    check(rekha_os2_version(g_f), 0);
+    check(rekha_win_descent(g_f), 300);
+    check(rekha_x_height(g_f), 0);
+    check(rekha_cap_height(g_f), 0);
+    # version 1 ends at 86, one field short of sxHeight
+    opts_reset();
+    o_ver = 1;
+    check(openf() != 0, 1);
+    check(rekha_x_height(g_f), 0);
+    check(rekha_win_ascent(g_f), 900);
+    # ⛔ A VERSION AND A LENGTH THAT DISAGREE. The table says 4 and is 80 bytes long. rekha gates on
+    # the LENGTH, so usWinAscent (at 74) reads and usWinDescent (at 76, needing 78) does not — the
+    # version number is not evidence about how many bytes are there.
+    opts_reset();
+    o_ver = 4;
+    o_len = 80;
+    check(openf() != 0, 1);
+    check(rekha_os2_version(g_f), 4);
+    check(rekha_typo_ascender(g_f), 750);
+    check(rekha_win_ascent(g_f), 900);
+    check(rekha_win_descent(g_f), 300);
+    check(rekha_x_height(g_f), 0);
+    # below the 78-byte minimum the table is not cached at all
+    opts_reset();
+    o_ver = 4;
+    o_len = 70;
+    check(openf() != 0, 1);
+    check(rekha_os2_version(g_f), 0 - 1);
+    check(rekha_typo_ascender(g_f), 0);
+    return 0;
+}
+
+# ── D) MVAR moves the OS/2 fields, and only those ─────────────────────
+fn t_var(): i64 {
+    g_group = "D varied";
+    opts_reset();
+    o_nofvar = 0;
+    o_nomvar = 0;
+    check(openf() != 0, 1);
+    check(rekha_var_axis_count(g_f), 1);
+    # at the default every scalar is zero
+    check(rekha_typo_ascender(g_f), 750);
+    check(rekha_x_height(g_f), 500);
+    # ⭐ at the axis maximum every tag lands on the field the SPEC names — and hhea, which has no
+    # tag, does not move. This is the check 0.6.0 would have failed.
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_typo_ascender(g_f), 780);                # 750 + 30
+    check(rekha_typo_descender(g_f), 0 - 270);           # -250 - 20
+    check(rekha_typo_line_gap(g_f), 10);                 # 0 + 10
+    check(rekha_win_ascent(g_f), 940);                   # 900 + 40
+    check(rekha_win_descent(g_f), 315);                  # 300 + 15
+    check(rekha_x_height(g_f), 525);                     # 500 + 25
+    check(rekha_cap_height(g_f), 735);                   # 700 + 35
+    check(rekha_strikeout_size(g_f), 55);                # 50 + 5
+    check(rekha_strikeout_position(g_f), 272);           # 260 + 12
+    check(rekha_ascender(g_f), 800);
+    check(rekha_descender(g_f), 0 - 200);
+    check(rekha_line_gap(g_f), 90);
+    # halfway up the tent, rounded half up
+    check(rekha_var_set_axis(g_f, 0, 650 * 65536), 1);
+    check(rekha_typo_ascender(g_f), 765);                # 750 + 15
+    check(rekha_x_height(g_f), 513);                     # 500 + 12.5 -> 513
+    check(rekha_var_reset(g_f), 1);
+    check(rekha_typo_ascender(g_f), 750);
+    check(rekha_x_height(g_f), 500);
+    # ⚠ a field whose table is too short to hold it does not vary either — there is nothing to add
+    # the delta to, and inventing the base from the delta alone would be a guess.
+    opts_reset();
+    o_nofvar = 0;
+    o_nomvar = 0;
+    o_ver = 0;
+    check(openf() != 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_x_height(g_f), 0);
+    check(rekha_typo_ascender(g_f), 780);
+    return 0;
+}
+
+# ── E) every byte of OS/2 and MVAR, flipped ───────────────────────
+fn t_guard(): i64 {
+    g_group = "E guard";
+    opts_reset();
+    o_nofvar = 0;
+    o_nomvar = 0;
+    build();
+    var lo = g_os2;
+    var hi = g_mvar + g_mvarlen;
+    var bad = 0;
+    var at = lo;
+    while (at < hi) {
+        var bit = 0;
+        while (bit < 8) {
+            var orig = load8(FB + at);
+            store8(FB + at, orig ^ (1 << bit));
+            var f = rekha_font_open(FB, g_flen);
+            if (f != 0) {
+                rekha_var_set_axis(f, 0, 900 * 65536);
+                if (rekha_typo_ascender(f) > 1100000) { bad = bad + 1; }
+                if (rekha_typo_ascender(f) < 0 - 1100000) { bad = bad + 1; }
+                if (rekha_x_height(f) > 1100000) { bad = bad + 1; }
+                if (rekha_win_ascent(f) > 1100000) { bad = bad + 1; }
+                if (rekha_strikeout_size(f) < 0 - 1100000) { bad = bad + 1; }
+                if (rekha_weight_class(f) > 65535) { bad = bad + 1; }
+                # ⛔ hhea must be untouchable from here whatever these bytes say
+                if (rekha_ascender(f) != 800) { bad = bad + 1; }
+                if (rekha_line_gap(f) != 90) { bad = bad + 1; }
+            }
+            store8(FB + at, orig);
+            bit = bit + 1;
+        }
+        at = at + 1;
+    }
+    check(bad, 0);
+    g_f = rekha_font_open(FB, g_flen);
+    check(g_f != 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_typo_ascender(g_f), 780);
+    check(rekha_cap_height(g_f), 735);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    FB = alloc(FB_CAP);
+    t_full();
+    t_absent();
+    t_short();
+    t_var();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "os2_test: PASS (version 4, absent, short tables, MVAR deltas, guard; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

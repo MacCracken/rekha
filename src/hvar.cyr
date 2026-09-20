@@ -40,11 +40,28 @@
 
 var REKHA_TAG_HVAR = 0x48564152;   # 'HVAR'
 var REKHA_TAG_MVAR = 0x4D564152;   # 'MVAR'
-# The MVAR tags rekha has a reader for. Every other tag in the table is skipped, not refused: MVAR
-# is a bag of metrics and most of them belong to tables rekha does not read yet.
-var REKHA_MVAR_HASC = 0x68617363;  # 'hasc' — hhea.ascender
-var REKHA_MVAR_HDSC = 0x68647363;  # 'hdsc' — hhea.descender
-var REKHA_MVAR_HLGP = 0x686C6770;  # 'hlgp' — hhea.lineGap
+# ⛔ THE TAGS TARGET OS/2, NOT hhea, AND 0.6.0 HAD THIS WRONG. `hasc` / `hdsc` / `hlgp` are
+# OS/2.sTypoAscender / sTypoDescender / sTypoLineGap; MVAR has NO tag for hhea's ascender,
+# descender or lineGap — only for its three CARET fields. 0.6.0 added the deltas to hhea, and the
+# differential did not catch it because the fixture set OS/2's sTypo values EQUAL to hhea's, which
+# is also the case fontTools' own `verticalMetricsKeptInSync` heuristic papers over. 0.6.1 reads
+# OS/2 (src/os2.cyr) and puts every delta on the field the spec names.
+# ⚠ rekha does NOT copy fontTools' sync heuristic. fontTools propagates an OS/2 sTypo change back
+# to hhea when the two started equal, "because it is common in fonts to have the hhea metrics be
+# equal for compat reasons". That is a guess about intent, and rekha reports what the tables say:
+# hhea has no MVAR tag, so `rekha_ascender` does not move. A consumer that wants the varying line
+# box reads the typo metrics, which is what `rekha_use_typo_metrics` exists to tell it.
+# Every tag rekha has no reader for is SKIPPED, not refused: MVAR is a bag of metrics and most of
+# them belong to tables rekha still does not read.
+var REKHA_MVAR_HASC = 0x68617363;  # 'hasc' — OS/2.sTypoAscender
+var REKHA_MVAR_HDSC = 0x68647363;  # 'hdsc' — OS/2.sTypoDescender
+var REKHA_MVAR_HLGP = 0x686C6770;  # 'hlgp' — OS/2.sTypoLineGap
+var REKHA_MVAR_HCLA = 0x68636C61;  # 'hcla' — OS/2.usWinAscent
+var REKHA_MVAR_HCLD = 0x68636C64;  # 'hcld' — OS/2.usWinDescent
+var REKHA_MVAR_XHGT = 0x78686774;  # 'xhgt' — OS/2.sxHeight
+var REKHA_MVAR_CPHT = 0x63706874;  # 'cpht' — OS/2.sCapHeight
+var REKHA_MVAR_STRS = 0x73747273;  # 'strs' — OS/2.yStrikeoutSize
+var REKHA_MVAR_STRO = 0x7374726F;  # 'stro' — OS/2.yStrikeoutPosition
 # ⛔ HOW FAR A METRIC MAY MOVE, in design units. Nothing in the format bounds a delta: LONG_WORDS
 # makes each one a signed 32-bit value, and regionIndexCount is a u16, so a crafted store can ask
 # for a delta of 2^31 x 65535 — which both overflows the 16.16 accumulator and, short of that,

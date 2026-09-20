@@ -68,3 +68,6 @@ include "src/gvar.cyr"
 # font-wide line box, both over var.cyr's region scalars. It follows var.cyr for those, and
 # sfnt.cyr's advance and hhea readers call forward into it.
 include "src/hvar.cyr"
+# os2.cyr reads the metrics a font INTENDS, each field taking its MVAR delta, so it follows
+# hvar.cyr. Nothing calls into it: its accessors are leaves of the public surface.
+include "src/os2.cyr"

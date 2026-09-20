@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.6.0**.
+> **Last updated:** 2026-09-20, at **0.6.1**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -17,8 +17,8 @@ surface, but no remaining place where a consumer has to reach around rekha to a 
 holds, and no published name that does nothing.
 
 ⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
-is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`**, so the
-tables rekha resolves are now fourteen.
+is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`** and **0.6.1
+`OS/2`**, so the tables rekha resolves are now fifteen.
 
 | milestone | what it closes |
 |---|---|
@@ -36,21 +36,9 @@ explicit **non-goal**.
 ## 0.6.x — the font's own answers
 
 The tables rekha **transports and never reads**. The set it DOES resolve is fourteen: `head`,
-`maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, and — as of
-0.6.0 — `HVAR` and `MVAR`. Every other OpenType tag in the codebase lives only inside WOFF2's
+`maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, `HVAR`,
+`MVAR` and `OS/2`. Every other OpenType tag in the codebase lives only inside WOFF2's
 known-tag strings at `src/woff2.cyr:100-102`: lookup bytes, not readers.
-
-### `OS/2` — the metrics a font *intends*
-
-`grep -rn 'OS/2' src/ | grep -v woff2` → nothing. Today `rekha_ascender` / `rekha_descender` /
-`rekha_line_gap` come from `hhea` alone (`src/sfnt.cyr:437-451`). Unread: `sTypoAscender` /
-`Descender` / `LineGap`, `usWinAscent` / `Descent`, `fsSelection` bit 7 (**USE_TYPO_METRICS** — the
-bit that says which pair the font means), `sxHeight`, `sCapHeight`, `usWeightClass`,
-`usWidthClass`.
-
-⚠ This is the same hole `hmtx` left before 0.3.6, and it has the same consequence: the consumer
-invents the number. `dhancha` hard-coded `advf = (h * 6) / 10` for advances until rekha read
-`hmtx`; a UI toolkit with no `sxHeight` will do it again for optical alignment.
 
 ### `name` — a font cannot be asked what it is called
 
@@ -71,11 +59,13 @@ Condensed" and select one, because the `InstanceRecords` are skipped, and cannot
 an axis or an instance, because `STAT` — which OpenType makes **required** for a variable font — is
 unread and both tables' nameIDs need the `name` reader above. The `fvar` half is a short walk once `name` exists.
 
-### `post` — underline, strikeout, glyph names
+### `post` — underline, and glyph names
 
 `grep -rn '0x706F7374' src/` → nothing. `underlinePosition` / `underlineThickness` and
 `italicAngle` are in a 32-byte v3 header; glyph names need format 2.0. rekha already resolves glyph
 names inside CFF faces for `seac` (0.4.7) and exposes none of it.
+⚠ Its two underline fields are the **only** MVAR tags left with nowhere to land now that 0.6.1
+reads OS/2 — `unds` and `undo`. The strikeout pair they sit beside already varies.
 
 ### `kern`, and GPOS pair positioning only
 

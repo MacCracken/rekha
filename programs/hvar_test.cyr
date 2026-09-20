@@ -420,24 +420,33 @@ fn t_mvar(): i64 {
     g_group = "E mvar";
     opts_reset();
     check(openf() != 0, 1);
+    # ⛔ hhea DOES NOT MOVE, AND 0.6.0 HAD THIS WRONG. `hasc` / `hdsc` / `hlgp` target
+    # OS/2.sTypoAscender / sTypoDescender / sTypoLineGap; MVAR has no tag for hhea's ascender,
+    # descender or lineGap at all, only for its three caret fields. 0.6.0 added the deltas to hhea
+    # and this group asserted the result — the font here has no OS/2, so there is nothing for the
+    # deltas to land on and the line box stands. programs/os2_test.cyr is where they land.
     check(wght(900), 1);
-    linebox(830, 0 - 220, 100);
-    check(wght(650), 1);
-    linebox(815, 0 - 210, 95);
-    check(rekha_var_reset(g_f), 1);
     linebox(800, 0 - 200, 90);
-    # the accessor, and ⚠ a tag with no reader is SKIPPED rather than refused
+    check(wght(650), 1);
+    linebox(800, 0 - 200, 90);
+    # the store itself still resolves every one of them, which is what the readers are built on
     check(wght(900), 1);
-    check(rekha_mvar_delta(g_f, 0x68617363), 30);
+    check(rekha_mvar_delta(g_f, 0x68617363), 30);        # 'hasc'
+    check(rekha_mvar_delta(g_f, 0x68647363), 0 - 20);    # 'hdsc'
+    check(rekha_mvar_delta(g_f, 0x686C6770), 10);        # 'hlgp'
+    # ⚠ a tag with no reader is SKIPPED rather than refused
     check(rekha_mvar_delta(g_f, 0x7A7A7A7A), 0);
     check(rekha_mvar_delta(0, 0x68617363), 0);
-    # with no MVAR the line box is hhea's, whatever the axis says
+    # and with no OS/2 there is nothing for them to vary
+    check(rekha_os2_version(g_f), 0 - 1);
+    check(rekha_typo_ascender(g_f), 0);
+    # with no MVAR at all the store is gone but HVAR is untouched
     opts_reset();
     o_nomvar = 1;
     check(openf() != 0, 1);
     check(wght(900), 1);
-    linebox(800, 0 - 200, 90);
-    adv4(600, 800, 1000, 1200);                          # ...and HVAR still works
+    check(rekha_mvar_delta(g_f, 0x68617363), 0);
+    adv4(600, 800, 1000, 1200);
     return 0;
 }
 
@@ -450,7 +459,7 @@ fn t_refuse(): i64 {
     check(openf() != 0, 1);
     check(wght(900), 1);
     adv4(500, 600, 700, 800);
-    linebox(830, 0 - 220, 100);                          # ...and MVAR is unaffected
+    check(rekha_mvar_delta(g_f, 0x68617363), 30);        # ...and MVAR is unaffected
 
     # a majorVersion rekha does not take
     opts_reset();
@@ -492,7 +501,7 @@ fn t_refuse(): i64 {
     o_mver = 2;
     check(openf() != 0, 1);
     check(wght(900), 1);
-    linebox(800, 0 - 200, 90);
+    check(rekha_mvar_delta(g_f, 0x68617363), 0);
     adv4(600, 800, 1000, 1200);                          # ...and HVAR is unaffected
 
     # an MVAR valueRecordSize below the eight bytes a record needs
@@ -500,15 +509,15 @@ fn t_refuse(): i64 {
     o_mrecsz = 6;
     check(openf() != 0, 1);
     check(wght(900), 1);
-    linebox(800, 0 - 200, 90);
+    check(rekha_mvar_delta(g_f, 0x68617363), 0);
 
     # an MVAR record naming an outer index that is not in the store
     opts_reset();
     o_badouter = 1;
     check(openf() != 0, 1);
     check(wght(900), 1);
-    check(rekha_ascender(g_f), 800);                     # that record refuses
-    check(rekha_descender(g_f), 0 - 220);                # the others still resolve
+    check(rekha_mvar_delta(g_f, 0x68617363), 0);         # that record refuses
+    check(rekha_mvar_delta(g_f, 0x68647363), 0 - 20);    # the others still resolve
     return 0;
 }
 
@@ -555,7 +564,7 @@ fn t_guard(): i64 {
     g_f = rekha_font_open(FB, g_flen);
     check(wght(900), 1);
     adv4(600, 800, 1000, 1200);
-    linebox(830, 0 - 220, 100);
+    check(rekha_mvar_delta(g_f, 0x68617363), 30);
     return 0;
 }
 

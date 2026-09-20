@@ -153,6 +153,11 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
 #                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
 #                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +448 os2  +456 os2_end   (i64 — the OS/2 table, 0 = absent or under its 78-byte minimum. What
+#                      the designer INTENDED: the sTypo and usWin vertical pairs, USE_TYPO_METRICS,
+#                      x-height, cap-height, weight and width class, the strikeout rule. Every
+#                      field re-checks the extent it needs, so a short table loses its tail rather
+#                      than the whole reader. 0.6.1.)
 #   +416 hvar  +424 hvar_end · +432 mvar  +440 mvar_end (i64 — the metrics-variation tables, 0 =
 #                      absent or refused at open. HVAR varies a glyph's ADVANCE, MVAR the font-wide
 #                      line box; both are read on demand, since one query touches one delta row.
@@ -185,7 +190,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 448;
+var REKHA_FONT_SIZE = 464;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -449,21 +454,21 @@ fn rekha_ascender(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
-    return rekha_rd_i16(load64(font), hhea + 4) + rekha_mvar_delta(font, REKHA_MVAR_HASC);
+    return rekha_rd_i16(load64(font), hhea + 4);
 }
 
 fn rekha_descender(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
-    return rekha_rd_i16(load64(font), hhea + 6) + rekha_mvar_delta(font, REKHA_MVAR_HDSC);
+    return rekha_rd_i16(load64(font), hhea + 6);
 }
 
 fn rekha_line_gap(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
-    return rekha_rd_i16(load64(font), hhea + 8) + rekha_mvar_delta(font, REKHA_MVAR_HLGP);
+    return rekha_rd_i16(load64(font), hhea + 8);
 }
 
 # @public — the advance width of glyph `gid`, in font DESIGN UNITS (unitsPerEm space).
