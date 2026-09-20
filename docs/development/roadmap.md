@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.6.5**.
+> **Last updated:** 2026-09-20, at **0.6.6**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -18,8 +18,8 @@ holds, and no published name that does nothing.
 
 ⭐ **0.5.x is closed** (CHANGELOG 0.5.0 and 0.5.1): the conformance milestone that opened this file
 is done, and what remains is surface, not correctness. **0.6.0 shipped `HVAR` / `MVAR`**, **0.6.1
-`OS/2`**, **0.6.2 `name`**, **0.6.3 `STAT`** with `fvar`'s named instances **0.6.4 `post`** and **0.6.5 `kern`**, so the
-tables rekha resolves are now nineteen and **two** of this milestone's items are left. ⭐ Every tag
+`OS/2`**, **0.6.2 `name`**, **0.6.3 `STAT`** with `fvar`'s named instances **0.6.4 `post`**, **0.6.5 `kern`** and **0.6.6 GPOS**, so the
+tables rekha resolves are now twenty and **one** of this milestone's items is left. ⭐ Every tag
 in MVAR that names a table rekha reads now lands on it; the four `vhea` ones are what remain.
 
 | milestone | what it closes |
@@ -39,27 +39,8 @@ explicit **non-goal**.
 
 The tables rekha **transports and never reads**. The set it DOES resolve is fourteen: `head`,
 `maxp`, `loca`, `glyf`, `hhea`, `hmtx`, `cmap`, `CFF `, `CFF2`, `fvar`, `avar`, `gvar`, `HVAR`,
-`MVAR`, `OS/2`, `name`, `STAT`, `post` and `kern`. Every other OpenType tag in the codebase lives only inside WOFF2's
+`MVAR`, `OS/2`, `name`, `STAT`, `post`, `kern` and `GPOS`. Every other OpenType tag in the codebase lives only inside WOFF2's
 known-tag strings at `src/woff2.cyr:100-102`: lookup bytes, not readers.
-
-### GPOS pair positioning
-
-⭐ **0.6.5 shipped the legacy `kern` table** — 163,183 pairs identical to fontTools across all 16
-`kern` fonts of the dev host. What is left is where a modern font actually keeps its kerning.
-
-`grep -rn 'GPOS' src/` → only the WOFF2 tag strings. Reaching a kerning pair through GPOS means the
-script / language / feature walk to find `kern`'s lookups, the LookupList, extension lookups
-(type 9), **Coverage** tables in both formats, **ClassDef** in both, `PairPos` formats 1 and 2, and
-ValueRecords whose size is a bitfield. It is the largest single item left on this list and it is
-its own release.
-
-⛔ **The split is still deliberate.** Pair positioning is METRICS, which rekha already owns.
-Everything else in GPOS — marks, cursive attachment, contextual chains — is a positioning engine
-and belongs to the shaping library named under *Out of scope*.
-
-⚠ Until it lands, `rekha_kern_pair` answers 0 for a GPOS-only font. That is the unkerned spacing
-rekha has always given, not a wrong number — but it is silent, and most modern faces are in that
-class.
 
 ### Vertical metrics — `vhea`, `vmtx`, `VORG`
 
@@ -157,6 +138,8 @@ a milestone when a consumer asks.
 | **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if the vertical-metrics item lands: the API shape would need a vertical twin. |
 | **`gvar` phantom-point advances are decoded and discarded** | `src/gvar.cyr:23` | A TrueType variable font with `gvar` and no HVAR varies its advances through the four phantom points per glyph. Honouring them puts a full glyph decode behind an advance query measured at 47 ns, so the honest shape is a separate resolver, not a change to the O(1) reader. |
 | **HVAR's lsb and rsb maps are read past** | `src/hvar.cyr`, the header note | rekha publishes no side-bearing accessor for them to vary, and a glyph's real bearing already follows its outline. Wants the accessor first. |
+| **GPOS kerning does not follow the axes** | `src/gpos.cyr`, the header note | A GPOS ValueRecord can carry a Device table or a VariationIndex into GDEF's ItemVariationStore. The store reader exists (`rekha_ivs_delta`, 0.6.0); GDEF is what is missing, so a variable font's GPOS kerning is read at its default. |
+| **GPOS script and language selection** | `src/gpos.cyr`, the header note | rekha takes the union of every `kern` feature's lookups. Doing it properly needs a script and a language on the API, which is a bigger question than the walk. |
 | **`kern` format 2** | `src/kern.cyr`, the skip list | The two-dimensional class array. Rare, and a font carrying one alongside a format 0 still kerns from the format 0; none of the 16 host `kern` fonts has one rekha needed. |
 | **`post` glyph names** | `src/post.cyr`, the header note | Format 2.0's per-glyph name index, and the 258-name Macintosh standard order it indexes into — a table the size of everything else in that file. Glyph names serve tooling (PDF export, a debugger naming the glyph that failed); nothing rekha draws depends on one. |
 | **STAT style-name synthesis** | `src/stat.cyr`, the header note | rekha reads every field and joins none of them: which values apply, the `axisOrdering` sort, dropping the elidable names. Deliberately the consumer's, like `rekha_use_typo_metrics` — but if two consumers write the same loop it belongs here after all. |

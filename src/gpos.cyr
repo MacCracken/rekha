@@ -1,0 +1,366 @@
+# @internal — GPOS pair positioning: where a modern font keeps its kerning (0.6.6).
+#
+# gpos.cyr — 0.6.5 read the legacy `kern` table, and said plainly that a face with GPOS alone is
+# normal and answered 0 for one. This is that: the `kern` FEATURE's lookups, the two `PairPos`
+# formats, Coverage and ClassDef in both of their formats, and the extension wrapper large fonts
+# use to reach past a 16-bit offset.
+#
+# ⛔ PAIR POSITIONING AND NOTHING ELSE. GPOS also carries mark attachment, cursive joining and
+# contextual chains; those are a positioning ENGINE working over a glyph run, and they belong to a
+# shaping library — a committed non-goal, docs/development/roadmap.md. Lookup types other than 2
+# (and 9 wrapping a 2) are skipped, not refused: a font is normal for having them.
+#
+# What it takes to reach a pair, and every step is a bounds check:
+#   GPOS: major u16 (= 1) · minor u16 · scriptList Offset16 · featureList Offset16 ·
+#     lookupList Offset16 · (minor 1) featureVariations Offset32
+#   FeatureList: featureCount u16 · FeatureRecord[]: featureTag u32 · feature Offset16
+#     Feature: featureParams Offset16 · lookupIndexCount u16 · lookupListIndices u16[]
+#   LookupList: lookupCount u16 · lookup Offset16[]
+#     Lookup: lookupType u16 · lookupFlag u16 · subTableCount u16 · subtable Offset16[]
+#   ExtensionPos (type 9): posFormat u16 (= 1) · extensionLookupType u16 · extension Offset32
+#   PairPos 1: posFormat · coverage Offset16 · valueFormat1 u16 · valueFormat2 u16 ·
+#     pairSetCount u16 · pairSet Offset16[]  ·  PairSet: pairValueCount u16 · then records of
+#     secondGlyph u16 + the two value records, SORTED by secondGlyph
+#   PairPos 2: posFormat · coverage · valueFormat1 · valueFormat2 · classDef1 Offset16 ·
+#     classDef2 Offset16 · class1Count u16 · class2Count u16 · then a class1Count x class2Count
+#     grid of value-record pairs
+#   ⛔ A VALUE RECORD HAS NO FIXED SIZE. valueFormat is a bitfield and the record holds one i16 per
+#   set bit, in bit order, so XAdvance sits at 2 x popcount(valueFormat & 0x0003) and is absent
+#   when bit 2 is clear. Reading it at a fixed offset is how a font with Y placement gets its
+#   kerning read out of the wrong field.
+#
+# ⚠ WHAT rekha DOES NOT DO HERE, and each is a deliberate line:
+#   - ⛔ THE SCRIPT AND LANGUAGE WALK. rekha scans the FeatureList for every `kern` feature and
+#     takes the UNION of their lookups, deduplicated. A font that kerns differently per script gets
+#     all of it. Doing it properly needs a script and language on the API, and rekha's kerning
+#     question is `(left, right)` with no run and no language around it.
+#   - lookupFlag's ignore bits (marks, base glyphs, ligatures). They say which glyphs a SHAPER
+#     skips while walking a run; a pairwise query has no run to skip in.
+#   - Device tables and VariationIndex values, so a GPOS kern does not follow the axes. The
+#     ItemVariationStore reader for it already exists (src/hvar.cyr); what is missing is GDEF.
+#     docs/development/roadmap.md pins it.
+#
+# ⚠ ALLOCATION. The `kern` feature's lookups are resolved ONCE, on the first query, into one
+# sd_alloc of REKHA_GPOS_MAXLOOKUP x 8 bytes — the same lazy shape `rekha_var_set_axis` and gvar's
+# scratch use, so `rekha_font_open` still costs exactly REKHA_FONT_SIZE and a font nobody asks
+# about kerning never pays.
+
+var REKHA_TAG_GPOS = 0x47504F53;   # 'GPOS'
+var REKHA_TAG_KERN_FEAT = 0x6B65726E;   # 'kern', as a feature tag
+# Deduplicated lookups behind every `kern` feature in one font. Real fonts use one or two.
+var REKHA_GPOS_MAXLOOKUP = 64;
+
+fn rekha_gpos_resolve(f): i64 {
+    store64(f + 576, 0);
+    store64(f + 584, 0);
+    store64(f + 592, 0);
+    store64(f + 600, 0 - 1);                             # -1 = the lookups are not resolved yet
+    var c: i64[1];
+    var t = rekha_find_table_len(f, REKHA_TAG_GPOS, &c);
+    if (t == 0) { return 0; }
+    var end = t + load64(&c);
+    if (t + 10 > end) { return 0; }
+    var buf = load64(f);
+    if (rekha_rd_u16(buf, t) != 1) { return 0; }
+    store64(f + 576, t);
+    store64(f + 584, end);
+    return 1;
+}
+
+# 2 x the number of set bits in the low byte of a valueFormat: the record's size in bytes.
+fn rekha_gpos_vlen(vf): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < 8) {
+        if ((vf >> i & 1) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n * 2;
+}
+
+# The XAdvance of a value record at `at`, or 0 when the format does not carry one.
+fn rekha_gpos_xadv(font, at, vf, end): i64 {
+    if ((vf & 4) == 0) { return 0; }
+    var off = 0;
+    if ((vf & 1) != 0) { off = off + 2; }
+    if ((vf & 2) != 0) { off = off + 2; }
+    if (at + off + 2 > end) { return 0; }
+    return rekha_rd_i16(load64(font), at + off);
+}
+
+# The coverage index of `g` in the Coverage table at `cov`, or -1.
+fn rekha_gpos_coverage(font, cov, g, end): i64 {
+    var buf = load64(font);
+    if (cov + 4 > end) { return 0 - 1; }
+    var fmt = rekha_rd_u16(buf, cov);
+    var n = rekha_rd_u16(buf, cov + 2);
+    if (fmt == 1) {
+        if (cov + 4 + n * 2 > end) { return 0 - 1; }
+        var lo = 0;
+        var hi = n - 1;
+        while (lo <= hi) {
+            var mid = lo + (hi - lo) / 2;
+            var v = rekha_rd_u16(buf, cov + 4 + mid * 2);
+            if (v == g) { return mid; }
+            if (v < g) {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return 0 - 1;
+    }
+    if (fmt != 2) { return 0 - 1; }
+    if (cov + 4 + n * 6 > end) { return 0 - 1; }
+    var lo2 = 0;
+    var hi2 = n - 1;
+    while (lo2 <= hi2) {
+        var mid2 = lo2 + (hi2 - lo2) / 2;
+        var r = cov + 4 + mid2 * 6;
+        var s = rekha_rd_u16(buf, r);
+        var e = rekha_rd_u16(buf, r + 2);
+        if (g < s) {
+            hi2 = mid2 - 1;
+        } else {
+            if (g > e) {
+                lo2 = mid2 + 1;
+            } else {
+                return rekha_rd_u16(buf, r + 4) + g - s;
+            }
+        }
+    }
+    return 0 - 1;
+}
+
+# The class of `g` in the ClassDef at `cd`. ⛔ 0 is a REAL class — "everything not listed" — and
+# PairPos format 2 has a row and a column for it, so an unlisted glyph is class 0 and not a miss.
+fn rekha_gpos_class(font, cd, g, end): i64 {
+    var buf = load64(font);
+    if (cd + 4 > end) { return 0; }
+    var fmt = rekha_rd_u16(buf, cd);
+    if (fmt == 1) {
+        if (cd + 6 > end) { return 0; }
+        var start = rekha_rd_u16(buf, cd + 2);
+        var n = rekha_rd_u16(buf, cd + 4);
+        if (cd + 6 + n * 2 > end) { return 0; }
+        if (g < start) { return 0; }
+        if (g >= start + n) { return 0; }
+        return rekha_rd_u16(buf, cd + 6 + (g - start) * 2);
+    }
+    if (fmt != 2) { return 0; }
+    var nr = rekha_rd_u16(buf, cd + 2);
+    if (cd + 4 + nr * 6 > end) { return 0; }
+    var lo = 0;
+    var hi = nr - 1;
+    while (lo <= hi) {
+        var mid = lo + (hi - lo) / 2;
+        var r = cd + 4 + mid * 6;
+        var s = rekha_rd_u16(buf, r);
+        var e = rekha_rd_u16(buf, r + 2);
+        if (g < s) {
+            hi = mid - 1;
+        } else {
+            if (g > e) {
+                lo = mid + 1;
+            } else {
+                return rekha_rd_u16(buf, r + 4);
+            }
+        }
+    }
+    return 0;
+}
+
+# One PairPos subtable at `sub`. Returns 1 and stores the first glyph's XAdvance in `out` when the
+# pair matches here, else 0.
+fn rekha_gpos_pairpos(font, sub, l, r, end, out): i64 {
+    store64(out, 0);
+    var buf = load64(font);
+    if (sub + 10 > end) { return 0; }
+    var fmt = rekha_rd_u16(buf, sub);
+    var cov = sub + rekha_rd_u16(buf, sub + 2);
+    if (cov < sub) { return 0; }
+    var vf1 = rekha_rd_u16(buf, sub + 4);
+    var vf2 = rekha_rd_u16(buf, sub + 6);
+    var v1 = rekha_gpos_vlen(vf1);
+    var v2 = rekha_gpos_vlen(vf2);
+    var ci = rekha_gpos_coverage(font, cov, l, end);
+    if (ci < 0) { return 0; }
+
+    if (fmt == 1) {
+        var nps = rekha_rd_u16(buf, sub + 8);
+        if (ci >= nps) { return 0; }
+        if (sub + 10 + nps * 2 > end) { return 0; }
+        var ps = sub + rekha_rd_u16(buf, sub + 10 + ci * 2);
+        if (ps < sub) { return 0; }
+        if (ps + 2 > end) { return 0; }
+        var n = rekha_rd_u16(buf, ps);
+        var rec = 2 + v1 + v2;
+        if (ps + 2 + n * rec > end) { return 0; }
+        # ⭐ SORTED BY secondGlyph, so this is a binary search and not a scan — a class-less font
+        # puts thousands of records in one PairSet.
+        var lo = 0;
+        var hi = n - 1;
+        while (lo <= hi) {
+            var mid = lo + (hi - lo) / 2;
+            var at = ps + 2 + mid * rec;
+            var g = rekha_rd_u16(buf, at);
+            if (g == r) {
+                store64(out, rekha_gpos_xadv(font, at + 2, vf1, end));
+                return 1;
+            }
+            if (g < r) {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return 0;
+    }
+
+    if (fmt != 2) { return 0; }
+    if (sub + 16 > end) { return 0; }
+    var cd1 = sub + rekha_rd_u16(buf, sub + 8);
+    var cd2 = sub + rekha_rd_u16(buf, sub + 10);
+    if (cd1 < sub || cd2 < sub) { return 0; }
+    var n1 = rekha_rd_u16(buf, sub + 12);
+    var n2 = rekha_rd_u16(buf, sub + 14);
+    var c1 = rekha_gpos_class(font, cd1, l, end);
+    var c2 = rekha_gpos_class(font, cd2, r, end);
+    if (c1 >= n1 || c2 >= n2) { return 0; }
+    var rsz = v1 + v2;
+    if (rsz == 0) { return 0; }
+    if (n1 * n2 > 0) {
+        if (rsz > (end - sub - 16) / (n1 * n2)) { return 0; }
+    }
+    var at2 = sub + 16 + (c1 * n2 + c2) * rsz;
+    if (at2 + rsz > end) { return 0; }
+    store64(out, rekha_gpos_xadv(font, at2, vf1, end));
+    return 1;
+}
+
+# Resolve every `kern` feature's lookups, once, into the font's cache. Returns the count.
+fn rekha_gpos_lookups(font): i64 {
+    var n = load64(font + 600);
+    if (n >= 0) { return n; }
+    store64(font + 600, 0);
+    var t = load64(font + 576);
+    if (t == 0) { return 0; }
+    var end = load64(font + 584);
+    var buf = load64(font);
+    var fl = t + rekha_rd_u16(buf, t + 6);
+    var ll = t + rekha_rd_u16(buf, t + 8);
+    if (fl < t || ll < t) { return 0; }
+    if (fl + 2 > end || ll + 2 > end) { return 0; }
+    var nf = rekha_rd_u16(buf, fl);
+    if (fl + 2 + nf * 6 > end) { return 0; }
+    var nl = rekha_rd_u16(buf, ll);
+    if (ll + 2 + nl * 2 > end) { return 0; }
+    var arr = sd_alloc(REKHA_GPOS_MAXLOOKUP * 8);
+    if (arr == 0) { return 0; }
+    store64(font + 592, arr);
+
+    var cnt = 0;
+    var i = 0;
+    while (i < nf) {
+        var fr = fl + 2 + i * 6;
+        if (rekha_rd_u32(buf, fr) == REKHA_TAG_KERN_FEAT) {
+            var fe = fl + rekha_rd_u16(buf, fr + 4);
+            if (fe >= fl && fe + 4 <= end) {
+                var nli = rekha_rd_u16(buf, fe + 2);
+                if (fe + 4 + nli * 2 <= end) {
+                    var j = 0;
+                    while (j < nli) {
+                        var li = rekha_rd_u16(buf, fe + 4 + j * 2);
+                        if (li < nl) {
+                            var lo = ll + rekha_rd_u16(buf, ll + 2 + li * 2);
+                            # ⛔ DEDUPLICATED: two scripts normally carry two `kern` FeatureRecords
+                            # pointing at the SAME lookups, and applying one twice doubles a kern.
+                            var seen = 0;
+                            var k = 0;
+                            while (k < cnt) {
+                                if (load64(arr + k * 8) == lo) { seen = 1; }
+                                k = k + 1;
+                            }
+                            if (seen == 0 && cnt < REKHA_GPOS_MAXLOOKUP) {
+                                if (lo >= ll && lo + 6 <= end) {
+                                    store64(arr + cnt * 8, lo);
+                                    cnt = cnt + 1;
+                                }
+                            }
+                        }
+                        j = j + 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    store64(font + 600, cnt);
+    return cnt;
+}
+
+# @public — 1 when the font has a GPOS `kern` feature rekha can walk, else 0.
+fn rekha_gpos_kern_present(font): i64 {
+    if (font == 0) { return 0; }
+    if (load64(font + 576) == 0) { return 0; }
+    if (rekha_gpos_lookups(font) < 1) { return 0; }
+    return 1;
+}
+
+# @public — the horizontal kerning adjustment for (l, r) from GPOS alone, in design units.
+# ⛔ Lookups ACCUMULATE — each is a separate pass in a real shaper — while within one lookup the
+# FIRST subtable that matches wins and the rest are not consulted. Getting that backwards either
+# drops a font's kerning or applies it twice.
+fn rekha_gpos_kern_pair(font, l, r): i64 {
+    if (font == 0) { return 0; }
+    if (l < 0 || r < 0) { return 0; }
+    if (l > 65535 || r > 65535) { return 0; }
+    var t = load64(font + 576);
+    if (t == 0) { return 0; }
+    var n = rekha_gpos_lookups(font);
+    if (n < 1) { return 0; }
+    var end = load64(font + 584);
+    var buf = load64(font);
+    var arr = load64(font + 592);
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        var lk = load64(arr + i * 8);
+        var ty = rekha_rd_u16(buf, lk);
+        var ns = rekha_rd_u16(buf, lk + 4);
+        if (lk + 6 + ns * 2 <= end) {
+            var s = 0;
+            var done = 0;
+            while (s < ns) {
+                if (done == 0) {
+                    var sub = lk + rekha_rd_u16(buf, lk + 6 + s * 2);
+                    var ty2 = ty;
+                    if (ty == 9) {
+                        # the extension wrapper: a real type and a 32-bit offset from HERE
+                        if (sub + 8 <= end) {
+                            if (rekha_rd_u16(buf, sub) == 1) {
+                                ty2 = rekha_rd_u16(buf, sub + 2);
+                                var d = rekha_rd_u32(buf, sub + 4);
+                                sub = sub + d;
+                            } else {
+                                ty2 = 0;
+                            }
+                        } else {
+                            ty2 = 0;
+                        }
+                    }
+                    if (ty2 == 2 && sub >= t && sub < end) {
+                        var v: i64[1];
+                        if (rekha_gpos_pairpos(font, sub, l, r, end, &v) != 0) {
+                            total = total + load64(&v);
+                            done = 1;
+                        }
+                    }
+                }
+                s = s + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return total;
+}

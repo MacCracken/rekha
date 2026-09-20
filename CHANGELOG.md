@@ -5,6 +5,77 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.6] - 2026-09-20 — GPOS: where a modern font actually keeps its kerning
+
+0.6.5 read the legacy `kern` table and said plainly that a face with GPOS alone is normal and got
+0 for one. This is that face. **`rekha_kern_pair` now prefers GPOS**, and `rekha_kern_source` says
+which of the two answered.
+
+⭐ **CHECKED AGAINST fontTools ON 60 REAL FONTS** — `scripts/gpos_kern_diff.py`, which for each
+font picks a glyph sample from the PairPos coverages **plus glyphs that are in none of them**, and
+asks both implementations for **every ordered pair** of that sample:
+
+| | |
+|---|---|
+| fonts | **60** |
+| pairs compared | **264,964 — all identical** |
+| of those, carrying a non-zero kern | 41,749; the rest prove the misses |
+| subtables exercised | 93 PairPos format 1, **213 format 2**, 6 behind an extension lookup |
+
+⚠ **What fontTools is the reference for.** It DECOMPILES GPOS — Coverage, ClassDef, PairPos,
+ValueRecords with their bitfield sizing — and that decompiler is a thorough, independent
+implementation of the byte-level parse. It does not decide which lookups a `(left, right)` query
+should consult, so the feature-union / dedup / accumulate rule is rekha's in both columns.
+⛔ A **dev-host** differential, like `scripts/kern_diff.py`: it reads the machine's fonts.
+
+### Added — `src/gpos.cyr`
+
+`rekha_gpos_kern_present`, `rekha_gpos_kern_pair`; and in `src/kern.cyr`, `rekha_kern_source` and
+the renamed `rekha_kern_table_pair` for the legacy table alone.
+
+- **PairPos formats 1 and 2**, **Coverage** formats 1 and 2, **ClassDef** formats 1 and 2, and the
+  **extension** wrapper (lookup type 9) large fonts use to reach past a 16-bit offset. Both the
+  format 1 PairSet and the coverage and class ranges are binary-searched.
+- ⛔ **A VALUE RECORD HAS NO FIXED SIZE.** `valueFormat` is a bitfield and the record holds one i16
+  per set bit, in bit order, so XAdvance sits at `2 x popcount(valueFormat & 3)` and is absent when
+  its own bit is clear. Reading it at a fixed offset is how a font with Y placement gets its
+  kerning read out of the wrong field — group D builds exactly that font.
+- ⛔ **Lookups ACCUMULATE; within one lookup the FIRST matching subtable wins** and the rest are
+  not consulted. Backwards either way drops a font's kerning or applies it twice.
+- ⛔ **The `kern` feature's lookups are DEDUPLICATED.** Two scripts normally carry two
+  FeatureRecords pointing at the same lookups, and not deduplicating doubles every kern in the
+  font.
+- ⛔ **Class 0 is a real class** — "everything not listed" — with its own row and column in a
+  format 2 grid, so an unlisted glyph is class 0 and not a miss.
+- ⛔ **GPOS beats the legacy table, never both.** A face carrying both usually says the same thing
+  twice, for shapers that read only one; adding them would double every pair. HarfBuzz does the
+  same.
+
+### What rekha deliberately does not do here
+
+- ⛔ **The script and language walk.** rekha scans the FeatureList for every `kern` feature and
+  takes the UNION of their lookups. Doing it properly needs a script and a language on the API, and
+  rekha's kerning question is `(left, right)` with no run and no language around it. The suite
+  fills the ScriptList with garbage to prove rekha never reads it.
+- **`lookupFlag`'s ignore bits.** They say which glyphs a SHAPER skips while walking a run; a
+  pairwise query has no run to skip in.
+- **Device tables and VariationIndex values**, so a GPOS kern does not follow the axes. The
+  ItemVariationStore reader for it already exists (`src/hvar.cyr`); GDEF is what is missing, and
+  the roadmap pins it.
+- ⛔ **Pair positioning and nothing else.** Mark attachment, cursive joining and contextual chains
+  are a positioning engine over a glyph run and belong to a shaping library — a committed non-goal.
+  Other lookup types are skipped, not refused: a font is normal for having them.
+
+⚠ **ALLOCATION.** The lookups are resolved ONCE, on the first query, into one `sd_alloc` — the lazy
+shape `rekha_var_set_axis` and gvar's scratch already use — so `rekha_font_open` still costs exactly
+`REKHA_FONT_SIZE` and a font nobody asks about kerning never pays.
+
+`REKHA_FONT_SIZE` **568 -> 608**. ⇒ new `programs/gpos_test.cyr`, **157 checks** on the things a
+corpus cannot isolate: two `kern` features aimed at one lookup, a valueFormat that puts XAdvance
+third, two subtables in one lookup where only the first may apply, a GPOS and a legacy table that
+disagree, a garbage ScriptList, a lookup type that must be skipped, and a bit-flip sweep over the
+whole table that runs 64 pair queries per mutant.
+
 ## [0.6.5] - 2026-09-20 — `kern`: pairs stop being placed at their raw advance
 
 rekha owns advance widths, so rekha is what decides inter-glyph spacing — and through 0.6.4 every

@@ -34,6 +34,7 @@ modules = [
     "src/name.cyr",
     "src/stat.cyr",
     "src/post.cyr",
+    "src/gpos.cyr",
     "src/kern.cyr",
 ]
 
@@ -62,6 +63,7 @@ modules = [
     "src/name.cyr",
     "src/stat.cyr",
     "src/post.cyr",
+    "src/gpos.cyr",
     "src/kern.cyr",
     "src/woff.cyr",
     "src/woff2.cyr",

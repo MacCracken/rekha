@@ -640,8 +640,9 @@ fn t_alloc(buf): i64 {
     # 416 -> 448 in 0.6.0 for HVAR and MVAR and their extents, 448 -> 464 in 0.6.1 for OS/2,
     # 464 -> 496 in 0.6.2 for the `name` table, its count and its string storage, 496 -> 536 in
     # 0.6.3 for fvar's named-instance array and STAT, 536 -> 552 in 0.6.4 for `post`,
-    # 552 -> 568 in 0.6.5 for the legacy `kern` table.
-    check(REKHA_FONT_SIZE, 568);
+    # 552 -> 568 in 0.6.5 for the legacy `kern` table,
+    # 568 -> 608 in 0.6.6 for GPOS and its lazily resolved kern lookups.
+    check(REKHA_FONT_SIZE, 608);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

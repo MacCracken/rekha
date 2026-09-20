@@ -82,4 +82,7 @@ include "src/stat.cyr"
 include "src/post.cyr"
 # kern.cyr is the legacy pair-kerning table. It calls cmap.cyr for its character-level twin, so
 # it follows cmap.cyr; nothing calls into it.
+# gpos.cyr is GPOS pair positioning, which kern.cyr prefers over the legacy table, so it comes
+# FIRST of the two.
+include "src/gpos.cyr"
 include "src/kern.cyr"

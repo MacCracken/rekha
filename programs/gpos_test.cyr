@@ -1,0 +1,653 @@
+# programs/gpos_test.cyr — RUN test for GPOS pair positioning (src/gpos.cyr).
+#
+# ⭐ THE FONT IS BUILT HERE — a GPOS with a ScriptList, a FeatureList and a LookupList, and every
+# piece switchable: PairPos format 1 or 2, Coverage format 1 or 2, ClassDef format 1 or 2, a
+# valueFormat with or without the fields that sit BEFORE XAdvance, an extension wrapper, a second
+# `kern` feature aimed at the same lookup, and a lookup type rekha must skip.
+#
+# ⭐ WHAT THIS SUITE IS FOR, given that scripts/gpos_kern_diff.py already compares 264,964 pairs
+# across 60 real fonts against fontTools: the things a corpus cannot isolate. A real font does not
+# come with two `kern` features aimed at one lookup so you can see whether the kern doubles, or
+# with a valueFormat that puts XAdvance third so you can see whether it is read from the right
+# offset, or with a GPOS and a legacy `kern` table that disagree so you can see which one wins.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
+
+include "programs/prelude.cyr"
+
+var g_fails = 0;
+var g_n = 0;
+var g_group = "";
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    var m = "gpos_test: check failed at #";
+    syscall(1, 2, m, strlen(m));
+    fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+var FB = 0;
+var FB_CAP = 32768;
+var NG = 64;
+
+fn pu16(off, v): i64 {
+    store8(FB + off, (v >> 8) & 255);
+    store8(FB + off + 1, v & 255);
+    return 0;
+}
+
+fn pu32(off, v): i64 {
+    pu16(off, (v >> 16) & 65535);
+    pu16(off + 2, v & 65535);
+    return 0;
+}
+
+# ── build options ────────────────────────────────
+var o_nogpos = 0;
+var o_ver = 1;          # the GPOS majorVersion
+var o_fmt = 1;          # PairPos format for the first lookup
+var o_covfmt = 1;       # Coverage format
+var o_cdfmt = 1;        # ClassDef format
+var o_vf1 = 4;          # valueFormat1: 4 = XAdvance alone, 7 = X/Y placement then XAdvance
+var o_ext = 0;          # wrap the first lookup's subtable in an extension (type 9)
+var o_dupfeat = 0;      # a SECOND `kern` feature aimed at the same lookup
+var o_otherfeat = 0;    # a `liga` feature aimed at a second lookup, which must be ignored
+var o_twolook = 0;      # a second `kern` lookup, so values accumulate
+var o_twosub = 0;       # two subtables in the first lookup, so the FIRST match must win
+var o_badtype = 0;      # make the first lookup type 4, which rekha skips
+var o_legacy = 0;       # also emit a legacy `kern` table, which GPOS must beat
+var o_junkscript = 0;   # fill the ScriptList with garbage: rekha must not care
+
+var g_gpos = 0;
+var g_gposlen = 0;
+var g_flen = 0;
+
+# The value record for `kern`, laid out per o_vf1. Returns its byte length.
+fn put_val(at, kern): i64 {
+    var p = at;
+    if ((o_vf1 & 1) != 0) { pu16(p, 11); p = p + 2; }        # XPlacement
+    if ((o_vf1 & 2) != 0) { pu16(p, 22); p = p + 2; }        # YPlacement
+    if ((o_vf1 & 4) != 0) { pu16(p, kern & 65535); p = p + 2; }
+    if ((o_vf1 & 8) != 0) { pu16(p, 33); p = p + 2; }        # YAdvance
+    return p - at;
+}
+
+fn vlen(): i64 {
+    var n = 0;
+    var i = 0;
+    while (i < 4) {
+        if ((o_vf1 >> i & 1) != 0) { n = n + 1; }
+        i = i + 1;
+    }
+    return n * 2;
+}
+
+# Coverage over glyphs 1, 3, 5 (format 1) or the ranges 1-1, 3-3, 5-5 (format 2).
+fn put_cov(at): i64 {
+    if (o_covfmt == 2) {
+        pu16(at, 2);
+        pu16(at + 2, 3);
+        pu16(at + 4, 1); pu16(at + 6, 1); pu16(at + 8, 0);
+        pu16(at + 10, 3); pu16(at + 12, 3); pu16(at + 14, 1);
+        pu16(at + 16, 5); pu16(at + 18, 5); pu16(at + 20, 2);
+        return 22;
+    }
+    pu16(at, 1);
+    pu16(at + 2, 3);
+    pu16(at + 4, 1); pu16(at + 6, 3); pu16(at + 8, 5);
+    return 10;
+}
+
+# ClassDef: glyph 1 -> class 1, glyph 3 -> class 2 (for the left), or 2 -> 1, 4 -> 2 (right).
+fn put_cd(at, a, b): i64 {
+    if (o_cdfmt == 2) {
+        pu16(at, 2);
+        pu16(at + 2, 2);
+        pu16(at + 4, a); pu16(at + 6, a); pu16(at + 8, 1);
+        pu16(at + 10, b); pu16(at + 12, b); pu16(at + 14, 2);
+        return 16;
+    }
+    # format 1 covers a contiguous run from `a`, so the class array spans a..b
+    var n = b - a + 1;
+    pu16(at, 1);
+    pu16(at + 2, a);
+    pu16(at + 4, n);
+    var i = 0;
+    while (i < n) {
+        var cls = 0;
+        if (i == 0) { cls = 1; }
+        if (i == n - 1) { cls = 2; }
+        pu16(at + 6 + i * 2, cls);
+        i = i + 1;
+    }
+    return 6 + n * 2;
+}
+
+# A PairPos subtable at `at`, whose kern values are scaled by `mul`. Returns its length.
+fn put_pairpos(at, mul): i64 {
+    var v = vlen();
+    if (o_fmt == 2) {
+        var cov = 16 + 3 * 3 * v;
+        var cd1 = cov + put_cov(at + cov);
+        var cd2 = cd1 + put_cd(at + cd1, 1, 3);
+        var totl = cd2 + put_cd(at + cd2, 2, 4);
+        pu16(at, 2);
+        pu16(at + 2, cov);
+        pu16(at + 4, o_vf1);
+        pu16(at + 6, 0);
+        pu16(at + 8, cd1);
+        pu16(at + 10, cd2);
+        pu16(at + 12, 3);
+        pu16(at + 14, 3);
+        # ⚠ class 0 has a row AND a column, and they are all zeros here.
+        var c1 = 0;
+        while (c1 < 3) {
+            var c2 = 0;
+            while (c2 < 3) {
+                var kern = 0;
+                if (c1 == 1 && c2 == 1) { kern = 0 - 40 * mul; }
+                if (c1 == 1 && c2 == 2) { kern = 0 - 25 * mul; }
+                if (c1 == 2 && c2 == 1) { kern = 0 - 60 * mul; }
+                put_val(at + 16 + (c1 * 3 + c2) * v, kern);
+                c2 = c2 + 1;
+            }
+            c1 = c1 + 1;
+        }
+        return totl;
+    }
+    # format 1: three PairSets, one per covered glyph
+    var rec = 2 + v;
+    var ps0 = 16;
+    var ps1 = ps0 + 2 + 2 * rec;
+    var ps2 = ps1 + 2 + 1 * rec;
+    var covat = ps2 + 2 + 1 * rec;
+    pu16(at, 1);
+    pu16(at + 2, covat);
+    pu16(at + 4, o_vf1);
+    pu16(at + 6, 0);
+    pu16(at + 8, 3);
+    pu16(at + 10, ps0);
+    pu16(at + 12, ps1);
+    pu16(at + 14, ps2);
+    pu16(at + ps0, 2);
+    pu16(at + ps0 + 2, 2);                 put_val(at + ps0 + 4, 0 - 40 * mul);
+    pu16(at + ps0 + 2 + rec, 4);           put_val(at + ps0 + 4 + rec, 0 - 25 * mul);
+    pu16(at + ps1, 1);
+    pu16(at + ps1 + 2, 2);                 put_val(at + ps1 + 4, 0 - 60 * mul);
+    pu16(at + ps2, 1);
+    pu16(at + ps2 + 2, 7);                 put_val(at + ps2 + 4, 0 - 100 * mul);
+    return covat + put_cov(at + covat);
+}
+
+# One lookup at `at`. Returns its length.
+fn put_lookup(at, ty, nsub, mul): i64 {
+    pu16(at, ty);
+    pu16(at + 2, 0);
+    pu16(at + 4, nsub);
+    var body = 6 + nsub * 2;
+    var s = 0;
+    while (s < nsub) {
+        pu16(at + 6 + s * 2, body);
+        if (o_ext != 0 && ty == 9) {
+            # ExtensionPos: a real type and a 32-bit offset from the wrapper itself
+            pu16(at + body, 1);
+            pu16(at + body + 2, 2);
+            pu32(at + body + 4, 8);
+            body = body + 8 + put_pairpos(at + body + 8, mul + s);
+        } else {
+            body = body + put_pairpos(at + body, mul + s);
+        }
+        s = s + 1;
+    }
+    return body;
+}
+
+fn put_gpos(at): i64 {
+    var nlook = 1;
+    if (o_twolook != 0 || o_otherfeat != 0) { nlook = 2; }
+    var nfeat = 1;
+    if (o_dupfeat != 0 || o_otherfeat != 0) { nfeat = 2; }
+
+    # ScriptList: one DFLT script whose LangSys names feature 0 — and which rekha never reads.
+    var sl = 10;
+    pu16(at + sl, 1);
+    pu32(at + sl + 2, 0x44464C54);
+    pu16(at + sl + 6, 8);
+    pu16(at + sl + 8, 4);                               # defaultLangSys
+    pu16(at + sl + 10, 0);
+    pu16(at + sl + 12, 0);
+    pu16(at + sl + 14, 65535);
+    pu16(at + sl + 16, 1);
+    pu16(at + sl + 18, 0);
+    var sllen = 20;
+    if (o_junkscript != 0) {
+        var z = 0;
+        while (z < sllen) {
+            store8(FB + at + sl + z, 0xA5);
+            z = z + 1;
+        }
+    }
+
+    # FeatureList
+    var fl = sl + sllen;
+    pu16(at + fl, nfeat);
+    var frec = 2 + nfeat * 6;
+    var f0 = frec;
+    pu32(at + fl + 2, 0x6B65726E);                      # 'kern'
+    pu16(at + fl + 6, f0);
+    pu16(at + fl + f0, 0);
+    var nli = 1;
+    if (o_twolook != 0) { nli = 2; }
+    pu16(at + fl + f0 + 2, nli);
+    pu16(at + fl + f0 + 4, 0);
+    if (nli == 2) { pu16(at + fl + f0 + 6, 1); }
+    var f0len = 4 + nli * 2;
+    var fllen = frec + f0len;
+    if (nfeat == 2) {
+        var f1 = frec + f0len;
+        var tag = 0x6B65726E;                           # a SECOND 'kern' feature...
+        var li = 0;                                     # ...aimed at the SAME lookup
+        if (o_otherfeat != 0) {
+            tag = 0x6C696761;                           # ...or a 'liga', aimed at lookup 1
+            li = 1;
+        }
+        pu32(at + fl + 8, tag);
+        pu16(at + fl + 12, f1);
+        pu16(at + fl + f1, 0);
+        pu16(at + fl + f1 + 2, 1);
+        pu16(at + fl + f1 + 4, li);
+        fllen = f1 + 6;
+    }
+
+    # LookupList
+    var ll = fl + fllen;
+    pu16(at + ll, nlook);
+    var lbody = 2 + nlook * 2;
+    var k = 0;
+    while (k < nlook) {
+        pu16(at + ll + 2 + k * 2, lbody);
+        var ty = 2;
+        if (o_ext != 0) { ty = 9; }
+        if (o_badtype != 0) { ty = 4; }
+        var nsub = 1;
+        if (o_twosub != 0 && k == 0) { nsub = 2; }
+        lbody = lbody + put_lookup(at + ll + lbody, ty, nsub, 1 + k);
+        k = k + 1;
+    }
+
+    pu16(at, o_ver);
+    pu16(at + 2, 0);
+    pu16(at + 4, sl);
+    pu16(at + 6, fl);
+    pu16(at + 8, ll);
+    return ll + lbody;
+}
+
+# A one-pair Microsoft `kern`: 4-byte header, 6-byte subtable header, 8-byte format 0 header,
+# then the pair. It says -7 for the pair GPOS says -40 about, so group G can see which wins.
+fn put_legacy_kern(at): i64 {
+    pu16(at, 0);
+    pu16(at + 2, 1);
+    pu16(at + 4, 0);                                    # subtable version
+    pu16(at + 6, 6 + 8 + 6);                            # subtable length
+    pu16(at + 8, 1);                                    # coverage: horizontal
+    pu16(at + 10, 1);                                   # nPairs
+    pu16(at + 18, 1); pu16(at + 20, 2); pu16(at + 22, 0 - 7 & 65535);
+    return 4 + 6 + 8 + 6;
+}
+
+fn build(): i64 {
+    memset(FB, 0, FB_CAP);
+    var ntab = 6;
+    if (o_nogpos == 0) { ntab = ntab + 1; }
+    if (o_legacy != 0) { ntab = ntab + 1; }
+    pu32(0, 0x00010000);
+    pu16(4, ntab);
+    var at = 12 + ntab * 16;
+    var head_at = at;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var loca_at = hmtx_at + 4;
+    var glyf_at = loca_at + (NG + 1) * 4;
+    var kern_at = glyf_at + 4;
+    var kernlen = 0;
+    if (o_legacy != 0) { kernlen = put_legacy_kern(kern_at); }
+    var gpos_at = kern_at + ((kernlen + 3) & (0 - 4));
+    g_gpos = gpos_at;
+    g_gposlen = 0;
+    if (o_nogpos == 0) { g_gposlen = put_gpos(gpos_at); }
+
+    pu16(head_at + 18, 1000);
+    pu16(head_at + 50, 1);
+    pu16(maxp_at + 4, NG);
+    pu16(hhea_at + 34, 1);
+    pu16(hmtx_at, 500);
+    var i = 0;
+    while (i <= NG) {
+        pu32(loca_at + i * 4, 0);
+        i = i + 1;
+    }
+
+    var d = 12;
+    pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
+    pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, 4); d = d + 16;
+    pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, (NG + 1) * 4); d = d + 16;
+    pu32(d, REKHA_TAG_GLYF); pu32(d + 8, glyf_at); pu32(d + 12, 4); d = d + 16;
+    if (o_legacy != 0) {
+        pu32(d, REKHA_TAG_KERN); pu32(d + 8, kern_at); pu32(d + 12, kernlen); d = d + 16;
+    }
+    if (o_nogpos == 0) {
+        pu32(d, REKHA_TAG_GPOS); pu32(d + 8, gpos_at); pu32(d + 12, g_gposlen); d = d + 16;
+    }
+    g_flen = gpos_at + g_gposlen;
+    if (g_flen < kern_at + kernlen) { g_flen = kern_at + kernlen; }
+    return g_flen;
+}
+
+fn opts_reset(): i64 {
+    o_nogpos = 0;
+    o_ver = 1;
+    o_fmt = 1;
+    o_covfmt = 1;
+    o_cdfmt = 1;
+    o_vf1 = 4;
+    o_ext = 0;
+    o_dupfeat = 0;
+    o_otherfeat = 0;
+    o_twolook = 0;
+    o_twosub = 0;
+    o_badtype = 0;
+    o_legacy = 0;
+    o_junkscript = 0;
+    return 0;
+}
+
+var g_f = 0;
+
+fn openf(): i64 {
+    build();
+    g_f = rekha_font_open(FB, g_flen);
+    return g_f;
+}
+
+# The three kerned pairs and three that are not, at `mul` times the base values.
+fn expect(mul): i64 {
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40 * mul);
+    check(rekha_gpos_kern_pair(g_f, 1, 4), 0 - 25 * mul);
+    check(rekha_gpos_kern_pair(g_f, 3, 2), 0 - 60 * mul);
+    check(rekha_gpos_kern_pair(g_f, 2, 1), 0);
+    check(rekha_gpos_kern_pair(g_f, 9, 9), 0);
+    check(rekha_gpos_kern_pair(g_f, 1, 9), 0);
+    return 0;
+}
+
+# ── A) PairPos format 1, and the accessors ────────────────────────
+fn t_format1(): i64 {
+    g_group = "A format 1";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);
+    expect(1);
+    check(rekha_gpos_kern_pair(g_f, 5, 7), 0 - 100);
+    check(rekha_gpos_kern_pair(g_f, 5, 2), 0);          # covered first glyph, absent second
+    check(rekha_gpos_kern_pair(g_f, 0 - 1, 2), 0);
+    check(rekha_gpos_kern_pair(g_f, 1, 70000), 0);
+    check(rekha_gpos_kern_pair(0, 1, 2), 0);
+    check(rekha_gpos_kern_present(0), 0);
+    # ⚠ rekha never reads the ScriptList, and filling it with garbage proves it
+    opts_reset();
+    o_junkscript = 1;
+    check(openf() != 0, 1);
+    expect(1);
+    return 0;
+}
+
+# ── B) PairPos format 2, over classes ─────────────────────────
+fn t_format2(): i64 {
+    g_group = "B format 2";
+    opts_reset();
+    o_fmt = 2;
+    check(openf() != 0, 1);
+    expect(1);
+    # ⛔ CLASS 0 IS A REAL CLASS. Glyph 5 is in the coverage and in no class, so it is class 0 and
+    # reads the class 0 row — which is present and zero — rather than missing.
+    check(rekha_gpos_kern_pair(g_f, 5, 2), 0);
+    # a first glyph outside the coverage never reaches the grid at all
+    check(rekha_gpos_kern_pair(g_f, 7, 2), 0);
+    return 0;
+}
+
+# ── C) both Coverage formats, both ClassDef formats ─────────────────────
+fn t_formats(): i64 {
+    g_group = "C cov/classdef";
+    opts_reset();
+    o_covfmt = 2;
+    check(openf() != 0, 1);
+    expect(1);
+    opts_reset();
+    o_fmt = 2;
+    o_covfmt = 2;
+    check(openf() != 0, 1);
+    expect(1);
+    opts_reset();
+    o_fmt = 2;
+    o_cdfmt = 2;
+    check(openf() != 0, 1);
+    expect(1);
+    opts_reset();
+    o_fmt = 2;
+    o_covfmt = 2;
+    o_cdfmt = 2;
+    check(openf() != 0, 1);
+    expect(1);
+    return 0;
+}
+
+# ── D) the valueFormat bitfield ───────────────────────────
+fn t_valueformat(): i64 {
+    g_group = "D valueFormat";
+    # ⛔ XAdvance SITS AFTER XPlacement AND YPlacement when those bits are set. Reading it at a
+    # fixed offset returns 11 — the X placement — for every pair in this font.
+    opts_reset();
+    o_vf1 = 7;
+    check(openf() != 0, 1);
+    expect(1);
+    opts_reset();
+    o_fmt = 2;
+    o_vf1 = 7;
+    check(openf() != 0, 1);
+    expect(1);
+    # XPlacement alone, no XAdvance bit: there is no advance to apply and every pair is 0
+    opts_reset();
+    o_vf1 = 1;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0);
+    check(rekha_gpos_kern_pair(g_f, 3, 2), 0);
+    # YAdvance after XAdvance does not move XAdvance
+    opts_reset();
+    o_vf1 = 4 + 8;
+    check(openf() != 0, 1);
+    expect(1);
+    return 0;
+}
+
+# ── E) the extension wrapper ────────────────────────────
+fn t_extension(): i64 {
+    g_group = "E extension";
+    opts_reset();
+    o_ext = 1;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);
+    expect(1);
+    opts_reset();
+    o_ext = 1;
+    o_fmt = 2;
+    check(openf() != 0, 1);
+    expect(1);
+    return 0;
+}
+
+# ── F) several lookups, several subtables, and the dedup ───────────────────
+fn t_multi(): i64 {
+    g_group = "F multi";
+    # ⛔ LOOKUPS ACCUMULATE. The second carries twice the first's values, so a pair is 3x.
+    opts_reset();
+    o_twolook = 1;
+    check(openf() != 0, 1);
+    expect(3);
+    # ⛔ WITHIN ONE LOOKUP THE FIRST MATCHING SUBTABLE WINS and the second is not consulted, so the
+    # answer is 1x and not 3x.
+    opts_reset();
+    o_twosub = 1;
+    check(openf() != 0, 1);
+    expect(1);
+    # ⛔ TWO `kern` FEATURES AIMED AT ONE LOOKUP APPLY IT ONCE. Two scripts normally carry two
+    # FeatureRecords pointing at the same lookups, and not deduplicating doubles every kern.
+    opts_reset();
+    o_dupfeat = 1;
+    check(openf() != 0, 1);
+    expect(1);
+    # ⚠ a feature that is not `kern` is not consulted, however many lookups it names
+    opts_reset();
+    o_otherfeat = 1;
+    check(openf() != 0, 1);
+    expect(1);
+    return 0;
+}
+
+# ── G) GPOS beats the legacy table ──────────────────────────
+fn t_source(): i64 {
+    g_group = "G source";
+    # ⛔ NOT BOTH. The legacy table here says -7 for the pair GPOS says -40 about; a font carrying
+    # both usually says the same thing twice, for shapers that read only one, and adding them would
+    # double every pair.
+    opts_reset();
+    o_legacy = 1;
+    check(openf() != 0, 1);
+    check(rekha_kern_source(g_f), 2);
+    check(rekha_kern_present(g_f), 1);
+    check(rekha_kern_table_pair(g_f, 1, 2), 0 - 7);
+    check(rekha_kern_pair(g_f, 1, 2), 0 - 40);
+    check(rekha_kern_pair_px(g_f, 1, 2, 1000), 0 - 40);
+    # with no GPOS the legacy table answers
+    opts_reset();
+    o_legacy = 1;
+    o_nogpos = 1;
+    check(openf() != 0, 1);
+    check(rekha_kern_source(g_f), 1);
+    check(rekha_kern_pair(g_f, 1, 2), 0 - 7);
+    # with neither
+    opts_reset();
+    o_nogpos = 1;
+    check(openf() != 0, 1);
+    check(rekha_kern_source(g_f), 0);
+    check(rekha_kern_pair(g_f, 1, 2), 0);
+    check(rekha_kern_source(0), 0);
+    return 0;
+}
+
+# ── H) refusals and skips ─────────────────────────────
+fn t_refuse(): i64 {
+    g_group = "H refusals";
+    # a majorVersion rekha does not take
+    opts_reset();
+    o_ver = 2;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 0);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0);
+    check(rekha_kern_source(g_f), 0);
+    # ⚠ a lookup type rekha does not read is SKIPPED, not refused: a font is normal for having
+    # mark or cursive lookups, and this one has nothing else.
+    opts_reset();
+    o_badtype = 1;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);             # the feature and its lookup are there
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0);          # ...and none of it applies
+    # no GPOS at all
+    opts_reset();
+    o_nogpos = 1;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 0);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0);
+    return 0;
+}
+
+# ── I) every byte of GPOS, flipped ──────────────────────────
+fn t_guard(): i64 {
+    g_group = "I guard";
+    opts_reset();
+    o_twolook = 1;
+    build();
+    var lo = g_gpos;
+    var hi = g_gpos + g_gposlen;
+    var bad = 0;
+    var at = lo;
+    while (at < hi) {
+        var bit = 0;
+        while (bit < 8) {
+            var orig = load8(FB + at);
+            store8(FB + at, orig ^ (1 << bit));
+            var f = rekha_font_open(FB, g_flen);
+            if (f != 0) {
+                # ⛔ Whatever these bytes say, a kern stays a plausible design-unit number and every
+                # walk TERMINATES.
+                var a = 0;
+                while (a < 8) {
+                    var b = 0;
+                    while (b < 8) {
+                        var v = rekha_gpos_kern_pair(f, a, b);
+                        if (v > 100000 || v < 0 - 100000) { bad = bad + 1; }
+                        b = b + 1;
+                    }
+                    a = a + 1;
+                }
+            }
+            store8(FB + at, orig);
+            bit = bit + 1;
+        }
+        at = at + 1;
+    }
+    check(bad, 0);
+    g_f = rekha_font_open(FB, g_flen);
+    check(g_f != 0, 1);
+    expect(3);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    FB = alloc(FB_CAP);
+    t_format1();
+    t_format2();
+    t_formats();
+    t_valueformat();
+    t_extension();
+    t_multi();
+    t_source();
+    t_refuse();
+    t_guard();
+    if (g_fails == 0) {
+        var ok = "gpos_test: PASS (both PairPos formats, coverage, classdefs, extension, dedup; ";
+        syscall(1, 1, ok, strlen(ok));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
+    }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

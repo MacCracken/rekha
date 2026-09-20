@@ -153,6 +153,10 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
 #                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
 #                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +576 gpos  +584 gpos_end · +592 gpos_lookups · +600 gpos_nlookups (i64 — the GPOS table, and
+#                      the `kern` feature's lookups resolved LAZILY on the first query into one
+#                      sd_alloc, so an open still costs exactly REKHA_FONT_SIZE. -1 in the count
+#                      means "not resolved yet". 0.6.6.)
 #   +552 kern  +560 kern_end (i64 — the legacy `kern` table, 0 = absent or a version that is
 #                      neither Microsoft's 0 nor Apple's 1.0. 0.6.5.)
 #   +536 post  +544 post_end (i64 — the `post` table, 0 = absent or under its 32-byte header.
@@ -202,7 +206,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 568;
+var REKHA_FONT_SIZE = 608;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
