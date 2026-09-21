@@ -24,6 +24,17 @@
 # purpose: BAD_HINT means the bytecode contradicts itself — a stack that underflows, a function
 # that was never defined, an IF with no EIF — and UNSUPPORTED means the bytecode is correct and
 # rekha is not there yet. A consumer asking "will this font ever hint here" tests for the second.
+# ⭐ SINCE v0.8.2 THE INTERPRETER PRODUCES NO UNSUPPORTED AT ALL: IUP was the last instruction it
+# named that way, and every opcode of the machine now runs. The code stays in the vocabulary —
+# the open family still answers it for a container rekha does not read, and the 0.9.0 freeze
+# keeps the promise that a correct-but-unimplemented feature will be told apart from a malformed
+# one — but a hinting refusal is one of the OTHER codes, never this: BAD_HINT for the bytecode
+# (a program that contradicts itself, or a cap it runs into); TRUNCATED, BAD_GLYF, BAD_SFNT,
+# NO_TABLE or OTHER for the glyph, its tables and the gid (a short glyph record, a lying loca,
+# an indexToLocFormat that is neither 0 nor 1, a face without loca / glyf / the hinting tables /
+# head, a gid the font does not have or a context with no glyph loaded); OOM for a cap of the
+# machine or the zone (a maxp limit over rekha's, a glyph past its maxp maxima, a refused path
+# allocation).
 
 # ================================================================
 # Error code constants

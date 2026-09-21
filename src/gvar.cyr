@@ -22,9 +22,13 @@
 #
 # ⚠ EVERY GLYPH HAS FOUR PHANTOM POINTS past its real ones — the two side bearings and the two
 # vertical ones — and a tuple's deltas cover them too. rekha decodes them (a tuple that names them
-# must still be read to the end) and applies only the real points. Phantom deltas are METRICS
-# variations, which belong with `HVAR` / `MVAR` over rekha's advance readers — the metrics item in
-# docs/development/roadmap.md, filed when this one shipped (see CHANGELOG 0.4.12).
+# must still be read to the end); `rekha_gvar_apply` applies only the real points, because phantom
+# deltas are METRICS variations and the unhinted advance readers carry `HVAR` / `MVAR` instead.
+# `rekha_gvar_apply_n` lets a caller whose arrays hold the four phantoms too — the hinted loader in
+# src/hint.cyr, which fills the glyph zone with n + 4 points — take the last four deltas as well,
+# the way FreeType's TT_Vary_Apply_Glyph_Deltas varies all n + 4 (ref2143/ttgxvar.c:4255); that
+# caller decides per FreeType's own rule which of them stand (none of pp1 / pp2 on a face with
+# HVAR, none of pp3 / pp4 with VVAR, ref2143/ttgxvar.c:4671-4684).
 #
 # ⛔ WHAT IS REFUSED — and a refusal here leaves the outline at its DEFAULT, never half-varied:
 #   - a major version other than 1, or a header, offset array or data slice outside the table;
@@ -261,6 +265,14 @@ fn rekha_gvar_scratch(font): i64 {
 # ⛔ A refusal never half-varies: the deltas of a tuple are accumulated and only added to xs / ys
 # once that tuple has been read in full.
 fn rekha_gvar_apply(font, gid, xs, ys, np, nc, eps): i64 {
+    return rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, np);
+}
+
+# The same, adding the deltas to the first `napply` of the np + 4 points a tuple covers: np for
+# the outline alone (rekha_gvar_apply), np + 4 when xs / ys carry the four phantom points after the
+# outline and the caller wants their deltas too. Interpolation stays on the np real points of the
+# nc contours; a phantom point is in no contour and only an explicitly named delta reaches it.
+fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
     if (rekha_var_live(font) == 0) { return 0; }
     var gvar = load64(font + 336);
     if (gvar == 0) { return 0; }
@@ -304,6 +316,7 @@ fn rekha_gvar_apply(font, gid, xs, ys, np, nc, eps): i64 {
 
     var total = np + 4;                                  # the four phantom points ride along
     if (total > REKHA_GVAR_SCRATCH) { return 0; }
+    if (napply > total) { napply = total; }
     var sc = rekha_gvar_scratch(font);
     if (sc == 0) { return 0; }
     var dx = sc;
@@ -409,7 +422,7 @@ fn rekha_gvar_apply(font, gid, xs, ys, np, nc, eps): i64 {
                 }
             }
             i = 0;
-            while (i < np) {
+            while (i < napply) {
                 var ddx = load64(dx + i * 8);
                 var ddy = load64(dy + i * 8);
                 if (ddx != 0) {

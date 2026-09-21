@@ -674,6 +674,34 @@ fn rekha_advance_width(font, gid): i64 {
     return w;
 }
 
+# @public — the left side bearing of glyph `gid`, in font DESIGN UNITS: the horizontal twin of
+# rekha_top_side_bearing, with rekha_advance_width's refusals — a 0 handle, a negative gid,
+# hhea / hmtx absent, numberOfHMetrics 0 (NO_TABLE "hhea"), or a bearing that lies past hmtx's
+# DECLARED length (TRUNCATED "hmtx") answer 0 with the code, and a legal 0 answers REKHA_OK.
+# ⛔ THE TAIL RULE IS THE FORMAT'S: a gid at or past numberOfHMetrics has its bearing in the bare
+# i16 array that FOLLOWS the long metrics, at `hmtx + numberOfHMetrics * 4 + (gid - numberOfHMetrics)
+# * 2` — not in a long record of its own (there is none) and not in the last record's (that is the
+# shared advance). programs/extent_test.cyr's font carries such a tail.
+# ⭐ AND IT VARIES (v0.8.2): the HVAR lsb map's delta is added, the way rekha_advance_width adds the
+# advance map's, so the two frozen readers agree on what a variation instance means. ⚠ FreeType's
+# TrueType driver does not adjust the lsb (ref2143/ttdriver.c:559), and the HINTED loader follows
+# FreeType, not this reader: its left phantom is xMin minus the UNVARIED bearing (src/hint.cyr
+# rekha_hint_hmetrics), so on a variation instance of a face with an lsb map this metric and the
+# hinted outline's origin disagree by the delta. docs/development/roadmap.md pins the difference.
+fn rekha_left_side_bearing(font, gid): i64 {
+    if (font == 0) { return 0; }
+    rekha_font_error_clear(font);
+    if (gid < 0) { return rekha_fail(font, REKHA_ERR_OTHER, "glyph id"); }
+    var nhm = load64(font + 104);
+    if (nhm <= 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "hhea"); }
+    var hmtx = load64(font + 112);
+    if (hmtx == 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "hmtx"); }
+    var at = gid * 4 + 2;
+    if (gid >= nhm) { at = nhm * 4 + (gid - nhm) * 2; }
+    if (at + 2 > load64(font + 120)) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "hmtx"); }
+    return rekha_rd_i16(load64(font), hmtx + at) + rekha_hvar_lsb_delta(font, gid);
+}
+
 # @public — the advance of glyph `gid` in PIXELS at pixel size `px_size`, rounded half-up:
 # `(adv * px_size + upem / 2) / upem`. 0 = unknown (upem <= 0 or advance <= 0). Allocates 0 B.
 # ⭐ The gid-level form exists so a consumer maps a codepoint ONCE and reuses the gid for
@@ -709,8 +737,19 @@ fn rekha_glyph_advance_fx(font, gid, px_size): i64 {
 #   - loca[gid + 1] lies past loca's DECLARED length;
 #   - the glyph is empty (e.g. space: loca[gid] == loca[gid+1]) or its offsets run backwards;
 #   - the span ends past glyf's DECLARED length.
-# ⚠ A last glyph whose end overshoots glyf is refused, not clamped to glyf's end (FreeType clamps):
-# a lying loca yields no outline, never bytes from the table after glyf.
+# ⛔ THREE REFUSALS HERE ARE STATED DIVERGENCES FROM FreeType's tt_face_get_location
+# (ref2143/ttpload.c:183-288), which loads where rekha refuses; docs/development/roadmap.md's
+# pinned table carries all three, and they are the whole of the corpus sweep's 'refused' class
+# on a face FreeType's pedantic mode loads:
+#   - offsets that run BACKWARDS (loca[gid + 1] < loca[gid]): FreeType takes the span to run from
+#     loca[gid] to the END of glyf (:282-286); rekha refuses BAD_GLYF "loca order";
+#   - the LAST glyph's end past glyf's length: FreeType clips it to glyf's end (:246-254); rekha
+#     refuses BAD_GLYF "loca past glyf";
+#   - any OTHER glyph's end past glyf's length: FreeType answers a size of 0, an EMPTY glyph with
+#     real phantoms and advance (:255-265), as it does for a START past glyf's length in either
+#     position (:225-235); rekha refuses the same "loca past glyf".
+# A lying loca yields no outline, never bytes from the table after glyf and never a blank where
+# the font promised a shape; the hinted loader (src/hint.cyr) answers 0 with an empty zone.
 # ================================================================
 # ⭐ THIS 0 WAS THE AMBIGUITY ONE LEVEL DOWN, and 0.7.0 found it here rather than at
 # rekha_load_glyph where it was being looked for. "The glyph is empty (e.g. space)" and "loca is

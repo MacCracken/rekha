@@ -34,9 +34,10 @@
 #     index past itemCount, or wordDeltaCount > regionIndexCount;
 #   - a DeltaSetIndexMap with a reserved entryFormat bit set, or mapCount 0;
 #   - an MVAR valueRecordSize below 8, or a record array past the table.
-# ⚠ HVAR's lsb and rsb maps are validated for position and NOT read: rekha publishes no side-bearing
-# accessor for them to vary, and a glyph's real bearing already follows its outline, which does
-# vary. docs/development/roadmap.md carries it as a pinned item.
+# ⚠ HVAR's rsb map is validated for position and NOT read: rekha publishes no right-side-bearing
+# accessor for it to vary. The lsb map IS read since v0.8.2, by `rekha_hvar_lsb_delta` for
+# `rekha_left_side_bearing` (src/sfnt.cyr) only: the hinted loader's left phantom point keeps the
+# UNVARIED lsb, as FreeType's TrueType driver does (ref2143/ttdriver.c leaves lsb_adjust unset).
 
 var REKHA_TAG_HVAR = 0x48564152;   # 'HVAR'
 var REKHA_TAG_MVAR = 0x4D564152;   # 'MVAR'
@@ -253,6 +254,35 @@ fn rekha_hvar_advance_delta(font, gid): i64 {
     if (mo != 0) {
         if (rekha_dsim(font, hv + mo, hvend, gid, &pair) == 0) { return 0; }
     }
+    var d: i64[1];
+    if (rekha_ivs_delta(font, ivs, hvend, load64(&pair), load64(&pair + 8), &d) == 0) { return 0; }
+    return load64(&d);
+}
+
+# @public — how much `gid`'s left side bearing moves at the current axis setting, in design units:
+# the twin of rekha_hvar_advance_delta over the lsb map at +12. ⛔ THE TWO MAPS DEFAULT DIFFERENTLY,
+# and the spec says so: an absent advance map means "the glyph id is the inner index", an absent lsb
+# map means "no lsb variation data at all" — so a NULL lsb map answers 0, never an implicit row.
+# 0 likewise when the font has no HVAR, no axis is set, or the table refuses.
+# ⚠ FreeType 2.14.3's TrueType driver leaves its lsb_adjust hook NULL (ref2143/ttdriver.c:559) and
+# takes the lsb of a variation instance from `hmtx` unadjusted; rekha_left_side_bearing applies
+# this delta, which is the reading `rekha_advance_width` froze for the advance map, while the
+# HINTED loader's left phantom follows FreeType and leaves it out (src/hint.cyr
+# rekha_hint_hmetrics). Pinned in docs/development/roadmap.md.
+fn rekha_hvar_lsb_delta(font, gid): i64 {
+    if (font == 0) { return 0; }
+    if (gid < 0) { return 0; }
+    var hv = load64(font + 416);
+    if (hv == 0) { return 0; }
+    if (rekha_var_live(font) == 0) { return 0; }
+    var buf = load64(font);
+    var hvend = load64(font + 424);
+    var ivs = hv + rekha_rd_u32(buf, hv + 4);
+    if (ivs < hv) { return 0; }
+    var mo = rekha_rd_u32(buf, hv + 12);
+    if (mo == 0) { return 0; }
+    var pair: i64[2];
+    if (rekha_dsim(font, hv + mo, hvend, gid, &pair) == 0) { return 0; }
     var d: i64[1];
     if (rekha_ivs_delta(font, ivs, hvend, load64(&pair), load64(&pair + 8), &d) == 0) { return 0; }
     return load64(&d);

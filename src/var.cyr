@@ -353,6 +353,10 @@ fn rekha_var_coord(font, i): i64 {
 # a per-glyph call and not meant to be: set the axes once, then draw.
 # ⚠ ALLOCATION: the coordinate and scalar arrays are allocated on the first call and reused after.
 # rekha's seam has no free, so a font whose axes are set keeps them.
+# ⭐ AND IT TELLS THE HINTING CONTEXT (v0.8.2): a cached rekha_hint_ctx is marked stale through
+# rekha_hint_axes_changed, so the next rekha_hint_ctx — at the same ppem or another — re-runs
+# `prep` for the new instance. A FORWARD call into src/hint.cyr, included after this module:
+# its arity (one argument) is checked by hand, since the compiler cannot.
 fn rekha_var_set_axis(font, i, value): i64 {
     if (font == 0) { return 0; }
     var n = load64(font + 280);
@@ -373,6 +377,7 @@ fn rekha_var_set_axis(font, i, value): i64 {
       rekha_var_axis_max(font, i), value);
     store64(c + i * 8, rekha_var_avar(font, i, nc));
     rekha_var_build_scalars(font, load64(font + 264));
+    rekha_hint_axes_changed(font);
     return 1;
 }
 
@@ -393,7 +398,7 @@ fn rekha_var_live(font): i64 {
 }
 
 # @public — put every axis back at its default, which is the instance rekha decodes without this
-# API at all. 1 when the font has axes.
+# API at all. 1 when the font has axes. The hinting context is told, as rekha_var_set_axis tells it.
 fn rekha_var_reset(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 280) < 1) { return 0; }
@@ -406,6 +411,7 @@ fn rekha_var_reset(font): i64 {
         }
     }
     store64(font + 328, 0);
+    rekha_hint_axes_changed(font);
     return 1;
 }
 

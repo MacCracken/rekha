@@ -119,20 +119,24 @@ def main(path="fonts/LiberationSans-Regular.ttf"):
     print()
     print("gasp                 %s" % dict(sorted(f["gasp"].gaspRange.items())))
     print()
-    # src/hint.cyr's one allocation (0.8.1): a 648-byte header, the stack with FreeType 2.14.3's
-    # margin (ref2143/ttobjs.c:1078), storage, the FDEF table at max(64, maxFunctionDefs) records
-    # of 32 bytes (FreeType's floor), the IDEF table, the scaled cvt, the twilight
-    # zone and the glyph zone at 48 bytes a point (orus / org / cur, x and y), the contour ends, and
-    # one tag byte per point rounded up to 8. The glyph zone holds the larger of the simple and the
-    # composite maxima plus the four phantom points.
+    # src/hint.cyr's one allocation (0.8.2): an 832-byte header, the stack with FreeType 2.14.3's
+    # margin (ref2143/ttobjs.c:1078), the storage area, the FDEF table at max(64, maxFunctionDefs)
+    # records of 32 bytes (FreeType's floor), the IDEF table, the SIZE's scaled cvt, the twilight
+    # zone and the glyph zone at 48 bytes a point (orus / org / cur, x and y), the contour ends, the
+    # GLYPH's per-load copies of the cvt and the storage area (the copy-on-write a glyph program's
+    # WS / WCVTP / DELTAC land in, ref2143/ttinterp.c:1320-1337, 2777-2795), and one tag byte plus
+    # one on-curve byte per glyph-zone point (tags for the twilight zone too), rounded up to 8. The
+    # glyph zone holds the larger of the simple and the composite maxima plus the four phantom
+    # points. programs/hint_test.cyr pins the same number in groups B, D, K and L with the
+    # arithmetic written out.
     stk = mx.maxStackElements + max(mx.maxStackElements // 2, 128)
     fdn = max(64, mx.maxFunctionDefs)
     tz = mx.maxTwilightPoints
     gz = max(mx.maxPoints, mx.maxCompositePoints) + 4
     gc = max(mx.maxContours, mx.maxCompositeContours)
-    tagb = (tz + gz + 7) & ~7
+    tagb = (tz + 2 * gz + 7) & ~7
     ctx_bytes = (
-        648
+        832
         + stk * 8
         + mx.maxStorage * 8
         + fdn * 32
@@ -141,6 +145,8 @@ def main(path="fonts/LiberationSans-Regular.ttf"):
         + tz * 48
         + gz * 48
         + gc * 8
+        + len(cvt) * 8
+        + mx.maxStorage * 8
         + tagb
     )
     print("hint context bytes   %d" % ctx_bytes)

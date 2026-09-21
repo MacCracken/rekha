@@ -13,7 +13,12 @@
 #   results (metrics, spans, glyph ids, outline arrays, path verbs and 16.16 coordinates) are folded
 #   into an FNV-1a digest. A code path that reads a byte it does not own folds a value that differs
 #   between A and B, so digest(A) != digest(B). The canary group proves the harness itself sees a
-#   one-byte overread of the font, of a block and of the pool frontier.
+#   one-byte overread of the font, of a block and of the pool frontier. Since v0.8.2 the sweep also
+#   HINTS: one rekha_hint_ctx(f, 12) per font (fpgm and prep over whatever bytes the tables hold),
+#   then rekha_hint_glyph over every gid — its answer, its code, the outline view's counts, ends,
+#   points and on-curve bytes, the advance and the hinted path all fold into the same digest, and
+#   the view is held to the loader's own guarantees. A refused glyph answers 0 and an empty view,
+#   never a fault; a font without hinting tables answers no context at all.
 #
 #   CORPUS. One crafted font per audit class, built in code, each asserting the EXACT safe outcome
 #   (an empty outline, a 0, an exact pool cost) AND passing the differential: R-01 endPts, C-01 point
@@ -96,10 +101,14 @@ fn dir_entry(buf, ent, tag, off, tlen): i64 {
 # HB_PATH_POOL_MAX — sadish bytes for that path: <= 20,480 points (2n + 3 per contour) x 16 B, plus
 #   verb/point arrays doubling from 256 to 32,768 slots (2 x 8 x 65,024 B) and the 48 B record +
 #   the first 4,096 B: 1,372,208 B, stated as 1,400,000.
+# HB_GLYPH_POOL_MAX — one gid's whole turn: the load and its path (1,820,000), plus the HINTED path
+#   (v0.8.2): rekha_hint_glyph allocates nothing (zone 1 is the outline; the context was allocated
+#   before the pool's base was set), and rekha_hint_to_sdpath sizes its path exactly, so the hinted
+#   path of a <= 4,096-point zone is under HB_PATH_POOL_MAX again: 3,220,000.
 # ================================================================
 var HB_LOAD_POOL_MAX = 420000;
 var HB_PATH_POOL_MAX = 1400000;
-var HB_GLYPH_POOL_MAX = 1820000;
+var HB_GLYPH_POOL_MAX = 3220000;
 var HB_VERBS_MAX = 16384;
 
 var HB_SCALE = 4096;                  # 16.16: 1/16 px per design unit
@@ -217,8 +226,10 @@ var g_st_pool_max = 0;
 var g_st_verbs_max = 0;
 var g_st_comp = 0;
 var g_st_comp_multi = 0;
+var g_st_hinted = 0;                  # gids rekha_hint_glyph answered 1 for
 
 fn hb_stats_reset(): i64 {
+    g_st_hinted = 0;
     g_st_opened = 0;
     g_st_decoded = 0;
     g_st_points = 0;
@@ -344,8 +355,34 @@ fn hb_odigest(o): i64 {
 var g_tags = 0;
 var HB_NTAGS = 9;
 
-fn hb_gid(f, gid): i64 {
+# The hinted turn of one gid (v0.8.2): rekha_hint_glyph's answer, the code, the loaded gid, then —
+# when a view exists — the view through hb_outline (its counts, ends, points and on-curve bytes,
+# held to the loader's guarantees), the advance and the hinted path. A refused load answers 0 and
+# no view; a font with no context (no hinting tables, or a maxp that trips a cap) folds a marker.
+fn hb_hint(hc, gid): i64 {
+    if (hc == 0) {
+        hb_fold(0 - 11);
+        return 0;
+    }
+    var r = rekha_hint_glyph(hc, gid);
+    hb_fold(r);
+    hb_fold(rekha_hint_error(hc));
+    hb_fold(rekha_hint_gid(hc));
+    var o = rekha_hint_outline(hc);
+    if (o == 0) {
+        hb_fold(0 - 13);
+        return r;
+    }
+    hb_outline(o);
+    hb_fold(rekha_hint_advance_px(hc));
+    hb_path(rekha_hint_to_sdpath(hc, HB_OX, HB_OY));
+    if (r == 1) { g_st_hinted = g_st_hinted + 1; }
+    return r;
+}
+
+fn hb_gid(f, hc, gid): i64 {
     hb_fold(rekha_advance_width(f, gid));
+    hb_fold(rekha_left_side_bearing(f, gid));
     hb_fold(rekha_glyph_advance_px(f, gid, 16));
     hb_fold(rekha_glyph_advance_fx(f, gid, 37));
     var sp: i64[2];
@@ -358,6 +395,7 @@ fn hb_gid(f, gid): i64 {
     if (o == 0) { g_st_oom = g_st_oom + 1; }
     var nc = hb_outline(o);
     hb_path(rekha_outline_to_sdpath(o, HB_SCALE, HB_OX, HB_OY));
+    hb_hint(hc, gid);
     var used = g_pool_bump - g_pool_base;
     if (used > g_st_pool_max) { g_st_pool_max = used; }
     if (nc > 0) {
@@ -396,9 +434,20 @@ fn hb_cpath(f, cp): i64 {
 fn hb_sweep(buf, len, gid_cap, cp_dense, cp_step): i64 {
     g_h = 0xcbf29ce484222325;
     var f = rekha_font_open(buf, len);
+    # ⚠ The hinting context is a lazy allocation cached on the handle, so like the record it must
+    # live BELOW the pool's base — a per-glyph reset would otherwise hand its bytes back and refill
+    # them with the sentinel under the next glyph. Warm it here, once, exactly as a consumer must
+    # warm it outside its per-frame arena; fpgm and prep run over whatever the tables hold.
+    var hc = rekha_hint_ctx(f, 12);
     g_pool_base = g_pool_bump;
     hb_fold(f != 0);
     if (f != 0) { g_st_opened = g_st_opened + 1; }
+    hb_fold(hc != 0);
+    if (hc != 0) {
+        hb_fold(rekha_hint_error(hc));
+        hb_fold(rekha_hint_bytes(hc));
+        hb_fold(rekha_hint_ppem(hc));
+    }
     var cell: i64[1];
     var t = 0;
     while (t < HB_NTAGS) {
@@ -422,9 +471,11 @@ fn hb_sweep(buf, len, gid_cap, cp_dense, cp_step): i64 {
     if (lim > gid_cap) { lim = gid_cap; }
     var gid = 0 - 2;
     while (gid < lim) {
-        hb_gid(f, gid);
+        hb_gid(f, hc, gid);
         gid = gid + 1;
     }
+    hb_hint(hc, 65535);
+    hb_hint(hc, 70000);
     hb_fold(rekha_advance_width(f, 65535));
     hb_fold(rekha_advance_width(f, 70000));
     hb_fold(rekha_glyph_advance_fx(f, 70000, 12));
@@ -894,6 +945,14 @@ fn t_null(): i64 {
     check(sd_path_verb_count(rekha_outline_to_sdpath(0, HB_SCALE, 0, 0)), 0);
     check(sd_path_verb_count(rekha_glyph_to_sdpath(0, 1, HB_SCALE, 0, 0)), 0);
     check(sd_path_verb_count(rekha_char_to_sdpath(0, 65, HB_SCALE, 0, 0)), 0);
+    # the hinting family on a null handle and a null context (v0.8.2)
+    check(rekha_hint_ctx(0, 12), 0);
+    check(rekha_hint_glyph(0, 1), 0);
+    check(rekha_hint_outline(0), 0);
+    check(rekha_hint_to_sdpath(0, 0, 0), 0);
+    check(rekha_hint_advance_px(0), 0);
+    check(rekha_hint_gid(0), 0 - 1);
+    check(rekha_left_side_bearing(0, 1), 0);
 
     # rekha_font_open's own refusals
     fb_reset();
@@ -1740,10 +1799,29 @@ fn t_face(): i64 {
     check(g_st_points, 71785);
     check(g_st_comp, 1076);
     check(g_st_comp_multi, 946);
+    # ⭐ EVERY GLYPH OF THE FACE HINTS at 12 ppem: FreeType loads all 2,620 clean under
+    # FT_LOAD_PEDANTIC at every size (the 0.8.2 design's D9), so rekha refuses none of them either.
+    check(g_st_hinted, 2620);
     g_face_pool_max = g_st_pool_max;
     g_face_verbs_max = g_st_verbs_max;
     var f = hb_font(n);
     check(rekha_glyph_count(f), 2620);
+    # a hook that refuses every block: the hinted load still answers (it allocates nothing), the
+    # path is 0 with OOM on the context and the font, and nothing faults
+    sd_alloc_set(0);
+    var hc = rekha_hint_ctx(f, 12);
+    sd_alloc_set(&hb_hook);
+    check(hc != 0, 1);
+    hb_reset();
+    g_pool_refuse_at = 0;
+    check(rekha_hint_glyph(hc, 36), 1);
+    check(rekha_hint_to_sdpath(hc, HB_OX, HB_OY), 0);
+    check(rekha_hint_error(hc), REKHA_ERR_OOM);
+    check(rekha_font_error(f), REKHA_ERR_OOM);
+    g_pool_refuse_at = 0 - 1;
+    check(rekha_hint_glyph(hc, 36), 1);
+    check(rekha_hint_to_sdpath(hc, HB_OX, HB_OY) != 0, 1);
+    check(rekha_hint_error(hc), REKHA_OK);
     var mapped = 0;
     var cp = 0;
     while (cp < 65536) {
@@ -1967,6 +2045,7 @@ fn t_mutate(): i64 {
     var diffs = 0;
     var dirty = 0;
     var opened = 0;
+    var hinted = 0;
     var decoded = 0;
     var points = 0;
     var verbs = 0;
@@ -1990,6 +2069,7 @@ fn t_mutate(): i64 {
             hb_puts(2, " broke an outline guarantee, hit OOM or a work bound\n");
         }
         opened = opened + g_st_opened;
+        hinted = hinted + g_st_hinted;
         decoded = decoded + g_st_decoded;
         points = points + g_st_points;
         verbs = verbs + g_st_verbs;
@@ -2006,6 +2086,7 @@ fn t_mutate(): i64 {
     check(changed, HB_MUTANTS);
     check(opened > HB_MUTANTS / 2, 1);                 # most mutants still open: the sweep is real
     check(decoded > 0, 1);
+    check(hinted > 0, 1);                              # the hinted sweep is real on the mutants too
     check(rekha_face_default_verify(g_mb, n), 1);      # every mutation was undone
 
     hb_puts(1, "hostile_test: mutants ");
@@ -2016,6 +2097,8 @@ fn t_mutate(): i64 {
     fmt_int_fd(1, HB_SEED0 + HB_MUTANTS - 1);
     hb_puts(1, ") opened ");
     fmt_int_fd(1, opened);
+    hb_puts(1, " hinted ");
+    fmt_int_fd(1, hinted);
     hb_puts(1, " outlines-decoded ");
     fmt_int_fd(1, decoded);
     hb_puts(1, " points ");
@@ -2088,7 +2171,7 @@ fn main(): i64 {
     fmt_int_fd(1, g_n);
     hb_puts(1, " checks\n");
     if (g_fails == 0) {
-        hb_puts(1, "hostile_test: PASS (sentinel differential + hostile corpus + face mutation)\n");
+        hb_puts(1, "hostile_test: PASS (sentinel differential + hostile corpus + face mutation, hinted too)\n");
     } else {
         hb_puts(2, "hostile_test: FAIL\n");
     }

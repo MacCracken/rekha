@@ -937,7 +937,7 @@ class Interp:
             # Ins_IUP (ttinterp.c:6182-6290) returns at once when pts.n_contours == 0, which
             # is always the case for a prep / fpgm run: zone 1 is empty here.
             if self.pts.n_contours != 0:
-                raise AssertionError("IUP on a loaded glyph zone is 0.8.2's")
+                raise AssertionError("this interpreter runs fpgm and prep only: IUP never sees a loaded glyph zone")
         elif op == 0x32 or op == 0x33:
             self.ins_shp(op, st)
         elif op == 0x34 or op == 0x35:

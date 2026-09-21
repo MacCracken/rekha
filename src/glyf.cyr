@@ -137,82 +137,111 @@ fn rekha_load_abort(ctx): i64 {
 # outline.
 # ================================================================
 
-# Parse a SIMPLE glyph (numberOfContours nc > 0) spanning [start, end). Arrays
-# are i64 (xs/ys/end_pts) + u8 (on_curve); coords are absolute (delta-decoded)
-# design units. Empty for a truncated glyph, for endPtsOfContours that do not
-# strictly increase, for np > REKHA_COMPOSITE_MAXP, and for more points than the
-# remaining bytes could carry as flags. 0 only on OOM.
-fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
+# ================================================================
+# The simple-glyph decoder, in two halves shared by rekha_load_simple (which carves one block per
+# glyph) and by the hinted loader in src/hint.cyr (which decodes straight into the glyph zone's
+# arrays at a point offset): the header gates below size the arrays and locate the instructions,
+# and rekha_glyf_decode_simple writes the points into whatever arrays the caller hands it. One
+# decoder, one copy of the flag / delta logic, two owners of the memory it fills.
+# ================================================================
+
+# The simple-glyph header past numberOfContours and the bbox (ref2143/ttgload.c:341-431 reads the
+# same three things): the endPts array, the instruction length and bytes, then the first flag
+# byte. Writes six slots into `h`: +0 np (points), +8 the endPts offset, +16 the instruction
+# offset, +24 the instruction length, +32 the flags offset, +40 `end`. 1, or 0 with a code on the
+# font: endPts past the span (TRUNCATED "endPts"), a last endPt below the contour count (BAD_GLYF
+# "endPts"), np over the outline cap (OOM "point cap"), the instruction length or bytes past the
+# span (TRUNCATED "instructions"), more points than the remaining bytes could carry as flags
+# (BAD_GLYF "flags"). Two flag bytes (flag + REPEAT count) declare at most 256 points, so the
+# last gate refuses BEFORE a caller costs an allocation or a zone fill.
+fn rekha_glyf_simple_hdr(font, start, end, nc, h): i64 {
     var buf = rekha_font_data(font);
     var p = start + 10;                    # skip numberOfContours(2) + bbox(8)
-    if (p + nc * 2 > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "endPts"); }
-    # O(1) gates FIRST: the LAST endPt sizes the arrays; strict increase is walked below, once the
-    # glyph has been charged. ⛔ Walking all nc endPts before any cap let a composite of 63 rejected
-    # 32,767-contour glyphs spend ~2 M iterations in one load — MEASURED 9.6 ms, outside every budget.
+    if (p + nc * 2 > end) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "endPts"); }
+    # O(1) gates FIRST: the LAST endPt sizes the arrays; strict increase is walked by the decoder,
+    # once the glyph has been charged. ⛔ Walking all nc endPts before any cap let a composite of 63
+    # rejected 32,767-contour glyphs spend ~2 M iterations in one load — MEASURED 9.6 ms, outside
+    # every budget.
     var np = rekha_rd_u16(buf, p + (nc - 1) * 2) + 1;
-    if (nc > np) { return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "endPts"); }
-    if (np > REKHA_COMPOSITE_MAXP) { return rekha_fail_outline(font, REKHA_ERR_OOM, "point cap"); }
-    var eps_at = p;
+    if (nc > np) { return rekha_fail(font, REKHA_ERR_BAD_GLYF, "endPts"); }
+    if (np > REKHA_COMPOSITE_MAXP) { return rekha_fail(font, REKHA_ERR_OOM, "point cap"); }
+    store64(h, np);
+    store64(h + 8, p);
     p = p + nc * 2;
-
-    if (p + 2 > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "instructions"); }
+    if (p + 2 > end) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "instructions"); }
     var instr_len = rekha_rd_u16(buf, p);
+    store64(h + 16, p + 2);
+    store64(h + 24, instr_len);
     p = p + 2 + instr_len;
-    if (p > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "instructions"); }
-    # Two flag bytes (flag + REPEAT count) declare at most 256 points, so a glyph whose np exceeds
-    # what its remaining bytes could encode is refused BEFORE it costs an allocation.
-    if (np > (end - p) * 128 + 1) { return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "flags"); }
-    # Charged BEFORE the O(nc) walk (nc <= np), so the walk itself is inside the points budget.
-    var pts_left = load64(ctx + 8) - np;
-    if (pts_left < 0) { return rekha_load_abort(ctx); }
-    store64(ctx + 8, pts_left);
-    # ⛔ STRICTLY INCREASING, so the last endPt bounds every contour: an earlier endPt past np would
-    # walk emit off the point arrays.
+    if (p > end) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "instructions"); }
+    if (np > (end - p) * 128 + 1) { return rekha_fail(font, REKHA_ERR_BAD_GLYF, "flags"); }
+    store64(h + 32, p);
+    store64(h + 40, end);
+    return 1;
+}
+
+# 1 when the nc endPts at `eps_at` strictly increase — the pre-allocation gate of
+# rekha_load_simple, walked once the glyph has been charged (nc <= np, so it is inside the budget).
+fn rekha_glyf_endpts_ok(buf, eps_at, nc): i64 {
     var last = 0 - 1;
     var i = 0;
     while (i < nc) {
         var ep = rekha_rd_u16(buf, eps_at + i * 2);
-        if (ep <= last) { return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "endPts order"); }
+        if (ep <= last) { return 0; }
         last = ep;
         i = i + 1;
     }
+    return 1;
+}
 
-    var o = sd_alloc(REKHA_OUTLINE_SIZE + nc * 8 + np * 17);
-    if (o == 0) { return 0; }
-    var end_pts = o + REKHA_OUTLINE_SIZE;
-    var xs = end_pts + nc * 8;
-    var ys = xs + np * 8;
-    var on_curve = ys + np * 8;
-    # ⚠ The bytes are fetched AGAIN here, across an sd_alloc a hook could use to rewrite a shared
-    # buffer, so the check is repeated on what is STORED — the guarantee emit and the composite
-    # merge rely on is about end_pts, not about the font bytes.
-    last = 0 - 1;
-    i = 0;
+# Decode the endPts, flags, x and y of the simple glyph `h` describes (rekha_glyf_simple_hdr's six
+# slots) into the caller's arrays: eps i64[nc], xs / ys i64[np] in absolute design units, oc u8[np].
+# ⚠ oc holds each RAW flag byte until the y pass — the last reader — masks it to its on-curve bit,
+# so a caller may hand it the very byte array the flags will live in. ⛔ THE endPts ARE CHECKED ON
+# WHAT IS STORED, strictly increasing and ending at np - 1: the bytes are read here again, across
+# whatever the caller did between the header gates and this call (an sd_alloc a hook could use to
+# rewrite a shared buffer), and the guarantee every consumer of end_pts relies on is about the
+# stored array, not the font bytes. 1 when every array is complete; 0 when the bytes run out
+# (TRUNCATED, the caller's to name); -1 when an endPt breaks the order (BAD_GLYF "endPts order").
+# A 0 or -1 leaves the arrays partly written — the caller clears or refuses what it owns.
+fn rekha_glyf_decode_simple(buf, h, nc, eps, xs, ys, oc): i64 {
+    var np = load64(h);
+    var eps_at = load64(h + 8);
+    var p = load64(h + 32);
+    var end = load64(h + 40);
+    var last = 0 - 1;
+    var i = 0;
     while (i < nc) {
-        var ep2 = rekha_rd_u16(buf, eps_at + i * 2);
-        if (ep2 <= last) { return rekha_outline_clear(o); }
-        store64(end_pts + i * 8, ep2);
-        last = ep2;
+        var ep = rekha_rd_u16(buf, eps_at + i * 2);
+        if (ep <= last) { return 0 - 1; }
+        store64(eps + i * 8, ep);
+        last = ep;
         i = i + 1;
     }
-    if (last != np - 1) { return rekha_outline_clear(o); }
+    if (last != np - 1) { return 0 - 1; }
 
-    # The raw flag bytes decode INTO on_curve; the y pass (their last reader) masks each to 0/1.
+    # The raw flag bytes decode INTO oc; the y pass (their last reader) masks each to 0/1.
     var fi = 0;
     while (fi < np) {
-        if (p >= end) { return rekha_outline_clear(o); }
+        if (p >= end) { return 0; }
         var fl = load8(buf + p);
         p = p + 1;
-        store8(on_curve + fi, fl);
+        store8(oc + fi, fl);
         fi = fi + 1;
         if ((fl & 8) != 0) {
-            if (p >= end) { return rekha_outline_clear(o); }
+            if (p >= end) { return 0; }
             var rep = load8(buf + p);
             p = p + 1;
+            # ⚠ A REPEAT count past the last point is CLAMPED — a stated LENIENCY, the other way
+            # round from rekha's usual refusals: FreeType REFUSES the whole glyph as Invalid_Outline
+            # when the repeated flags would run past the point count (ref2143/ttgload.c:451-452),
+            # so such a glyph draws (and hints) here and does not load there. Both loaders share
+            # this decoder, so the unhinted and the hinted outline agree with each other; the
+            # pinned table in docs/development/roadmap.md carries the divergence.
             if (rep > np - fi) { rep = np - fi; }
             var r = 0;
             while (r < rep) {
-                store8(on_curve + fi, fl);
+                store8(oc + fi, fl);
                 fi = fi + 1;
                 r = r + 1;
             }
@@ -222,16 +251,16 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     var x = 0;
     var xi = 0;
     while (xi < np) {
-        var fx = load8(on_curve + xi);
+        var fx = load8(oc + xi);
         var dx = 0;
         if ((fx & 2) != 0) {
-            if (p >= end) { return rekha_outline_clear(o); }
+            if (p >= end) { return 0; }
             dx = load8(buf + p);
             p = p + 1;
             if ((fx & 16) == 0) { dx = 0 - dx; }
         } else {
             if ((fx & 16) == 0) {
-                if (p + 2 > end) { return rekha_outline_clear(o); }
+                if (p + 2 > end) { return 0; }
                 dx = rekha_rd_i16(buf, p);
                 p = p + 2;
             }
@@ -244,17 +273,17 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     var y = 0;
     var yi = 0;
     while (yi < np) {
-        var fy = load8(on_curve + yi);
-        store8(on_curve + yi, fy & 1);
+        var fy = load8(oc + yi);
+        store8(oc + yi, fy & 1);
         var dy = 0;
         if ((fy & 4) != 0) {
-            if (p >= end) { return rekha_outline_clear(o); }
+            if (p >= end) { return 0; }
             dy = load8(buf + p);
             p = p + 1;
             if ((fy & 32) == 0) { dy = 0 - dy; }
         } else {
             if ((fy & 32) == 0) {
-                if (p + 2 > end) { return rekha_outline_clear(o); }
+                if (p + 2 > end) { return 0; }
                 dy = rekha_rd_i16(buf, p);
                 p = p + 2;
             }
@@ -262,6 +291,41 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
         y = y + dy;
         store64(ys + yi * 8, y);
         yi = yi + 1;
+    }
+    return 1;
+}
+
+# Parse a SIMPLE glyph (numberOfContours nc > 0) spanning [start, end) into a fresh RekhaOutline.
+# Arrays are i64 (xs/ys/end_pts) + u8 (on_curve); coords are absolute (delta-decoded) design
+# units. Empty for a truncated glyph, for endPtsOfContours that do not strictly increase, for
+# np > REKHA_COMPOSITE_MAXP, and for more points than the remaining bytes could carry as flags
+# (each named through rekha_font_error by the header gates). 0 only on OOM.
+fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
+    var buf = rekha_font_data(font);
+    var h: i64[6];
+    if (rekha_glyf_simple_hdr(font, start, end, nc, &h) == 0) { return rekha_outline_empty(); }
+    var np = load64(&h);
+    # Charged BEFORE the O(nc) walk (nc <= np), so the walk itself is inside the points budget.
+    var pts_left = load64(ctx + 8) - np;
+    if (pts_left < 0) { return rekha_load_abort(ctx); }
+    store64(ctx + 8, pts_left);
+    # ⛔ STRICTLY INCREASING, so the last endPt bounds every contour: an earlier endPt past np would
+    # walk emit off the point arrays. Checked here before the allocation, and again by the decoder
+    # on what it stores.
+    if (rekha_glyf_endpts_ok(buf, load64(&h + 8), nc) == 0) {
+        return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "endPts order");
+    }
+
+    var o = sd_alloc(REKHA_OUTLINE_SIZE + nc * 8 + np * 17);
+    if (o == 0) { return 0; }
+    var end_pts = o + REKHA_OUTLINE_SIZE;
+    var xs = end_pts + nc * 8;
+    var ys = xs + np * 8;
+    var on_curve = ys + np * 8;
+    # A truncation or a re-read endPt out of order after the carve returns the block cleared, as
+    # every post-carve refusal here always has.
+    if (rekha_glyf_decode_simple(buf, &h, nc, end_pts, xs, ys, on_curve) != 1) {
+        return rekha_outline_clear(o);
     }
 
     # ⭐ VARIATIONS, and the one place they touch a TrueType outline: the points are decoded, the

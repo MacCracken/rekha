@@ -61,8 +61,15 @@ fn rekha_vert_resolve(f): i64 {
             store64(f + 616, rekha_rd_u16(buf, vh + 34));
         }
     }
-    store64(f + 624, rekha_find_table_len(f, REKHA_TAG_VMTX, &c));
-    store64(f + 632, load64(&c));
+    # ⛔ A ZERO-LENGTH vmtx IS ABSENT, as it is to FreeType, whose table lookup skips a directory
+    # entry with length 0 (tt_face_lookup_table, ref2143/ttload.c:80-88) so that its vmtx never
+    # loads and vertical_info stays 0: the readers below answer as with no table, and the hinted
+    # loader's vertical phantoms (src/hint.cyr rekha_hint_vmetrics) fall to OS/2 or hhea.
+    var vm = rekha_find_table_len(f, REKHA_TAG_VMTX, &c);
+    if (load64(&c) > 0) {
+        store64(f + 624, vm);
+        store64(f + 632, load64(&c));
+    }
     var vo = rekha_find_table_len(f, REKHA_TAG_VORG, &c);
     if (vo != 0) {
         if (load64(&c) >= 8) {

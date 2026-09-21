@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ftshim — the installed libfreetype, through ctypes, pinned to the classic interpreter (rekha 0.8.1).
+"""ftshim — the installed libfreetype, through ctypes, pinned to the classic interpreter (rekha 0.8.1 and up).
 
 ⛔ THIS IS THE ONE WAY rekha's hinting suite reaches an interpreter it did not write. Every other
 hinting oracle in scripts/ re-derives its numbers in Python from the same spec rekha read; this
@@ -32,6 +32,20 @@ freetype.h), stable since 2.x, and were probed against the 2.14.3 on this host.
     ftshim.hinted(face, 12, gid, pedantic=True)                       # raises FTError if any
                                                                       # instruction would have
                                                                       # been skipped silently
+    ftshim.set_size(face, 12, force=True)                             # a fresh `prep` at 12
+
+⛔ THE SIZE IS SET ONCE PER (FACE, PPEM), THE WAY A CONSUMER DRIVES FreeType. FT_Set_Pixel_Sizes
+requests the size anew — tt_size_reset puts cvt_ready back to -1 (ref2143/ttobjs.c:1292) — and
+the next hinted load then re-runs `prep`: the size's control values re-scaled from the font, the
+storage area and the twilight zone zeroed, INSTCTRL's one-load state reset. A shim that set the
+size before EVERY load would hand every glyph a prep-fresh interpreter and could never observe
+what one glyph program leaves for the next at a fixed size — a WCVTF written through into the
+size's cvt, a twilight point, INSTCTRL bit 2's persistent defaults — which rekha's context keeps
+exactly as FreeType's size does. So load_glyph calls FT_Set_Pixel_Sizes only when `ppem` differs
+from the face's last one (Face.ppem), and a caller that wants a fresh `prep` at the same size
+says so with set_size(face, ppem, force=True). The generators' rows are unaffected either way:
+scripts/hint_unit_vectors.py hints ONE glyph per fresh face, and scripts/hint_glyph_vectors.py
+walks the ppems glyph by glyph, so consecutive loads there never share a size.
 """
 import ctypes
 import ctypes.util
@@ -175,12 +189,14 @@ class FT_GlyphSlotRec(ctypes.Structure):
 
 
 class Face(object):
-    """An FT_Face plus whatever must outlive it: the memory buffer of a memory face."""
+    """An FT_Face plus whatever must outlive it: the memory buffer of a memory face — and the
+    ppem its size was last requested at (None until set_size / load_glyph sets one)."""
 
     def __init__(self, handle, keep, name):
         self.handle = handle
         self._keep = keep
         self.name = name
+        self.ppem = None
 
     @property
     def rec(self):
@@ -274,12 +290,23 @@ def char_index(face, ch):
     return _LIB.FT_Get_Char_Index(face.handle, ord(ch) if isinstance(ch, str) else ch)
 
 
-def load_glyph(face, ppem, gid, flags):
-    """FT_Set_Pixel_Sizes + FT_Load_Glyph with exactly `flags` (NO_BITMAP | NO_AUTOHINT are
-    always added). Returns (points, tags, contour_ends, advance_x); raises FTError on rc != 0."""
+def set_size(face, ppem, force=False):
+    """FT_Set_Pixel_Sizes(face, ppem) — only when `ppem` differs from the face's last size, or
+    when `force` asks for the request anyway (a fresh `prep` before the next hinted load, the
+    per-load pedantic check's shape). Raises FTError on rc != 0."""
+    if face.ppem == ppem and not force:
+        return
     rc = _LIB.FT_Set_Pixel_Sizes(face.handle, 0, ppem)
     if rc:
         raise FTError("FT_Set_Pixel_Sizes(%d)" % ppem, rc)
+    face.ppem = ppem
+
+
+def load_glyph(face, ppem, gid, flags):
+    """set_size (FT_Set_Pixel_Sizes only when `ppem` is not the face's current size) + FT_Load_Glyph
+    with exactly `flags` (NO_BITMAP | NO_AUTOHINT are always added). Returns (points, tags,
+    contour_ends, advance_x); raises FTError on rc != 0."""
+    set_size(face, ppem)
     rc = _LIB.FT_Load_Glyph(face.handle, gid, flags | FT_LOAD_NO_BITMAP | FT_LOAD_NO_AUTOHINT)
     if rc:
         raise FTError("FT_Load_Glyph(gid %d, ppem %d, flags 0x%x)" % (gid, ppem, flags), rc)
@@ -310,7 +337,8 @@ def contours(face, ppem, gid):
 
 
 def is_composite(face, gid):
-    """FreeType's own answer: loaded with NO_RECURSE a composite glyph stays FT_GLYPH_FORMAT_COMPOSITE."""
+    """FreeType's own answer: loaded with NO_RECURSE a composite glyph stays FT_GLYPH_FORMAT_COMPOSITE.
+    NO_SCALE: no size is requested and no program runs, so the face's `prep` state is untouched."""
     rc = _LIB.FT_Load_Glyph(face.handle, gid, FT_LOAD_NO_SCALE | FT_LOAD_NO_RECURSE | FT_LOAD_NO_BITMAP)
     if rc:
         raise FTError("FT_Load_Glyph(gid %d, NO_RECURSE)" % gid, rc)
