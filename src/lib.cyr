@@ -89,3 +89,7 @@ include "src/post.cyr"
 include "src/vert.cyr"
 include "src/gpos.cyr"
 include "src/kern.cyr"
+# hint.cyr is the TrueType bytecode interpreter: cvt / fpgm / prep / gasp, and the machine that
+# runs them. It uses var.cyr's axis state for GETVARIATION and sfnt.cyr's readers for everything
+# else, and nothing calls into it — a consumer asks for an interpreter or does not.
+include "src/hint.cyr"

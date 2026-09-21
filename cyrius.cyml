@@ -37,6 +37,7 @@ modules = [
     "src/vert.cyr",
     "src/gpos.cyr",
     "src/kern.cyr",
+    "src/hint.cyr",
 ]
 
 # `[lib.woff]` (`cyrius distlib woff` -> dist/rekha-woff.cyr) is rekha PLUS the two web-container
@@ -67,6 +68,7 @@ modules = [
     "src/vert.cyr",
     "src/gpos.cyr",
     "src/kern.cyr",
+    "src/hint.cyr",
     "src/woff.cyr",
     "src/woff2.cyr",
 ]

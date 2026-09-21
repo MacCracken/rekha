@@ -1,6 +1,6 @@
-# @public — the vocabulary rekha refuses in (0.7.0).
+# @public — the vocabulary rekha refuses in (0.7.0; a ninth code at 0.8.0).
 #
-# error.cyr — eight codes and their names. WHERE a code comes from is `rekha_font_error` in
+# error.cyr — nine codes and their names. WHERE a code comes from is `rekha_font_error` in
 # src/sfnt.cyr, which reports why a font handle's last call refused, and the `_why` twins of the
 # open family, which report why there is no handle at all.
 #
@@ -19,6 +19,11 @@
 #     produce would be the same promise one layer down.
 # A consumer that wants to carry an error around builds its own pair; the codes below are the part
 # that was ever load-bearing. Removing published names is why this happens BEFORE the 0.9.0 freeze.
+#
+# ⚠ REKHA_ERR_BAD_HINT (0.8.0) IS NOT REKHA_ERR_UNSUPPORTED, and src/hint.cyr keeps them apart on
+# purpose: BAD_HINT means the bytecode contradicts itself — a stack that underflows, a function
+# that was never defined, an IF with no EIF — and UNSUPPORTED means the bytecode is correct and
+# rekha is not there yet. A consumer asking "will this font ever hint here" tests for the second.
 
 # ================================================================
 # Error code constants
@@ -32,6 +37,7 @@ enum RekhaErrCode {
     REKHA_ERR_NO_TABLE    = 4;   # a required SFNT table (head/cmap/glyf/loca) is absent
     REKHA_ERR_BAD_GLYF    = 5;   # malformed glyf entry (bad contour/point counts)
     REKHA_ERR_UNSUPPORTED = 6;   # valid font but a feature rekha can't yet load
+    REKHA_ERR_BAD_HINT    = 7;   # malformed TrueType bytecode, or a machine invariant broken
     REKHA_ERR_OTHER       = 99;  # catch-all
 }
 
@@ -50,6 +56,7 @@ fn rekha_err_name(code): i64 {
     if (code == REKHA_ERR_NO_TABLE)    { return "required table absent"; }
     if (code == REKHA_ERR_BAD_GLYF)    { return "malformed glyf entry"; }
     if (code == REKHA_ERR_UNSUPPORTED) { return "unsupported feature"; }
+    if (code == REKHA_ERR_BAD_HINT)    { return "malformed hint program"; }
     if (code == REKHA_ERR_OTHER)       { return "other error"; }
     return "unknown error";
 }

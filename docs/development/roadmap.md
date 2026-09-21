@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.7.0**.
+> **Last updated:** 2026-09-20, at **0.8.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -26,7 +26,7 @@ out to sit one level below where it was being looked for — in `rekha_glyf_span
 
 | milestone | what it closes |
 |---|---|
-| **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. |
+| **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. **0.8.0 shipped the machine**; two releases left. |
 | **0.9.0 — the freeze** | An API that is declared, documented and promised, rather than merely exported. |
 | **1.0.0** | Lock it in. |
 
@@ -37,14 +37,50 @@ explicit **non-goal**.
 
 ## 0.8.x — hinting
 
-### TrueType hinting — `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter
+⭐ **0.8.0 shipped `src/hint.cyr`**: `cvt ` / `fpgm` / `prep` / `gasp`, the six `maxp` 1.0 limits,
+the stack machine, the rounding engine, flow control, functions, the graphics state, and the FONT
+PROGRAM running to completion — Liberation Sans's real 1,972 bytes, all 71 functions defined. What
+it does not do is move a point: 101 of the 256 opcodes are refused **by name** through
+`REKHA_ERR_UNSUPPORTED`.
 
-Already the standing "after 0.4.x" item. `grep -rn -E 'fpgm|prep' src/` → only the WOFF2 tag
-strings. This is the last thing between rekha's outlines and a legible 9-pixel glyph.
+### 0.8.1 — the zones, and `prep`
 
-⚠ **CFF hinting is a separate question the current wording hides.** `src/cff.cyr` parses `hstem` /
-`vstem` / `hintmask` for stem *count* — enough to know how many mask bytes follow — and discards
-the hints themselves. So "hinting" is two jobs, and only the TrueType one has ever been named.
+`grep -n 'REKHA_ERR_UNSUPPORTED' src/hint.cyr` → `rekha_hint_point_op`, the whole list.
+
+The twilight zone (zone 0, `maxTwilightPoints` of them) and the point machinery every instruction
+above needs: the projection and freedom vectors actually projecting, `GC` / `SCFS` / `MD`,
+`MDAP` / `MIAP` / `MDRP` / `MIRP` with the control-value cut-in and the minimum distance,
+`SHP` / `SHC` / `SHZ` / `SHPIX`, `IP`, `ALIGNRP` / `ALIGNPTS`, `ISECT`, `UTP`, `FLIPPT` and the
+range forms, `SPVTL` / `SFVTL` / `SDPVTL`, and `DELTAP1/2/3`. Then `prep` runs, which is what makes
+a size's control values the ones the font intended. ⚠ Liberation Sans's `prep` is 835 bytes and
+CALLs into `fpgm` 65 times, so it exercises most of that list at once — a good gate and a poor
+first test; the synthetic suite comes first.
+
+### 0.8.2 — the glyph zone, and a hinted outline
+
+Zone 1 with the four phantom points, the glyph program, composite hinting (`USE_MY_METRICS` and
+the per-component instruction rules), `IUP`, and the public call that returns a hinted outline.
+⚠ **The scaled-outline path does not exist yet either.** `rekha_load_glyph` answers in FONT UNITS
+and `rekha_outline_to_sdpath` scales at emit; a hinted glyph is fitted in F26Dot6 at a ppem, so
+this release also decides where that seam sits.
+
+### Pinned by 0.8.0, and not blocking the milestone
+
+- ⚠ **An out-of-range storage or control-value index is a refusal, where FreeType ignores it.**
+  `src/hint.cyr`, the `rekha_hint_op_mem` header. rekha's refuse-don't-guess policy, visible
+  through `rekha_hint_error`. The first thing to revisit if a real face trips it.
+- ⚠ **`INSTCTRL`'s operand order is unobserved.** The only site in the host corpus pushes `1 1`.
+  It follows FreeType and says so; a font that disagrees would be found by `prep` at 0.8.1.
+- ⚠ **`GETINFO` answers are fixed, not settable.** Version 35, grayscale on, no ClearType, not
+  rotated, not stretched. A consumer applying its own transform cannot tell the font about it.
+- ⚠ **`MPS` assumes 72 dpi**, because rekha carries no dpi. A font branching on it rather than on
+  `MPPEM` gets a consistent answer, not a device-correct one.
+
+### ⚠ CFF hinting is a separate question the wording hides
+
+`src/cff.cyr` parses `hstem` / `vstem` / `hintmask` for stem *count* — enough to know how many mask
+bytes follow — and discards the hints themselves. So "hinting" is two jobs, and only the TrueType
+one has ever been named or scheduled.
 
 ---
 
@@ -52,11 +88,15 @@ the hints themselves. So "hinting" is two jobs, and only the TrueType one has ev
 
 ### Declare the public surface, then promise it
 
-`grep -c '@public' src/*.cyr` → **34**, against 172 `fn` in `src/`. `@internal` is a *module*
-header tag, one per file. So the boundary is undeclared: `rekha_font_open`, `rekha_units_per_em`,
-`rekha_glyph_count`, `rekha_descender`, `rekha_line_gap` and `rekha_find_table` are public in
-practice — the README's own Quick Start and every consumer use them — and carry no marker, while
-138 functions are neither marked nor hidden.
+`cat src/*.cyr | grep -c '@public'` → **125**, against **362** `fn` in `src/`. `@internal` is a
+*module* header tag, one per file, and one `@public` comment often covers a run of sibling
+accessors — so neither number is a count of marked functions, which is itself the problem. The
+boundary is undeclared: `rekha_font_open`, `rekha_units_per_em`, `rekha_glyph_count`,
+`rekha_descender`, `rekha_line_gap` and `rekha_find_table` are public in practice — the README's
+own Quick Start and every consumer use them — and carry no marker.
+⚠ The figure here read "34 against 172" through 0.7.0 and was two milestones stale; eight releases
+of accessor-heavy modules and the interpreter moved it. Re-measure it at the freeze rather than
+quoting this line.
 
 The sibling shows the shape: **kashi** froze its API at 0.9.0, locked it at 1.0.0, and carries
 `docs/api/` with a written stability promise plus `docs/adr/` for the decisions behind it. rekha
@@ -120,6 +160,12 @@ quietly become permanent.
   in-repo fixtures are narrower by construction. A regression after 0.4.12 in any of those decoders
   would be caught only by the synthetic suites. Worth having: a scheduled workflow that installs
   fontTools and re-runs the sweeps, or a licence-clean mini-corpus with committed digests.
+- ⭐ **The hinting evidence is the exception to the whole bullet above**: `scripts/hint_vectors.py`
+  reads `fonts/LiberationSans-Regular.ttf`, which is COMMITTED, and the suite drives the same bytes
+  through the embedded face module — so the font program, the 71 function numbers, the `gasp`
+  ranges and the six per-size control-value digests all re-run in CI with no corpus at all. ⚠ What
+  is NOT in CI is the script itself: it needs fontTools, and the constants are transcribed into
+  `programs/hint_test.cyr` the way `programs/face_test.cyr`'s are.
 - ⚠ **The hostile corpus never touches the container parsers.** `grep -cin woff
   programs/hostile_test.cyr` → **0**. The seeded mutation sweep and the A/B sentinel differential
   cover the bare-SFNT reader; `.woff` and `.woff2` — the two inputs most likely to arrive off a

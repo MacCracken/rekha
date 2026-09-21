@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.7.0
+Version: 0.8.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -126,6 +126,29 @@ an advance query measured at 47 ns, so it is pinned rather than shipped.
   **433,648 B → 59,784 B**). Every byte rekha allocates goes through `sd_alloc` (0.3.10), so 20
   `rekha_char_to_sdpath` calls under an arena hook cost the global heap **exactly 0 bytes**.
 
+### Hinting — the machine, and the font program
+
+A TrueType face carries its own bytecode: `fpgm` is its function library, `prep` the program run
+once per size, `cvt ` the control values both read, and each glyph may carry a program too. 0.8.0
+is **the interpreter**, not yet the hinting.
+
+| | since | checked against |
+|---|---|---|
+| `cvt ` / `fpgm` / `prep` / `gasp`, and the six `maxp` 1.0 limits | 0.8.0 | the embedded face, against `scripts/hint_vectors.py` |
+| the machine: stack, storage, control values, arithmetic, all eight rounding modes, flow control, `FDEF` / `CALL` / `LOOPCALL` / `IDEF`, the graphics state | 0.8.0 | 411 checks, one instruction at a time |
+| running the **real font program** | 0.8.0 | Liberation Sans's own 1,972 bytes: **all 71 functions defined, by number, stack empty** |
+
+⛔ **No outline moves yet.** Every instruction that reads or writes a POINT — 101 of the 256
+opcodes — is **refused by name** with `REKHA_ERR_UNSUPPORTED`, never skipped: skipping leaves the
+stack at a depth the next instruction is not written for. `prep` and the glyph programs need zones,
+which is the next release.
+⭐ `rekha_should_gridfit(font, ppem)` already answers the first question a consumer of hinting asks,
+from `gasp`. A face with no `gasp` answers 1, which is the long-standing convention, stated rather
+than left implicit.
+⚠ This layer rounds **half away from zero**, not half up like the rest of rekha, because its
+reference is FreeType's interpreter rather than fontTools. They differ only on a negative value
+landing exactly on .5 — which at 12 ppem is four of Liberation Sans's control values.
+
 ### Safety
 
 0.3.11 closed four out-of-bounds reads reachable from `rekha_char_to_sdpath` and bounded composite
@@ -165,9 +188,9 @@ The full list, with the evidence behind every item, is
 |---|---|
 | ~~**0.5.x — conformance and the target**~~ | **Closed.** The CFF2 argument stack is the format's 513, not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; `FontMatrix` is read and applied instead of assumed; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. |
 | ~~**0.6.x — the font's own answers**~~ | **Closed.** The tables rekha transports and never reads: it resolved twelve, and now twenty-one. `HVAR` / `MVAR` (0.6.0), `OS/2` (0.6.1), `name` (0.6.2), `STAT` with `fvar`'s named instances (0.6.3), `post` (0.6.4), `kern` (0.6.5), **GPOS** pair positioning (0.6.6) and the **vertical metrics** (0.6.7) — which closed MVAR too: all 28 of its tags land. |
-| **0.7.x — failures that say what failed** | `RekhaErr` is published, documented, and produced by nothing: every refusal collapses to a 0 or an empty glyph, so a caller cannot tell "not a font" from "truncated" from "over a cap". |
-| **0.8.x — hinting** | `fpgm` / `prep` / `cvt ` and the glyph bytecode interpreter, for small sizes. CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
-| **0.9.0 — the freeze** | 34 of 172 functions carry `@public`, so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |
+| ~~**0.7.x — failures that say what failed**~~ | **Closed.** `RekhaErr` had been published and produced by nothing since 0.1.0. Every refusal now says which, out of the handle, with no byte allocated — and the ambiguity turned out to sit one level below where it was being looked for. |
+| **0.8.x — hinting** | **0.8.0 shipped the machine**: the tables, the interpreter and the font program. Left: the zones and `prep` (0.8.1), then the glyph programs and hinted outlines. ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
+| **0.9.0 — the freeze** | 125 `@public` markers against 362 `fn` in `src/`, so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |
 
 ⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
 complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and

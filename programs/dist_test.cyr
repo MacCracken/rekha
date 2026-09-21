@@ -58,7 +58,7 @@ fn main(): i64 {
     alloc_init();
 
     # ── the record layout the bundle ships ──
-    check(REKHA_FONT_SIZE, 688);                                       # 1 — 672 -> 688 in 0.7.0
+    check(REKHA_FONT_SIZE, 816);                                       # 1 — 688 -> 816 in 0.8.0
     check(REKHA_OUTLINE_SIZE, 48);                                     # 2
     # collections (0.4.8) are in the BASE bundle, not the WOFF one: a .ttc needs no decompressor
     check(rekha_ttc_count(0, 0), 0);                                   # 2a

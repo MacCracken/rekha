@@ -5,6 +5,130 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-09-20 — the hint machine, and the font program
+
+`grep -rn -E 'fpgm|prep' src/` answered with WOFF2 tag strings and nothing else, and had since
+0.4.x. This release is the TrueType bytecode interpreter: the tables, the machine, and the font
+program running on it.
+
+⛔ **THIS IS THE MACHINE AND NOT YET THE HINTING.** 0.8.0 executes every instruction that does not
+touch a POINT — the stack, the storage area, the control values, arithmetic, the rounding engine,
+flow control, function definition and call, and the graphics-state setters — and runs `fpgm` to
+completion. It moves no outline. `prep` and the glyph programs need zones, which is 0.8.1.
+⭐ **AND THE FONT PROGRAM IS REACHABLE ANYWAY**, because an `FDEF` body is SCANNED, not executed.
+Liberation Sans's `fpgm` is 1,972 bytes and its top level uses exactly **three** opcodes: NPUSHB,
+FDEF, and the ENDF that closes each body.
+
+### The headline, on the embedded face
+
+⭐ **rekha runs Liberation Sans's real font program and defines all 71 of its functions**, by
+number, with an empty stack at the end. `scripts/hint_vectors.py` re-walks the same bytes in Python
+with its own instruction-length table, its own FDEF scan and its own push stack, so 71 is not rekha
+agreeing with itself. The GAPS are asserted too — 12, 18, 19, 21..23, 25..30, 32, 41..43, 50..52,
+86 and 87 are not defined, and an off-by-one in the walk fills one of them.
+
+### ⛔ The rounding diverges from the rest of rekha, deliberately
+
+Everywhere else rekha rounds **half up** — `sd_asr(v + 32768, 16)`, fontTools' `otRound`, and what
+every differential since 0.5.0 was measured against. `src/hint.cyr` rounds **half away from zero**,
+because its reference is not fontTools but the interpreter a hinted glyph was drawn against:
+FreeType's `FT_MulFix` and `FT_DivFix` both take the absolute value, add a half, and re-sign.
+
+The two disagree only when a negative value lands exactly on .5 — which is not a contrived case.
+**At 12 ppem Liberation Sans has four control values there**: `cvt[19]`, `[22]` and `[25]` scale to
+**-8** away-from-zero and **-7** half-up, and `cvt[237]` to **-113** against **-112**. One 1/64
+pixel moves a point, so the reference wins over the house convention, and both readings are pinned
+in `programs/hint_test.cyr`.
+
+### ⭐ Three operand orders settled against real fonts, because the specs contradict themselves
+
+A published "Pops:" list is written top-of-stack-first in one instruction and push-order-first in
+the next, and the two readings are not equivalent. Rather than pick one:
+
+| instruction | what the bytecode showed |
+|---|---|
+| **LOOPCALL** | A host `prep` pushes `0 0 65 49 33 5 0` then LOOPCALL. As (f=0, count=5) it consumes the five values below and leaves nothing; as (count=0, f=5) it calls nothing and seven pushes are dead. **The function is on top.** |
+| **DELTAC1/2/3** | After the pair count each pair is (exception spec, then INDEX on top). A host `prep` pushes `64 21` against a **37-entry** `cvt `, and `63 18` against a 34-entry one. The other reading indexes entry 64 of 37. |
+| **WCVTP / WS** | `DUP RCVT RTG ROUND WCVTP` in Liberation Sans's own fpgm can only mean "write the rounded value to the index under it". **The value is on top.** |
+
+⚠ `INSTCTRL`'s order is **not** observed — the one real site pushes `1 1` — so it follows FreeType
+and says so in the source rather than claiming a measurement.
+
+### Added
+
+`src/hint.cyr` (1,686 lines). Tables: `cvt `, `fpgm`, `prep`, `gasp`, and the six `maxp` version
+1.0 limits the interpreter is sized by. ⛔ A version **0.5** `maxp` means no interpreter at all:
+it carries numGlyphs and nothing else, and rekha refuses rather than invent a stack depth.
+
+`rekha_hint_ctx(font, ppem)` builds the machine, scales the control values and runs the font
+program; `rekha_hint_run` executes any byte range; `rekha_hint_round` puts a distance through the
+current rounding state; `rekha_hint_gs` reads any of the 27 graphics-state fields by index — one
+accessor, not twenty-seven, on a surface about to be frozen. Plus `rekha_gasp_behavior` /
+`rekha_should_gridfit`, `rekha_cvt_count` / `_value` against `rekha_hint_cvt_px` (the font's bytes
+against the interpreter's own copy, which `prep` is entitled to have rewritten), the `maxp`
+readers, and `rekha_hint_error` / `_detail` in the 0.7.0 shape.
+
+⭐ **GETVARIATION is implemented**, not deferred: it is the one instruction outside the point
+machinery that rekha already had the answer to, from `rekha_var_set_axis`.
+
+### ⛔ A point instruction is named and refused, not skipped
+
+Twenty-seven instructions — **101 of the 256 opcodes**, once MDRP's and MIRP's thirty-two variants
+each are counted — read or write a point. Each answers `REKHA_ERR_UNSUPPORTED` with its own
+mnemonic as the detail. Skipping one would leave the stack at a depth the next instruction is not
+written for, and everything after it computes with someone else's operands — a plausible wrong
+glyph instead of a refusal. ⚠ `REKHA_ERR_BAD_HINT` (the ninth code) is the other half: the bytecode
+contradicts ITSELF. A consumer asking "will this font ever hint here" tests for UNSUPPORTED.
+
+### Decisions a font program can see
+
+`GETINFO` answers **version 35** — rekha implements the classic interpreter, and claiming 38 or 40
+would promise subpixel positioning and y-only hinting this does not do. Not rotated, not stretched,
+variations per the live axes, **grayscale smoothing on** (rekha's output is filled to coverage by
+sadish, which is grayscale anti-aliasing), every ClearType bit 0. `MPS` answers ppem in F26Dot6,
+because rekha carries no dpi and so defines the point size at 72 dots per inch.
+
+### Fixed, in this release's own first draft
+
+⭐ **A function is a range into the bytes of the program that DEFINED it**, and `fpgm` is not the
+only program there is. The first cut ran a called body against whichever buffer was executing,
+which reads whatever lies at those offsets and calls it bytecode. Caught by the suite's own `CALL`
+check, which got the untouched operand back instead of the sum. The function table carries the
+buffer now: 16 bytes per entry to 24, and an instruction definition 24 to 32.
+
+### Bounded
+
+One `sd_alloc`, sized by the font's own `maxp`: **11,232 B** for the embedded face, and the exact
+number is asserted. It is built lazily and cached on the handle, so an open still costs exactly
+`REKHA_FONT_SIZE`, and a size change RE-SCALES IT IN PLACE — `sd_alloc` has no free, and a text run
+walking sizes would otherwise leak one interpreter per size. Five caps (stack 8,192, storage 8,192,
+functions 4,096, instruction definitions 256, control values 16,384), an instruction budget of a
+million per run and a call depth of 64. ⚠ Every cap is a **refusal that names itself**, not a
+clamp: an interpreter running with a stack shorter than the font asked for silently computes a
+different glyph.
+
+`REKHA_FONT_SIZE` **688 -> 816**.
+
+### ⚠ Two divergences from FreeType, stated rather than found later
+
+- An index outside the font's own declared `maxStorage` or `cvt ` length is a **refusal**. FreeType,
+  outside its pedantic mode, ignores the write and reads back 0. rekha's policy is refuse-don't-
+  guess and the refusal is visible through `rekha_hint_error`; it is the first thing to revisit if
+  a face in the wild trips it.
+- The four engine compensations are **zero**, as FreeType's are. They modelled the pixel spread of
+  a CRT; with all four zero, `NROUND` is the identity and `ROUND`'s distance-type bits are read,
+  validated and make no difference. Said out loud rather than left as an empty table.
+
+`programs/hint_test.cyr` — **411 checks** over twelve groups: the real face's tables and `gasp`
+ranges, the font program and its function numbers, the control values at six sizes against an
+FNV-1a per size plus the four half-pixel entries, then a synthetic font driving the machine one
+instruction at a time — pushes, the stack, arithmetic, all eight rounding modes including SROUND's
+and S45ROUND's decomposition, flow control, `CALL` / `LOOPCALL` / `IDEF`, the storage area, the
+control values, `DELTAC1/2/3` at three delta bases, the whole graphics state, **twenty-one
+refusals each checked by the string it names itself with** plus two truncations by their code and
+the three the FONT handle reports because there is no context yet, and one allocation of a size the
+`maxp` decides with fifty programs after it costing zero.
+
 ## [0.7.0] - 2026-09-20 — `RekhaErr` gets a producer
 
 `src/error.cyr` has declared "@public — stable API surface for rekha error handling" since 0.1.0
