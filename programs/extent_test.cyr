@@ -642,8 +642,9 @@ fn t_alloc(buf): i64 {
     # 0.6.3 for fvar's named-instance array and STAT, 536 -> 552 in 0.6.4 for `post`,
     # 552 -> 568 in 0.6.5 for the legacy `kern` table,
     # 568 -> 608 in 0.6.6 for GPOS and its lazily resolved kern lookups,
-    # 608 -> 672 in 0.6.7 for vhea, vmtx, VORG and VVAR.
-    check(REKHA_FONT_SIZE, 672);
+    # 608 -> 672 in 0.6.7 for vhea, vmtx, VORG and VVAR,
+    # 672 -> 688 in 0.7.0 for the code and detail of this font's last refusal.
+    check(REKHA_FONT_SIZE, 688);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

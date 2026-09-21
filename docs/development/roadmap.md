@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.6.6**.
+> **Last updated:** 2026-09-20, at **0.7.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -19,42 +19,19 @@ holds, and no published name that does nothing.
 ⭐ **0.5.x and 0.6.x are both closed.** 0.5.x was the conformance milestone that opened
 this file; 0.6.x was "the tables rekha transports and never reads", and there are none left —
 rekha resolves **twenty-one**, and **all 28 of MVAR's tags** land on the field the spec names.
-See CHANGELOG 0.5.0 through 0.6.7. What remains is a published error vocabulary with no
-producer, hinting, and the freeze.
+⭐ **0.7.x is closed too**: the published error vocabulary has a producer, and the ambiguity turned
+out to sit one level below where it was being looked for — in `rekha_glyf_span`, whose 0 meant both
+"this glyph is a space" and "loca is lying". See CHANGELOG 0.5.0 through 0.7.0. What remains is
+**hinting** and **the freeze**.
 
 | milestone | what it closes |
 |---|---|
-| **0.7.x — failures that say what failed** | `RekhaErr` is published and has no producer. |
 | **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. |
 | **0.9.0 — the freeze** | An API that is declared, documented and promised, rather than merely exported. |
 | **1.0.0** | Lock it in. |
 
 Everything else is **pinned** (real, evidenced, unscheduled), **blocked on a sibling**, or an
 explicit **non-goal**.
-
----
-
-## 0.7.x — failures that say what failed
-
-### `RekhaErr` is published and nothing produces one
-
-`src/error.cyr:1` — *"@public — stable API surface for rekha error handling"*: eight codes, a
-16-byte record, four accessors, a RUN suite. `src/lib.cyr:45` states the fact plainly — *"error.cyr
-depends on nothing in rekha, and nothing in rekha calls it."* `grep -rn 'rekha_err' src/ programs/`
-outside `error.cyr` returns one comment and one test.
-
-Every failure collapses to a sentinel instead. `rekha_font_open` returns 0 for *null buffer*,
-*truncated*, *not an sfntVersion rekha takes*, *directory overruns the file* and *allocation
-failed* alike (`src/sfnt.cyr:186-190`). `rekha_load_glyph` returns an EMPTY outline for a malformed
-glyph, a tripped cap and a genuinely blank glyph alike. `rekha_advance_width` returns 0 for *no
-hhea*, *truncated hmtx* and *unknown* alike — and `src/sfnt.cyr:462` documents that 0 as "UNKNOWN,
-NOT ZERO-WIDTH", which is precisely the distinction the caller cannot make.
-
-⛔ **This is rekha's own house rule turned on rekha.** `src/sfnt.cyr:401`: *"THESE TWO TAGS WERE
-DECLARED AND NEVER READ … A declared tag with no reader is a promise, not a feature."* A declared
-error vocabulary with no producer is the same defect one layer up. Shipping it is a convention
-(out-param or a per-font last-error slot) plus wiring the refusal sites; the enum is already
-designed for it.
 
 ---
 
@@ -120,6 +97,8 @@ a milestone when a consumer asks.
 | **A vertical origin is not derived when a font states none** | `src/vert.cyr`, the header note | With no `VORG`, the convention is to derive one from the bounding box and the top side bearing. rekha answers 0 and says so through `rekha_vorg_present`, because a derived origin is a plausible wrong height for every glyph in a run. Wants a bbox accessor and a consumer that needs it. |
 | **GPOS kerning does not follow the axes** | `src/gpos.cyr`, the header note | A GPOS ValueRecord can carry a Device table or a VariationIndex into GDEF's ItemVariationStore. The store reader exists (`rekha_ivs_delta`, 0.6.0); GDEF is what is missing, so a variable font's GPOS kerning is read at its default. |
 | **GPOS script and language selection** | `src/gpos.cyr`, the header note | rekha takes the union of every `kern` feature's lookups. Doing it properly needs a script and a language on the API, which is a bigger question than the walk. |
+| **The WOFF / WOFF2 opens do not say why** | `src/woff.cyr`, `src/woff2.cyr` | 0.7.0 gave `rekha_font_open` and `_index` their `_why` twins; the container opens still answer a bare 0, and they are the deepest pipeline in the library and the least diagnosable. |
+| **The CFF interpreter's own refusals are silent** | `src/cff.cyr`, the `RC_BAD` sites | An OTTO glyph a charstring rule refused reports the same nothing a TrueType one used to. The handle slot is there; those sites are not wired. |
 | **`kern` format 2** | `src/kern.cyr`, the skip list | The two-dimensional class array. Rare, and a font carrying one alongside a format 0 still kerns from the format 0; none of the 16 host `kern` fonts has one rekha needed. |
 | **`post` glyph names** | `src/post.cyr`, the header note | Format 2.0's per-glyph name index, and the 258-name Macintosh standard order it indexes into — a table the size of everything else in that file. Glyph names serve tooling (PDF export, a debugger naming the glyph that failed); nothing rekha draws depends on one. |
 | **STAT style-name synthesis** | `src/stat.cyr`, the header note | rekha reads every field and joins none of them: which values apply, the `axisOrdering` sort, dropping the elidable names. Deliberately the consumer's, like `rekha_use_typo_metrics` — but if two consumers write the same loop it belongs here after all. |

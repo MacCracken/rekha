@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.6.7
+Version: 0.7.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -139,6 +139,21 @@ class, a seeded mutation sweep, and an A/B sentinel differential across the allo
 
 ⚠ The font buffer is **borrowed** and its metadata snapshotted at open — do not mutate it
 afterwards, and open fonts OUTSIDE a scoped per-frame `sd_alloc` hook.
+⚠ **One handle, one thread** (0.7.0). Readers write to the handle — GPOS resolves its kern lookups
+lazily, `rekha_var_set_axis` writes the coordinates, and a refusal records its reason — so share
+the borrowed font BYTES and open a handle per thread. That costs `REKHA_FONT_SIZE`, not the file.
+
+### Why a call refused
+
+A sentinel says something went wrong; it does not say what. Since 0.7.0 `rekha_font_error(font)`
+and `rekha_font_error_detail(font)` answer for the last call, and `rekha_font_open_why` answers
+where there is no handle yet to ask.
+
+⛔ **The values did not change** — an empty outline for a refused glyph, a 0 advance, an empty path
+— because every caller since 0.2.0 was written against them. What is new is telling them from the
+legitimate answers that look identical: a space is also an empty outline, a combining mark's
+advance is also 0, and `.notdef` is also glyph id 0. ⚠ Ask immediately after a call returned its
+sentinel: every call that can set a code clears it first, but a reader that cannot refuse does not.
 
 ## Roadmap
 

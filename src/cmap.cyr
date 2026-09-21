@@ -256,10 +256,14 @@ fn rekha_cmap_lookup(font, cp): i64 {
 # U+F000 + cp — symbol fonts put their glyphs in the private-use F0xx block.
 fn rekha_char_to_glyph(font, cp): i64 {
     if (font == 0) { return 0; }
-    if (cp < 0) { return 0; }
-    if (cp > 0x10FFFF) { return 0; }
+    # ⭐ gid 0 IS A REAL, DRAWABLE GLYPH — the .notdef box — so 0 has always meant three different
+    # things here: "this font does not map that character", "this font has no usable cmap at all",
+    # and "you asked for something that is not a codepoint". 0.7.0 tells them apart.
+    rekha_font_error_clear(font);
+    if (cp < 0) { return rekha_fail(font, REKHA_ERR_OTHER, "codepoint"); }
+    if (cp > 0x10FFFF) { return rekha_fail(font, REKHA_ERR_OTHER, "codepoint"); }
     var sub = load64(font + 144);
-    if (sub == 0) { return 0; }
+    if (sub == 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "cmap"); }
     var kind = load64(font + 168);
     var g = 0;
     if (kind == 4) {
@@ -274,14 +278,29 @@ fn rekha_char_to_glyph(font, cp): i64 {
     }
     var ng = load64(font + 56);
     if (ng > 0) {
-        if (g >= ng) { return 0; }
+        # ⛔ A map naming a glyph the font does not have is the font's error, not the caller's.
+        if (g >= ng) { return rekha_fail(font, REKHA_ERR_BAD_SFNT, "cmap glyph id"); }
     }
+    # ⚠ An UNMAPPED character is not an error: .notdef is the right answer and REKHA_OK stays.
     return g;
 }
 
 # @public — codepoint -> a positioned sadish SdPath (cmap + glyf + convert).
+# ⚠ THE WRAPPER DOES NOT CLEAR, and it does not change what it RETURNS either: an empty path for a
+# character this font cannot draw is the contract every caller since 0.3.0 was written against.
+# What it adds is that the reason survives the second call.
 fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
-    return rekha_glyph_to_sdpath(font, rekha_char_to_glyph(font, cp), scale, ox, oy);
+    var g = rekha_char_to_glyph(font, cp);
+    var e = rekha_font_error(font);
+    var d = rekha_font_error_detail(font);
+    var p = rekha_glyph_to_sdpath(font, g, scale, ox, oy);
+    # ⛔ THE FIRST REFUSAL OUTRANKS THE SECOND SILENCE. rekha_glyph_to_sdpath clears on entry
+    # through its own callee, so without this a cmap that could not be read would be reported as
+    # "nothing went wrong" once the empty glyph came back.
+    if (e != REKHA_OK) {
+        if (rekha_font_error(font) == REKHA_OK) { rekha_fail(font, e, d); }
+    }
+    return p;
 }
 
 # @public — the advance width of codepoint `cp`, in font DESIGN UNITS. 0 = unknown.

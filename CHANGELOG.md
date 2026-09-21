@@ -5,6 +5,80 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-09-20 — `RekhaErr` gets a producer
+
+`src/error.cyr` has declared "@public — stable API surface for rekha error handling" since 0.1.0
+and **nothing in rekha ever produced one**. Every failure collapsed to a sentinel:
+`rekha_advance_width` returned 0 for "no hhea", "hmtx truncated" and "this glyph is genuinely
+zero-width" alike, and its own comment said so. rekha's rule, written in `src/sfnt.cyr` about two
+tags it declared and never read, is that **a declared name with no reader is a promise and not a
+feature**. This release is the reader.
+
+⛔ **THE VALUE rekha RETURNS DOES NOT MOVE.** An empty outline for a refused glyph, a 0 advance, an
+empty path — every one is what it was, because every caller since 0.2.0 was written against them.
+What is new is that `rekha_font_error` says which.
+
+### The three ambiguities this exists for
+
+| the sentinel | what it meant | what tells them apart now |
+|---|---|---|
+| an EMPTY outline from `rekha_load_glyph` | a space, **or** any refusal there is | `REKHA_OK` means the blank was real |
+| a 0 from `rekha_advance_width` | a legal zero-width metric, **or** no hhea, **or** hmtx truncated | `REKHA_ERR_NO_TABLE` / `_TRUNCATED` |
+| a 0 from `rekha_char_to_glyph` | the drawable `.notdef` box, **or** this font has no cmap | `REKHA_ERR_NO_TABLE`, detail `"cmap"` |
+
+### Found while wiring it: the ambiguity was one level below where it was being looked for
+
+⭐ `rekha_glyf_span`'s own 0 meant **both** "the glyph is empty (e.g. space)" and "loca is lying" —
+its doc comment listed the two in the same bullet list. Wiring the LOADER alone therefore reported
+every space as a malformed glyph. The empty case is now silent and every other 0 says why, which
+also fixes the public `rekha_glyf_span` for anyone calling it directly.
+
+### Added
+
+`rekha_font_error(font)`, `rekha_font_error_detail(font)` — a short **static** cstring naming the
+table or field, never allocated and never owned by the caller — and `rekha_font_error_clear`.
+Plus `rekha_font_open_why(buf, len, err_out)` and `rekha_font_open_index_why(...)`, because an open
+fails **before there is a handle**, which is the whole failure; they take a caller-supplied i64
+slot (or 0 to ignore) and set it on success as well.
+
+Reporting today: the two `_why` opens, `rekha_glyf_span`, `rekha_load_glyph`,
+`rekha_glyph_to_sdpath`, `rekha_char_to_glyph`, `rekha_char_to_sdpath` and `rekha_advance_width`.
+⚠ **Not yet**: the WOFF and WOFF2 opens, and the CFF interpreter's own refusals. The metadata
+readers already answer through a `_present` probe and do not need one. Both gaps are pinned.
+
+### Removed — the 16-byte `RekhaErr` record, and its four helpers
+
+⛔ `rekha_err_new` called `sd_alloc(16)`, so **constructing an out-of-memory error allocated**. An
+error path that can fail the same way as the thing it reports is not an error path. Nothing
+produced one, and rekha now reports a code and a detail pointer straight out of the handle with no
+record to build and no byte allocated — `programs/error_test.cyr` group H pins that at zero.
+Removing published names is exactly what a pre-freeze release is for.
+
+### ⛔ Per handle, not a global, and the reason is not taste
+
+**Cyrius 6.6.6 has no thread-local storage and `lib/thread.cyr` exposes no thread id**, so a
+per-thread slot could not even be keyed: a global last-error would be **unfixable**, and calling it
+thread-safe would be the promise-that-is-not-a-feature this release exists to delete. rekha also
+has no mutable module-level state anywhere in `src/` — every `var` in the library is a constant —
+and a diagnostic is a poor reason to be the first.
+
+⚠ **ONE HANDLE, ONE THREAD** is a new obligation and is stated rather than glossed: share the
+borrowed font bytes, open a handle per thread, which costs `REKHA_FONT_SIZE` and not the file.
+⚠ The handle was already written by readers (GPOS resolves its lookups lazily, `rekha_var_set_axis`
+writes the coordinates); 0.7.0 adds to that, it does not introduce it.
+
+⚠ **The contract is "ask immediately after the sentinel."** Every call that can set a code clears it
+first, so a code describes the LAST call — but a reader that cannot refuse, like
+`rekha_units_per_em`, does not clear, so a question asked after one of those still reports what came
+before. That is a contract, not a guarantee, and it is written in the source rather than left to be
+discovered.
+
+`REKHA_FONT_SIZE` **672 -> 688**. ⇒ `programs/error_test.cyr` rewritten, **88 checks**: the
+vocabulary including every byte-value's name, a clean font that stays quiet, six open refusals
+through the `_why` slot, a blank glyph against a refused one, three advance failures told apart,
+`.notdef` against a missing cmap, the wrapper that must not lose the first reason, and a loop
+proving the whole mechanism allocates nothing.
+
 ## [0.6.7] - 2026-09-20 — vertical metrics, and the close of 0.6.x
 
 `vhea`, `vmtx`, `VORG` and `VVAR`: everything rekha knows about laying a line of text DOWN the page

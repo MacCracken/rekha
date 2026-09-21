@@ -1,15 +1,26 @@
-# programs/error_test.cyr — RUN test for src/error.cyr, rekha's error-code surface.
+# programs/error_test.cyr — RUN test for rekha's error surface (src/error.cyr + the producers).
 #
-# RekhaErr is a 16-byte record (code, detail pointer) built through sadish's sd_alloc seam, and
-# rekha_err_name maps each RekhaErrCode to a fixed cstring. Nothing else in rekha calls this
-# module, so no other suite reaches it: this one round-trips the record, pins EVERY code's name
-# byte for byte (an unknown code included), and checks the record follows an allocation hook.
-# Exit code = failed checks; each failure prints its check number to fd 2.
+# ⭐ WHAT CHANGED IN 0.7.0. This suite used to round-trip a 16-byte RekhaErr record and pin the
+# eight code names, and that was all there was to test, because NOTHING IN rekha PRODUCED ONE. The
+# record is gone — `rekha_err_new` called sd_alloc, so constructing an out-of-memory error
+# allocated — and what replaced it is a code and a detail pointer on the font handle. So this suite
+# is now mostly about PRODUCERS: it builds fonts that are broken in one specific way each and
+# checks rekha says which way.
+#
+# ⛔ THE THREE AMBIGUITIES THIS RELEASE EXISTS FOR, and each has a group here:
+#   - an EMPTY outline is the right answer for a space AND for every refusal (group D);
+#   - a 0 advance is a legal metric AND "no hhea" AND "hmtx truncated" (group E);
+#   - glyph id 0 is the drawable .notdef box AND "this font has no cmap" (group F).
+# In each, the value rekha returns is UNCHANGED — breaking that would break every caller — and what
+# is new is that REKHA_OK tells the legitimate answer from the refusal.
+#
+# Exit code = failed checks; each failure prints its number, group, got and want.
 
 include "programs/prelude.cyr"
 
 var g_fails = 0;
 var g_n = 0;
+var g_group = "";
 
 fn check(got, want): i64 {
     g_n = g_n + 1;
@@ -18,124 +29,399 @@ fn check(got, want): i64 {
     var m = "error_test: check failed at #";
     syscall(1, 2, m, strlen(m));
     fmt_int_fd(2, g_n);
+    syscall(1, 2, " (", 2);
+    syscall(1, 2, g_group, strlen(g_group));
+    syscall(1, 2, ") got ", 6);
+    fmt_int_fd(2, got);
+    syscall(1, 2, " want ", 6);
+    fmt_int_fd(2, want);
     syscall(1, 2, "\n", 1);
     return 1;
 }
 
-# 1 if the NUL-terminated strings a and b hold the same bytes, else 0. Compared byte-wise, so a
-# name that matches only as a prefix, or differs in one byte, is a mismatch.
+# 1 if the NUL-terminated strings a and b hold the same bytes, else 0.
 fn str_same(a, b): i64 {
     if (a == 0) { return 0; }
     if (b == 0) { return 0; }
     var i = 0;
-    while (1) {
-        var ca = load8(a + i);
-        if (ca != load8(b + i)) { return 0; }
-        if (ca == 0) { return 1; }
+    while (1 == 1) {
+        var x = load8(a + i);
+        var y = load8(b + i);
+        if (x != y) { return 0; }
+        if (x == 0) { return 1; }
         i = i + 1;
     }
     return 0;
 }
 
-var g_arena = 0;
+var FB = 0;
+var FB_CAP = 8192;
+var NG = 3;
 
-fn hook_alloc(n): i64 {
-    return arena_alloc(g_arena, n);
+fn pu16(off, v): i64 {
+    store8(FB + off, (v >> 8) & 255);
+    store8(FB + off + 1, v & 255);
+    return 0;
+}
+
+fn pu32(off, v): i64 {
+    pu16(off, (v >> 16) & 65535);
+    pu16(off + 2, v & 65535);
+    return 0;
+}
+
+# ── build options: each one breaks the font in exactly one way ─────────────────
+var o_nocmap = 0;
+var o_nohhea = 0;
+var o_nohmtx = 0;
+var o_shorthmtx = 0;    # declare an hmtx that does not hold its long metrics
+var o_badloca = 0;      # a loca entry that sends glyph 2 outside glyf
+var o_ver = 0x00010000; # the sfntVersion to write
+var o_trunc = 0;        # declare the font shorter than its directory
+
+var g_flen = 0;
+
+# One triangle, three on-curve points in one contour.
+fn put_glyph(at): i64 {
+    pu16(at, 1);                                        # numberOfContours
+    pu16(at + 2, 0); pu16(at + 4, 0);
+    pu16(at + 6, 100); pu16(at + 8, 100);
+    pu16(at + 10, 2);                                   # endPts[0] = 2 -> three points
+    pu16(at + 12, 0);                                   # instructionLength
+    # ON_CURVE | X_SHORT | Y_SHORT | X_POSITIVE | Y_POSITIVE
+    store8(FB + at + 14, 0x37); store8(FB + at + 15, 0x37); store8(FB + at + 16, 0x37);
+    store8(FB + at + 17, 0);  store8(FB + at + 18, 50); store8(FB + at + 19, 50);
+    store8(FB + at + 20, 0);  store8(FB + at + 21, 50); store8(FB + at + 22, 0);
+    return 24;
+}
+
+fn build(): i64 {
+    memset(FB, 0, FB_CAP);
+    var ntab = 7;
+    if (o_nocmap != 0) { ntab = ntab - 1; }
+    if (o_nohhea != 0) { ntab = ntab - 1; }
+    if (o_nohmtx != 0) { ntab = ntab - 1; }
+    pu32(0, o_ver);
+    pu16(4, ntab);
+    var at = 12 + ntab * 16;
+    var head_at = at;
+    var maxp_at = head_at + 56;
+    var hhea_at = maxp_at + 8;
+    var hmtx_at = hhea_at + 40;
+    var loca_at = hmtx_at + NG * 4;
+    var glyf_at = loca_at + (NG + 1) * 4;
+    var glen = put_glyph(glyf_at);
+    var cmap_at = glyf_at + glen;
+    var cmaplen = 12 + 262;
+
+    pu16(head_at + 18, 1000);
+    pu16(head_at + 50, 1);
+    pu16(maxp_at + 4, NG);
+    pu16(hhea_at + 34, NG);
+    var i = 0;
+    while (i < NG) {
+        pu16(hmtx_at + i * 4, 500 + i * 100);
+        i = i + 1;
+    }
+    # loca: glyph 0 empty (a real blank), glyph 1 the triangle, glyph 2 as o_badloca says
+    pu32(loca_at, 0);
+    pu32(loca_at + 4, 0);
+    pu32(loca_at + 8, glen);
+    if (o_badloca != 0) {
+        pu32(loca_at + 12, glen + 9000);                # ⛔ past the end of glyf
+    } else {
+        pu32(loca_at + 12, glen);
+    }
+    # cmap: one (0, 3) record, format 0, mapping 'A' to glyph 1
+    pu16(cmap_at, 0);
+    pu16(cmap_at + 2, 1);
+    pu16(cmap_at + 4, 0);
+    pu16(cmap_at + 6, 3);
+    pu32(cmap_at + 8, 12);
+    pu16(cmap_at + 12, 0);
+    pu16(cmap_at + 14, 262);
+    pu16(cmap_at + 16, 0);
+    store8(FB + cmap_at + 18 + 65, 1);
+
+    var d = 12;
+    pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    if (o_nohhea == 0) {
+        pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
+    }
+    if (o_nohmtx == 0) {
+        var hl = NG * 4;
+        if (o_shorthmtx != 0) { hl = 4; }
+        pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, hl); d = d + 16;
+    }
+    pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, (NG + 1) * 4); d = d + 16;
+    pu32(d, REKHA_TAG_GLYF); pu32(d + 8, glyf_at); pu32(d + 12, glen); d = d + 16;
+    if (o_nocmap == 0) {
+        pu32(d, REKHA_TAG_CMAP); pu32(d + 8, cmap_at); pu32(d + 12, cmaplen); d = d + 16;
+    }
+    g_flen = cmap_at + cmaplen;
+    if (o_trunc != 0) { g_flen = 12 + ntab * 16 - 4; }
+    return g_flen;
+}
+
+fn opts_reset(): i64 {
+    o_nocmap = 0;
+    o_nohhea = 0;
+    o_nohmtx = 0;
+    o_shorthmtx = 0;
+    o_badloca = 0;
+    o_ver = 0x00010000;
+    o_trunc = 0;
+    return 0;
+}
+
+var g_f = 0;
+
+fn openf(): i64 {
+    build();
+    g_f = rekha_font_open(FB, g_flen);
+    return g_f;
+}
+
+fn detail_is(s): i64 {
+    return check(str_same(rekha_font_error_detail(g_f), s), 1);
+}
+
+# ── A) the vocabulary ───────────────────────────────
+fn t_names(): i64 {
+    g_group = "A names";
+    check(REKHA_OK, 0);
+    check(str_same(rekha_err_name(REKHA_OK), "ok"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of memory"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_BAD_SFNT), "bad SFNT header"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_TRUNCATED), "truncated input"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_NO_TABLE), "required table absent"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_BAD_GLYF), "malformed glyf entry"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_UNSUPPORTED), "unsupported feature"), 1);
+    check(str_same(rekha_err_name(REKHA_ERR_OTHER), "other error"), 1);
+    # ⚠ an unknown code ANSWERS rather than refusing: a diagnostic that refuses is no diagnostic
+    check(str_same(rekha_err_name(12345), "unknown error"), 1);
+    check(str_same(rekha_err_name(0 - 1), "unknown error"), 1);
+    # every name is a non-empty cstring, for every code a byte could hold
+    var c = 0;
+    var bad = 0;
+    while (c < 256) {
+        var nm = rekha_err_name(c);
+        if (nm == 0) { bad = bad + 1; }
+        if (load8(nm) == 0) { bad = bad + 1; }
+        c = c + 1;
+    }
+    check(bad, 0);
+    return 0;
+}
+
+# ── B) a font that is fine says so ──────────────────────────
+fn t_clean(): i64 {
+    g_group = "B clean";
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_font_error(g_f), REKHA_OK);
+    check(rekha_font_error_detail(g_f), 0);
+    check(rekha_char_to_glyph(g_f, 65), 1);
+    check(rekha_font_error(g_f), REKHA_OK);
+    check(rekha_advance_width(g_f, 1), 600);
+    check(rekha_font_error(g_f), REKHA_OK);
+    check(rekha_outline_n_points(rekha_load_glyph(g_f, 1)), 3);
+    check(rekha_font_error(g_f), REKHA_OK);
+    # ⚠ the null handle is the CALLER's mistake, not a font error, and answers neutrally like
+    # every other accessor does
+    check(rekha_font_error(0), REKHA_OK);
+    check(rekha_font_error_detail(0), 0);
+    check(rekha_font_error_clear(0), 0);
+    return 0;
+}
+
+# ── C) why there is no handle ────────────────────────────
+fn t_open(): i64 {
+    g_group = "C open";
+    var e: i64[1];
+    opts_reset();
+    build();
+    store64(&e, 12345);
+    check(rekha_font_open_why(FB, g_flen, &e) != 0, 1);
+    check(load64(&e), REKHA_OK);                        # ⚠ set on SUCCESS too, not just failure
+    check(rekha_font_open_why(0, 100, &e), 0);
+    check(load64(&e), REKHA_ERR_OTHER);
+    check(rekha_font_open_why(FB, 4, &e), 0);
+    check(load64(&e), REKHA_ERR_TRUNCATED);
+    # ⛔ UNSUPPORTED, NOT BAD_SFNT. A `wOFF` or a Type 1 is a real font rekha does not open, and a
+    # caller that hears "unsupported" can try another entry point; "corrupt" would send it away.
+    opts_reset();
+    o_ver = 0x774F4646;                                 # 'wOFF'
+    build();
+    check(rekha_font_open_why(FB, g_flen, &e), 0);
+    check(load64(&e), REKHA_ERR_UNSUPPORTED);
+    # a directory that does not fit
+    opts_reset();
+    o_trunc = 1;
+    build();
+    check(rekha_font_open_why(FB, g_flen, &e), 0);
+    check(load64(&e), REKHA_ERR_TRUNCATED);
+    # an index past the faces of a non-collection
+    opts_reset();
+    build();
+    check(rekha_font_open_index_why(FB, g_flen, 3, &e), 0);
+    check(load64(&e), REKHA_ERR_OTHER);
+    # ⚠ a 0 slot is legal and means "do not tell me"
+    check(rekha_font_open_why(0, 100, 0), 0);
+    check(rekha_font_open_index_why(FB, g_flen, 0, 0) != 0, 1);
+    return 0;
+}
+
+# ── D) an empty outline: blank glyph, or refused? ─────────────────────
+fn t_glyph(): i64 {
+    g_group = "D glyph";
+    opts_reset();
+    check(openf() != 0, 1);
+    # ⭐ GLYPH 0 IS GENUINELY BLANK — loca says it spans nothing — and that is NOT an error.
+    var o = rekha_load_glyph(g_f, 0);
+    check(rekha_outline_n_contours(o), 0);
+    check(rekha_font_error(g_f), REKHA_OK);
+    # glyph 1 draws
+    check(rekha_outline_n_points(rekha_load_glyph(g_f, 1)), 3);
+    check(rekha_font_error(g_f), REKHA_OK);
+    # ⭐ AND GLYPH 2 IS REFUSED — the same empty outline, a different answer.
+    opts_reset();
+    o_badloca = 1;
+    check(openf() != 0, 1);
+    var o2 = rekha_load_glyph(g_f, 2);
+    check(rekha_outline_n_contours(o2), 0);
+    check(rekha_font_error(g_f) != REKHA_OK, 1);
+    # ⛔ AND IT CLEARS: the next good call answers OK again, so a code always describes the LAST
+    # call and never a stale failure from three calls ago.
+    check(rekha_outline_n_points(rekha_load_glyph(g_f, 1)), 3);
+    check(rekha_font_error(g_f), REKHA_OK);
+    check(rekha_font_error_detail(g_f), 0);
+    # the sdpath wrapper keeps the reason AND keeps its empty-path contract
+    rekha_load_glyph(g_f, 2);
+    var saved = rekha_font_error(g_f);
+    check(saved != REKHA_OK, 1);
+    var p = rekha_glyph_to_sdpath(g_f, 2, 65536, 0, 0);
+    check(sd_path_verb_count(p), 0);
+    check(rekha_font_error(g_f), saved);
+    return 0;
+}
+
+# ── E) a 0 advance: zero-width, or unreadable? ──────────────────────
+fn t_advance(): i64 {
+    g_group = "E advance";
+    opts_reset();
+    o_nohhea = 1;
+    check(openf() != 0, 1);
+    check(rekha_advance_width(g_f, 1), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);
+    detail_is("hhea");
+    opts_reset();
+    o_nohmtx = 1;
+    check(openf() != 0, 1);
+    check(rekha_advance_width(g_f, 1), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);
+    detail_is("hmtx");
+    # ⛔ TRUNCATED, not ABSENT: the table is there and does not hold what hhea says it does.
+    opts_reset();
+    o_shorthmtx = 1;
+    check(openf() != 0, 1);
+    check(rekha_advance_width(g_f, 2), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_TRUNCATED);
+    detail_is("hmtx");
+    # a negative glyph id is the caller's mistake
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_advance_width(g_f, 0 - 1), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+    return 0;
+}
+
+# ── F) glyph id 0: .notdef, or no cmap? ─────────────────────────
+fn t_cmap(): i64 {
+    g_group = "F cmap";
+    opts_reset();
+    check(openf() != 0, 1);
+    # ⭐ AN UNMAPPED CHARACTER IS NOT AN ERROR: .notdef is the right answer.
+    check(rekha_char_to_glyph(g_f, 90), 0);
+    check(rekha_font_error(g_f), REKHA_OK);
+    # ...but a font with no cmap at all is
+    opts_reset();
+    o_nocmap = 1;
+    check(openf() != 0, 1);
+    check(rekha_char_to_glyph(g_f, 65), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);
+    detail_is("cmap");
+    # not a codepoint
+    opts_reset();
+    check(openf() != 0, 1);
+    check(rekha_char_to_glyph(g_f, 0x110000), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+    return 0;
+}
+
+# ── G) the wrapper does not lose the first reason ─────────────────────
+fn t_wrapper(): i64 {
+    g_group = "G wrapper";
+    # ⛔ rekha_char_to_sdpath calls two things that each clear on entry. Without the save-and-
+    # restore, a cmap that could not be read would be reported as "nothing went wrong" the moment
+    # the empty glyph came back from the second call.
+    opts_reset();
+    o_nocmap = 1;
+    check(openf() != 0, 1);
+    var p = rekha_char_to_sdpath(g_f, 65, 65536, 0, 0);
+    check(sd_path_verb_count(p), 0);                    # the RETURN contract is unchanged
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);   # ...and the reason survived
+    detail_is("cmap");
+    # a mapped character on a good font draws and says nothing
+    opts_reset();
+    check(openf() != 0, 1);
+    check(sd_path_verb_count(rekha_char_to_sdpath(g_f, 65, 65536, 0, 0)) > 0, 1);
+    check(rekha_font_error(g_f), REKHA_OK);
+    # an unmapped one draws .notdef, which here is blank, and is still not an error
+    check(sd_path_verb_count(rekha_char_to_sdpath(g_f, 90, 65536, 0, 0)), 0);
+    check(rekha_font_error(g_f), REKHA_OK);
+    return 0;
+}
+
+# ── H) it costs no allocation ────────────────────────────
+fn t_alloc(): i64 {
+    g_group = "H alloc";
+    opts_reset();
+    check(openf() != 0, 1);
+    rekha_char_to_glyph(g_f, 65);
+    var m = alloc_used();
+    # ⛔ READING A REASON ALLOCATES NOTHING, which is the whole reason the 16-byte record went: its
+    # constructor called sd_alloc, so building an out-of-memory error could itself fail.
+    var i = 0;
+    while (i < 50) {
+        rekha_font_error(g_f);
+        rekha_font_error_detail(g_f);
+        rekha_advance_width(g_f, 1);
+        rekha_char_to_glyph(g_f, 65);
+        rekha_font_error_clear(g_f);
+        i = i + 1;
+    }
+    check(alloc_used() - m, 0);
+    return 0;
 }
 
 fn main(): i64 {
     alloc_init();
-
-    # ── the code values are the ABI: a renumbering breaks every consumer that stored one ──
-    check(REKHA_OK, 0);                                                # 1
-    check(REKHA_ERR_OOM, 1);                                           # 2
-    check(REKHA_ERR_BAD_SFNT, 2);                                      # 3
-    check(REKHA_ERR_TRUNCATED, 3);                                     # 4
-    check(REKHA_ERR_NO_TABLE, 4);                                      # 5
-    check(REKHA_ERR_BAD_GLYF, 5);                                      # 6
-    check(REKHA_ERR_UNSUPPORTED, 6);                                   # 7
-    check(REKHA_ERR_OTHER, 99);                                        # 8
-
-    # ── round-trip: rekha_err_new / rekha_err / rekha_err_code / rekha_err_detail ──
-    var msg = "loca offset past glyf";
-    var e = rekha_err_new(REKHA_ERR_BAD_GLYF, msg);
-    check(e != 0, 1);                                                  # 9
-    check(rekha_err_code(e), REKHA_ERR_BAD_GLYF);                      # 10
-    check(rekha_err_detail(e), msg);                                   # 11 — the pointer itself
-    check(str_same(rekha_err_detail(e), "loca offset past glyf"), 1);  # 12
-    var e0 = rekha_err(REKHA_ERR_TRUNCATED);
-    check(e0 != 0, 1);                                                 # 13
-    check(e0 != e, 1);                                                 # 14 — a fresh record
-    check(rekha_err_code(e0), REKHA_ERR_TRUNCATED);                    # 15
-    check(rekha_err_detail(e0), 0);                                    # 16 — rekha_err has no detail
-    # the first record is untouched by the second
-    check(rekha_err_code(e), REKHA_ERR_BAD_GLYF);                      # 17
-    check(rekha_err_detail(e), msg);                                   # 18
-    # an OK record and an out-of-enum code round-trip unchanged too (the record does not validate)
-    var eok = rekha_err(REKHA_OK);
-    check(rekha_err_code(eok), 0);                                     # 19
-    check(rekha_err_detail(eok), 0);                                   # 20
-    var eodd = rekha_err_new(12345, msg);
-    check(rekha_err_code(eodd), 12345);                                # 21
-    check(rekha_err_detail(eodd), msg);                                # 22
-
-    # ── the record is 16 B from sd_alloc: under a hook it lands on the arena, not the heap ──
-    g_arena = arena_new_growable(65536);
-    check(g_arena != 0, 1);                                            # 23
-    check(sd_alloc_set(&hook_alloc), 0);                               # 24
-    var gb = alloc_used();
-    var ab = arena_used(g_arena);
-    var eh = rekha_err_new(REKHA_ERR_OOM, 0);
-    check(alloc_used() - gb, 0);                                       # 25
-    check(arena_used(g_arena) - ab, 16);                               # 26
-    check(rekha_err_code(eh), REKHA_ERR_OOM);                          # 27
-    check(sd_alloc_set(0), &hook_alloc);                               # 28
-    gb = alloc_used();
-    rekha_err(REKHA_ERR_OTHER);
-    check(alloc_used() - gb, 16);                                      # 29 — back on the heap
-
-    # ── rekha_err_name: every code, byte for byte, and the fallback for an unknown one ──
-    check(str_same(rekha_err_name(REKHA_OK), "ok"), 1);                               # 30
-    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of memory"), 1);               # 31
-    check(str_same(rekha_err_name(REKHA_ERR_BAD_SFNT), "bad SFNT header"), 1);        # 32
-    check(str_same(rekha_err_name(REKHA_ERR_TRUNCATED), "truncated input"), 1);       # 33
-    check(str_same(rekha_err_name(REKHA_ERR_NO_TABLE), "required table absent"), 1);  # 34
-    check(str_same(rekha_err_name(REKHA_ERR_BAD_GLYF), "malformed glyf entry"), 1);   # 35
-    check(str_same(rekha_err_name(REKHA_ERR_UNSUPPORTED), "unsupported feature"), 1); # 36
-    check(str_same(rekha_err_name(REKHA_ERR_OTHER), "other error"), 1);               # 37
-    check(str_same(rekha_err_name(7), "unknown error"), 1);                           # 38 — a gap
-    check(str_same(rekha_err_name(98), "unknown error"), 1);                          # 39
-    check(str_same(rekha_err_name(100), "unknown error"), 1);                         # 40
-    check(str_same(rekha_err_name(0 - 1), "unknown error"), 1);                       # 41
-    # the comparison is not vacuous: a near-miss and a prefix are both mismatches
-    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of memorY"), 0);               # 42
-    check(str_same(rekha_err_name(REKHA_ERR_OOM), "out of"), 0);                      # 43
-    # never null, for any code
-    var c = 0 - 4;
-    var nonnull = 1;
-    while (c < 256) {
-        if (rekha_err_name(c) == 0) { nonnull = 0; }
-        c = c + 1;
-    }
-    check(nonnull, 1);                                                 # 44
-
-    # ── 0.5.0: rekha_err_print_name is GONE from src/. It wrote the name to fd 2 through a raw
-    # `syscall(1, 2, ...)`, which is `write` on x86_64 and AGNOS and `io_destroy` on aarch64, and
-    # it was the only syscall in library code. Printing is the HARNESS's job; the library hands
-    # back the cstring and nothing else. This is that same line, done here. ──
-    var pre = "error_test: rekha_err_name -> ";
-    syscall(1, 2, pre, strlen(pre));
-    var nm = rekha_err_name(REKHA_ERR_TRUNCATED);
-    syscall(1, 2, nm, strlen(nm));
-    check(strlen(nm) > 0, 1);                                          # 45
-    syscall(1, 2, "\n", 1);
-
+    FB = alloc(FB_CAP);
+    t_names();
+    t_clean();
+    t_open();
+    t_glyph();
+    t_advance();
+    t_cmap();
+    t_wrapper();
+    t_alloc();
     if (g_fails == 0) {
-        var ok = "error_test: PASS (RekhaErr round-trip + every code's name)\n";
+        var ok = "error_test: PASS (the vocabulary, and the producers 0.7.0 gave it; ";
         syscall(1, 1, ok, strlen(ok));
-    } else {
-        var bad = "error_test: FAIL\n";
-        syscall(1, 2, bad, strlen(bad));
+        fmt_int(g_n);
+        syscall(1, 1, " checks)\n", 9);
     }
     return g_fails;
 }

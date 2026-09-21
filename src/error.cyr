@@ -1,18 +1,24 @@
-# @public — stable API surface for rekha error handling.
+# @public — the vocabulary rekha refuses in (0.7.0).
 #
-# ⚠ NOTHING IN rekha PRODUCES ONE YET. The codes, the record and the accessors are here; every
-# entry point still fails to a sentinel (0, or an empty outline). Wiring the refusal sites to this
-# vocabulary is its own milestone — docs/development/roadmap.md, 0.7.x — and until then this file
-# is a declared surface, which by rekha's own rule is a promise rather than a feature.
-# error.cyr — rekha vector/outline font error codes + Result helpers.
+# error.cyr — eight codes and their names. WHERE a code comes from is `rekha_font_error` in
+# src/sfnt.cyr, which reports why a font handle's last call refused, and the `_why` twins of the
+# open family, which report why there is no handle at all.
 #
-# RekhaErr is a 16-byte record (code + optional detail pointer). Error
-# codes are integer constants; for errors that carry context (a message
-# pointer), use rekha_err_new(code, msg).
+# ⭐ THIS FILE WAS A PROMISE FOR SIX RELEASES. Through 0.6.7 it declared "@public — stable API
+# surface for rekha error handling" and nothing in rekha produced one: every failure collapsed to a
+# sentinel, and `rekha_advance_width` returned 0 for "no hhea", "truncated hmtx" and "this glyph is
+# genuinely zero-width" alike. rekha's own rule, at src/sfnt.cyr's two-tags note, is that a
+# declared name with no reader is a promise and not a feature. 0.7.0 is the reader.
 #
-# RekhaErr struct layout (16 bytes):
-#   +0: code    — error code constant (one of the REKHA_* below)
-#   +8: detail  — pointer to detail string (or 0)
+# ⛔ THE 16-BYTE RekhaErr RECORD IS GONE, and so are `rekha_err_new`, `rekha_err`,
+# `rekha_err_code` and `rekha_err_detail`. Two reasons, and the first is the serious one:
+#   - `rekha_err_new` called `sd_alloc(16)`, so CONSTRUCTING AN OUT-OF-MEMORY ERROR ALLOCATED. An
+#     error path that can fail the same way as the thing it is reporting is not an error path.
+#   - Nothing produced one, and rekha now reports a code and a detail POINTER directly out of the
+#     font handle, with no record to build and no byte allocated. Keeping a type rekha does not
+#     produce would be the same promise one layer down.
+# A consumer that wants to carry an error around builds its own pair; the codes below are the part
+# that was ever load-bearing. Removing published names is why this happens BEFORE the 0.9.0 freeze.
 
 # ================================================================
 # Error code constants
@@ -30,36 +36,12 @@ enum RekhaErrCode {
 }
 
 # ================================================================
-# RekhaErr struct
-# ================================================================
-
-# Create a RekhaErr with code and an optional detail string (0 = none).
-fn rekha_err_new(code, detail): i64 {
-    var e = sd_alloc(16);
-    store64(e, code);
-    store64(e + 8, detail);
-    return e;
-}
-
-# Create a RekhaErr with code only (no detail).
-fn rekha_err(code): i64 {
-    return rekha_err_new(code, 0);
-}
-
-# Get the error code.
-fn rekha_err_code(e): i64 {
-    return load64(e);
-}
-
-# Get the detail string pointer (or 0).
-fn rekha_err_detail(e): i64 {
-    return load64(e + 8);
-}
-
-# ================================================================
 # Error name lookup — returns a cstring (never null).
 # ================================================================
 
+# @public — a short, fixed cstring for a code. Never null, and never allocated: every string here
+# is a literal in the bundle. An unknown code answers "unknown error" rather than refusing, because
+# a diagnostic that refuses is no diagnostic.
 fn rekha_err_name(code): i64 {
     if (code == REKHA_OK)              { return "ok"; }
     if (code == REKHA_ERR_OOM)         { return "out of memory"; }

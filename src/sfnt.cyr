@@ -153,6 +153,9 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +360 cff_mtx_on  (i64 — 1 when the CFF / CFF2 FontMatrix is NOT the identity once folded with
 #                      unitsPerEm, so the charstring point store has to transform. 0 = nothing to
 #                      do, which is every font whose FontMatrix is 1 / upem. 0.5.1.)
+#   +672 err_code  +680 err_detail (i64 — why THIS font's last public call refused, and a static
+#                      cstring naming where. Cleared at the top of every public call that can set
+#                      it, so it describes the LAST call and not the last failure ever. 0.7.0.)
 #   +608 vhea  +616 num_v_metrics · +624 vmtx  +632 vmtx_len · +640 vorg  +648 vorg_end ·
 #                      +656 vvar  +664 vvar_end (i64 — the vertical metrics. 0 = absent. 0.6.7.)
 #   +576 gpos  +584 gpos_end · +592 gpos_lookups · +600 gpos_nlookups (i64 — the GPOS table, and
@@ -208,7 +211,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 672;
+var REKHA_FONT_SIZE = 688;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -259,44 +262,73 @@ fn rekha_ttc_count(buf, len): i64 {
 # instead carries the floor that DOES hold (+248): the end of the TTC header and its offset array.
 # rekha_find_table_len keeps the old rule for a plain SFNT and adds an overlap test that catches
 # what the floor no longer does.
-fn rekha_font_open_index(buf, len, index): i64 {
-    if (buf == 0) { return 0; }
-    if (index < 0) { return 0; }
-    if (len < REKHA_SFNT_OFFTAB_LEN) { return 0; }
+# Set `*out` when the caller gave one. The open family's answer to "there is no handle to record
+# into" — a caller's own slot instead of rekha's, which keeps the whole thing reentrant.
+fn rekha_err_out(out, code): i64 {
+    if (out != 0) { store64(out, code); }
+    return 0;
+}
+
+# @public — open face `index` and say WHY when it will not. `err_out` is a caller-supplied i64 slot
+# (or 0 to ignore); on failure it gets a RekhaErrCode, on success REKHA_OK.
+# ⛔ THE OPEN FAMILY CANNOT USE `rekha_font_error`: there is no handle yet, which is the whole
+# failure. So these take a slot rather than rekha owning one — six functions rather than a global,
+# and rekha stays reentrant.
+fn rekha_font_open_index_why(buf, len, index, err_out): i64 {
+    rekha_err_out(err_out, REKHA_OK);
+    if (buf == 0) { return rekha_err_out(err_out, REKHA_ERR_OTHER); }
+    if (index < 0) { return rekha_err_out(err_out, REKHA_ERR_OTHER); }
+    if (len < REKHA_SFNT_OFFTAB_LEN) { return rekha_err_out(err_out, REKHA_ERR_TRUNCATED); }
     var base = 0;
     var minoff = 0;
     if (rekha_rd_u32(buf, 0) == REKHA_TAG_TTCF) {
         var nf = rekha_ttc_count(buf, len);
-        if (nf == 0) { return 0; }
-        if (index >= nf) { return 0; }
+        if (nf == 0) { return rekha_err_out(err_out, REKHA_ERR_BAD_SFNT); }
+        if (index >= nf) { return rekha_err_out(err_out, REKHA_ERR_OTHER); }
         minoff = 12 + nf * 4;
         base = rekha_rd_u32(buf, 12 + index * 4);
-        if (base < minoff) { return 0; }
-        if (base + REKHA_SFNT_OFFTAB_LEN > len) { return 0; }
+        if (base < minoff) { return rekha_err_out(err_out, REKHA_ERR_BAD_SFNT); }
+        if (base + REKHA_SFNT_OFFTAB_LEN > len) { return rekha_err_out(err_out, REKHA_ERR_TRUNCATED); }
     } else {
-        if (index != 0) { return 0; }
+        if (index != 0) { return rekha_err_out(err_out, REKHA_ERR_OTHER); }
     }
     var ver = rekha_rd_u32(buf, base);
     if (ver != REKHA_SFNT_VER_TT) {
         if (ver != REKHA_SFNT_VER_TRUE) {
-            if (ver != REKHA_SFNT_VER_OTTO) { return 0; }
+            # ⚠ UNSUPPORTED, not BAD_SFNT: a `wOFF`, a `ttcf` asked for at a bad index, or a
+            # PostScript Type 1 is a real font rekha does not open, and a caller that hears
+            # "unsupported" can try another entry point. "Corrupt" would send it away.
+            if (ver != REKHA_SFNT_VER_OTTO) { return rekha_err_out(err_out, REKHA_ERR_UNSUPPORTED); }
         }
     }
     var n = rekha_rd_u16(buf, base + 4);
     # the directory (numTables entries) must lie within the file
-    if (base + REKHA_SFNT_OFFTAB_LEN + n * REKHA_SFNT_DIRENT_LEN > len) { return 0; }
+    if (base + REKHA_SFNT_OFFTAB_LEN + n * REKHA_SFNT_DIRENT_LEN > len) {
+        return rekha_err_out(err_out, REKHA_ERR_TRUNCATED);
+    }
     if (minoff == 0) { minoff = REKHA_SFNT_OFFTAB_LEN + n * REKHA_SFNT_DIRENT_LEN; }
 
     var f = sd_alloc(REKHA_FONT_SIZE);
-    if (f == 0) { return 0; }
+    if (f == 0) { return rekha_err_out(err_out, REKHA_ERR_OOM); }
     store64(f, buf);
     store64(f + 8, len);
     store64(f + 16, ver);
     store64(f + 24, n);
     store64(f + 32, base + REKHA_SFNT_OFFTAB_LEN);
     store64(f + 248, minoff);
+    store64(f + 672, REKHA_OK);
+    store64(f + 680, 0);
     rekha_font_resolve(f);
     return f;
+}
+
+fn rekha_font_open_index(buf, len, index): i64 {
+    return rekha_font_open_index_why(buf, len, index, 0);
+}
+
+# @public — open face 0 and say why when it will not. The twin of rekha_font_open.
+fn rekha_font_open_why(buf, len, err_out): i64 {
+    return rekha_font_open_index_why(buf, len, 0, err_out);
 }
 
 # Fill the table cache (+40..+359) of a RekhaFont whose +0..+32 header fields are set.
@@ -409,6 +441,81 @@ fn rekha_find_table(f, tag): i64 {
 # head.unitsPerEm (u16 at head+18) — the em-square size; glyph coords are in
 # these design units and the consumer scales by pixel_size / unitsPerEm.
 # Returns 0 if the handle is 0 or head is absent / shorter than 54 B.
+# ================================================================
+# Why the last call refused — the producer for src/error.cyr's codes (0.7.0)
+# ================================================================
+# ⭐ WHY IT LIVES ON THE HANDLE. Every failure rekha has that a caller cannot otherwise tell from a
+# legitimate answer happens to a font that is already open: an empty outline that might be a blank
+# glyph or a refused one, a 0 advance that might be a zero-width glyph or an absent hmtx, a glyph
+# id 0 that might be .notdef or an unreadable cmap. The handle is where that belongs.
+# ⛔ NOT A GLOBAL. rekha has no mutable module-level state anywhere in src/ — every `var` in the
+# library is a constant — and a global last-error would make rekha non-reentrant for the first
+# time, invisibly, for the sake of a diagnostic. Two threads drawing two fonts keep their own
+# answers this way, and the only cost is one slot in a record that already caches twenty tables.
+# ⚠ THE OPEN FAMILY CANNOT USE IT: `rekha_font_open` fails before there is a handle to write to.
+# Those have `_why` twins that take a caller's i64 slot instead — six functions, not ninety-four.
+#
+# ⛔ CLEARED AT THE TOP OF EVERY PUBLIC CALL THAT CAN SET IT, so it describes the call that just
+# returned and not a stale failure from three calls ago. The cost is one store; the readers it sits
+# in front of were MEASURED at 47 ns and 1.5 us and neither moves.
+# ⚠ AND THE CONTRACT IS EXACTLY THAT: ask immediately after a call returned its sentinel. A reader
+# that CANNOT refuse — `rekha_units_per_em`, `rekha_glyph_count` — does not clear, so an advance
+# failure followed by one of those and then a question still reports the advance. That is a
+# contract, not a guarantee, which is why it is written here rather than left to be discovered.
+# ⚠ REKHA_OK is 0, so a font that has refused nothing answers 0 — which is what a caller who never
+# asks gets, and costs nothing.
+#
+# ⚠ ONE HANDLE, ONE THREAD. Two threads sharing a handle now race on these two slots. That is a new
+# obligation and it is stated rather than glossed: SHARE THE BORROWED FONT BYTES and open a handle
+# per thread, which costs REKHA_FONT_SIZE and not the file. ⛔ A global would have been worse and
+# not merely by taste: Cyrius 6.6.6 has no thread-local storage and `lib/thread.cyr` exposes no
+# thread id, so a per-thread slot cannot even be KEYED — a global last-error would be unfixable,
+# and calling it thread-safe would be the promise-that-is-not-a-feature this release exists to
+# delete. ⚠ The handle was already written by readers before this (GPOS resolves its lookups
+# lazily into `font + 592`, `rekha_var_set_axis` writes the coordinates); 0.7.0 adds to that, it
+# does not introduce it.
+
+# @public — the code for why `font`'s last public call refused, or REKHA_OK when it did not.
+# ⛔ THIS IS NOT A SUCCESS TEST, AND USING IT AS ONE IS THE MISTAKE TO GUARD AGAINST. The RETURN
+# VALUE says whether a call refused; this says WHY. Test the sentinel first and ask second — that
+# order is what makes the answer describe the call you are holding, and reading a code with no
+# sentinel beside it is a stale answer to a question nobody asked. It is the single commonest
+# misuse of C's errno, and documentation is the only thing standing in front of it.
+fn rekha_font_error(font): i64 {
+    if (font == 0) { return REKHA_OK; }
+    return load64(font + 672);
+}
+
+# @public — a short static cstring naming WHERE the last refusal was — a table tag, a field — or 0
+# when there is none. ⛔ Never allocated and never owned by the caller: it is a literal in the
+# bundle and stays valid for the life of the program.
+fn rekha_font_error_detail(font): i64 {
+    if (font == 0) { return 0; }
+    return load64(font + 680);
+}
+
+# @public — forget it. Returns 0. Rarely needed, since every public call clears on entry.
+fn rekha_font_error_clear(font): i64 {
+    if (font == 0) { return 0; }
+    store64(font + 672, REKHA_OK);
+    store64(font + 680, 0);
+    return 0;
+}
+
+# Record a refusal and return 0, so a refusal site reads `return rekha_fail(font, CODE, "where");`.
+fn rekha_fail(font, code, detail): i64 {
+    if (font == 0) { return 0; }
+    store64(font + 672, code);
+    store64(font + 680, detail);
+    return 0;
+}
+
+# The same, for the sites that must hand back an empty outline rather than a 0.
+fn rekha_fail_outline(font, code, detail): i64 {
+    rekha_fail(font, code, detail);
+    return rekha_outline_empty();
+}
+
 fn rekha_units_per_em(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 40);
@@ -532,14 +639,20 @@ fn rekha_line_gap(font): i64 {
 # rekha_glyph_advance_px / rekha_glyph_advance_fx below.
 fn rekha_advance_width(font, gid): i64 {
     if (font == 0) { return 0; }
-    if (gid < 0) { return 0; }
+    # ⭐ 0 MEANT THREE THINGS. This reader's own note has always said its 0 is UNKNOWN and NOT
+    # ZERO-WIDTH — and a zero advance is a legal metric for a combining mark, so a consumer could
+    # not tell the legal one from "no hhea" or "hmtx truncated". Now REKHA_OK distinguishes them.
+    rekha_font_error_clear(font);
+    if (gid < 0) { return rekha_fail(font, REKHA_ERR_OTHER, "glyph id"); }
     var nhm = load64(font + 104);
-    if (nhm <= 0) { return 0; }
+    if (nhm <= 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "hhea"); }
     var hmtx = load64(font + 112);
-    if (hmtx == 0) { return 0; }
+    if (hmtx == 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "hmtx"); }
     var idx = gid;
     if (idx >= nhm) { idx = nhm - 1; }
-    if ((idx + 1) * 4 > load64(font + 120)) { return 0; }
+    if ((idx + 1) * 4 > load64(font + 120)) {
+        return rekha_fail(font, REKHA_ERR_TRUNCATED, "hmtx");
+    }
     var w = rekha_rd_u16(load64(font), hmtx + idx * 4);
     # ⭐ AND IT VARIES (0.6.0). `idx` is clamped into the long-metric array; the HVAR lookup takes
     # the REAL gid, because the delta is per glyph however hmtx compressed its tail. Costs one load
@@ -588,16 +701,21 @@ fn rekha_glyph_advance_fx(font, gid, px_size): i64 {
 # ⚠ A last glyph whose end overshoots glyf is refused, not clamped to glyf's end (FreeType clamps):
 # a lying loca yields no outline, never bytes from the table after glyf.
 # ================================================================
+# ⭐ THIS 0 WAS THE AMBIGUITY ONE LEVEL DOWN, and 0.7.0 found it here rather than at
+# rekha_load_glyph where it was being looked for. "The glyph is empty (e.g. space)" and "loca is
+# lying" were the same answer, so wiring the LOADER alone reported a blank glyph as a malformed
+# one. The empty case stays silent; every other 0 now says why.
 fn rekha_glyf_span(font, gid, out): i64 {
     store64(out, 0);
     store64(out + 8, 0);
     if (font == 0) { return 0; }
-    if (gid < 0) { return 0; }
-    if (gid >= load64(font + 56)) { return 0; }
+    rekha_font_error_clear(font);
+    if (gid < 0) { return rekha_fail(font, REKHA_ERR_OTHER, "glyph id"); }
+    if (gid >= load64(font + 56)) { return rekha_fail(font, REKHA_ERR_OTHER, "glyph id"); }
     var loca = load64(font + 64);
-    if (loca == 0) { return 0; }
+    if (loca == 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "loca"); }
     var glyf = load64(font + 80);
-    if (glyf == 0) { return 0; }
+    if (glyf == 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "glyf"); }
     var buf = load64(font);
     var loca_len = load64(font + 72);
     var fmt = load64(font + 48);
@@ -606,17 +724,20 @@ fn rekha_glyf_span(font, gid, out): i64 {
     var o1 = 0;
     if (fmt == 0) {
         # short: two u16 offsets (bytes = value*2); loca[gid+1] inside loca
-        if ((gid + 2) * 2 > loca_len) { return 0; }
+        if ((gid + 2) * 2 > loca_len) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "loca"); }
         o0 = rekha_rd_u16(buf, loca + gid * 2) * 2;
         o1 = rekha_rd_u16(buf, loca + (gid + 1) * 2) * 2;
     } else {
-        if (fmt != 1) { return 0; }    # the spec allows only 0 and 1
-        if ((gid + 2) * 4 > loca_len) { return 0; }
+        if (fmt != 1) { return rekha_fail(font, REKHA_ERR_BAD_SFNT, "indexToLocFormat"); }
+        if ((gid + 2) * 4 > loca_len) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "loca"); }
         o0 = rekha_rd_u32(buf, loca + gid * 4);
         o1 = rekha_rd_u32(buf, loca + (gid + 1) * 4);
     }
-    if (o1 <= o0) { return 0; }        # empty glyph
-    if (o1 > load64(font + 88)) { return 0; }
+    # ⚠ NOT AN ERROR, and this is the line the whole release turns on: loca[gid] == loca[gid + 1]
+    # is how a font spells a space. Offsets that run BACKWARDS are a different thing and are.
+    if (o1 == o0) { return 0; }
+    if (o1 < o0) { return rekha_fail(font, REKHA_ERR_BAD_GLYF, "loca order"); }
+    if (o1 > load64(font + 88)) { return rekha_fail(font, REKHA_ERR_BAD_GLYF, "loca past glyf"); }
     store64(out, glyf + o0);
     store64(out + 8, o1 - o0);
     return 1;

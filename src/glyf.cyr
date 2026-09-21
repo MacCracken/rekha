@@ -145,23 +145,23 @@ fn rekha_load_abort(ctx): i64 {
 fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     var buf = rekha_font_data(font);
     var p = start + 10;                    # skip numberOfContours(2) + bbox(8)
-    if (p + nc * 2 > end) { return rekha_outline_empty(); }
+    if (p + nc * 2 > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "endPts"); }
     # O(1) gates FIRST: the LAST endPt sizes the arrays; strict increase is walked below, once the
     # glyph has been charged. ⛔ Walking all nc endPts before any cap let a composite of 63 rejected
     # 32,767-contour glyphs spend ~2 M iterations in one load — MEASURED 9.6 ms, outside every budget.
     var np = rekha_rd_u16(buf, p + (nc - 1) * 2) + 1;
-    if (nc > np) { return rekha_outline_empty(); }
-    if (np > REKHA_COMPOSITE_MAXP) { return rekha_outline_empty(); }
+    if (nc > np) { return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "endPts"); }
+    if (np > REKHA_COMPOSITE_MAXP) { return rekha_fail_outline(font, REKHA_ERR_OOM, "point cap"); }
     var eps_at = p;
     p = p + nc * 2;
 
-    if (p + 2 > end) { return rekha_outline_empty(); }
+    if (p + 2 > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "instructions"); }
     var instr_len = rekha_rd_u16(buf, p);
     p = p + 2 + instr_len;
-    if (p > end) { return rekha_outline_empty(); }
+    if (p > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "instructions"); }
     # Two flag bytes (flag + REPEAT count) declare at most 256 points, so a glyph whose np exceeds
     # what its remaining bytes could encode is refused BEFORE it costs an allocation.
-    if (np > (end - p) * 128 + 1) { return rekha_outline_empty(); }
+    if (np > (end - p) * 128 + 1) { return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "flags"); }
     # Charged BEFORE the O(nc) walk (nc <= np), so the walk itself is inside the points budget.
     var pts_left = load64(ctx + 8) - np;
     if (pts_left < 0) { return rekha_load_abort(ctx); }
@@ -172,7 +172,7 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     var i = 0;
     while (i < nc) {
         var ep = rekha_rd_u16(buf, eps_at + i * 2);
-        if (ep <= last) { return rekha_outline_empty(); }
+        if (ep <= last) { return rekha_fail_outline(font, REKHA_ERR_BAD_GLYF, "endPts order"); }
         last = ep;
         i = i + 1;
     }
@@ -365,7 +365,7 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
     var more = 1;
     while (more != 0) {
         p = rekha_comp_record(buf, p, end, &rec);
-        if (p == 0) { return rekha_outline_empty(); }
+        if (p == 0) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "component"); }
         n = n + 1;
         # More components than loads left can only end in an abort; take it before allocating.
         if (n > load64(ctx)) { return rekha_load_abort(ctx); }
@@ -388,9 +388,9 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
         tot_ctr = tot_ctr + rekha_outline_n_contours(co);
         k = k + 1;
     }
-    if (tot_ctr == 0) { return rekha_outline_empty(); }
-    if (tot_pts > REKHA_COMPOSITE_MAXP) { return rekha_outline_empty(); }
-    if (tot_ctr > REKHA_COMPOSITE_MAXC) { return rekha_outline_empty(); }
+    if (tot_ctr == 0) { return rekha_outline_empty(); }   # ⚠ every component was blank: not an error
+    if (tot_pts > REKHA_COMPOSITE_MAXP) { return rekha_fail_outline(font, REKHA_ERR_OOM, "point cap"); }
+    if (tot_ctr > REKHA_COMPOSITE_MAXC) { return rekha_fail_outline(font, REKHA_ERR_OOM, "contour cap"); }
     var pts_left = load64(ctx + 8) - tot_pts;
     if (pts_left < 0) { return rekha_load_abort(ctx); }
     store64(ctx + 8, pts_left);
@@ -516,15 +516,17 @@ fn rekha_load_glyph_d(font, gid, depth, ctx): i64 {
     store64(ctx, loads - 1);
     store64(ctx + 24 + depth * 8, gid);
 
+    # ⚠ NO CODE OF ITS OWN. rekha_glyf_span already said whether this was a blank glyph or a
+    # refusal, and saying "malformed" over the top of its silence is what made a space look broken.
     var span: i64[2];
-    if (rekha_glyf_span(font, gid, &span) == 0) {
-        return rekha_outline_empty();
-    }
+    if (rekha_glyf_span(font, gid, &span) == 0) { return rekha_outline_empty(); }
     var start = load64(&span);
     var end = start + load64(&span + 8);
     var buf = rekha_font_data(font);
-    if (start + 10 > end) { return rekha_outline_empty(); }
+    if (start + 10 > end) { return rekha_fail_outline(font, REKHA_ERR_TRUNCATED, "glyf header"); }
     var nc = rekha_rd_i16(buf, start);
+    # ⚠ NOT AN ERROR. numberOfContours 0 is how a font spells a space, and 0.7.0's whole point is
+    # that this empty outline and a refused one are now distinguishable — so this one stays silent.
     if (nc == 0) { return rekha_outline_empty(); }
     if (nc > 0) { return rekha_load_simple(font, gid, start, end, nc, ctx); }
     return rekha_load_composite(font, gid, start, end, depth, ctx);
@@ -533,6 +535,12 @@ fn rekha_load_glyph_d(font, gid, depth, ctx): i64 {
 # @public — load glyph `gid`'s outline (simple OR composite) into a
 # RekhaOutline. Empty for space / malformed / out-of-range / over a load cap; 0 only on OOM.
 fn rekha_load_glyph(font, gid): i64 {
+    # ⭐ THE WORST AMBIGUITY IN THE LIBRARY, and 0.7.0's reason for existing. An EMPTY outline is
+    # the correct answer for a space and the answer for every refusal there is, so a consumer had
+    # no way to tell "this glyph is blank" from "rekha would not decode it". It still returns an
+    # empty outline either way — changing that would break every caller — but now
+    # `rekha_font_error` says which, and REKHA_OK means the blank was real.
+    rekha_font_error_clear(font);
     var ctx: i64[9];
     store64(&ctx, REKHA_GLYPH_MAXLOADS);
     store64(&ctx + 8, REKHA_GLYPH_MAXPOINTS_TOTAL);
@@ -543,8 +551,13 @@ fn rekha_load_glyph(font, gid): i64 {
     } else {
         o = rekha_load_glyph_d(font, gid, 0, &ctx);
     }
-    if (o == 0) { return 0; }
-    if (load64(&ctx + 16) != 0) { return rekha_outline_clear(o); }
+    if (o == 0) { return rekha_fail(font, REKHA_ERR_OOM, "outline"); }
+    # ⛔ The abort flag is a CAP, not a malformed font: a composite that fanned out past
+    # REKHA_GLYPH_MAXLOADS or REKHA_GLYPH_MAXPOINTS_TOTAL, or nested past the depth, or looped.
+    if (load64(&ctx + 16) != 0) {
+        rekha_fail(font, REKHA_ERR_OOM, "glyph load cap");
+        return rekha_outline_clear(o);
+    }
     return o;
 }
 
@@ -764,6 +777,18 @@ fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
 
 # @public — load glyph `gid` and convert it to a positioned sadish SdPath
 # (an empty path when the glyph loads empty or its load hits OOM).
+# ⛔ THIS USED TO SWALLOW THE ONE UNAMBIGUOUS SIGNAL IN THE GLYPH PATH. rekha_load_glyph returns 0
+# — never an outline — when the allocator refuses, and handing that 0 to rekha_outline_to_sdpath
+# turned it into the same empty path a blank glyph gives. It does not any more: the 0 is checked,
+# the reason its callee recorded stands, and only a path allocation that fails after a good outline
+# sets one of its own.
 fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
-    return rekha_outline_to_sdpath(rekha_load_glyph(font, gid), scale, ox, oy);
+    var o = rekha_load_glyph(font, gid);
+    var p = rekha_outline_to_sdpath(o, scale, ox, oy);
+    # ⚠ Only when the callee did not already say something better: a refused GLYPH is a more useful
+    # answer than "the path allocation that followed it also gave nothing".
+    if (p == 0) {
+        if (rekha_font_error(font) == REKHA_OK) { rekha_fail(font, REKHA_ERR_OOM, "sdpath"); }
+    }
+    return p;
 }
