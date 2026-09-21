@@ -5,6 +5,185 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-09-20 — the zones, and the control-value program
+
+0.8.0 shipped an interpreter that refused **101 of the 256 opcodes** by name, because every one of
+them reads or writes a POINT and there was no zone to hold one. This release is the two zones, the
+twenty-six point instructions — **99 opcodes**, every one but `IUP` — and `prep`, the
+control-value program, running once per size inside `rekha_hint_ctx`.
+
+⛔ **STILL NOT A HINTED GLYPH.** Nothing loads an outline into the glyph zone yet, `IUP`'s two
+opcodes (0x30 / 0x31) are the one refusal left — `REKHA_ERR_UNSUPPORTED`, detail `"IUP"` — and
+composites, the glyph program and the call that answers a hinted outline are 0.8.2's, booked in
+the roadmap with the phantom-point and advance rules they need.
+⭐ **THE ORACLE IS FreeType ITSELF, NOT A SECOND HAND-WRITTEN INTERPRETER.** Every hinting
+constant 0.8.0 pinned came from `scripts/hint_vectors.py` re-deriving the spec in Python, and two
+interpreters written from one spec share its misreadings. 0.8.1's reference is **FreeType 2.14.3's
+classic interpreter** (`GETINFO` version 35, non-pedantic, grayscale, square pixels) — the library
+installed on the dev host, driven through `ctypes` by `scripts/ftshim.py` with no freetype-py and
+no fontTools — and what it pins is what FreeType's glyph slot held after `FT_Load_Glyph`.
+
+### The headline: 127 programs FreeType ran, and rekha agrees on every point
+
+`scripts/hint_unit_vectors.py` builds a synthetic TrueType font — one glyph of 14 points on 2
+contours, a 16-entry `cvt `, a two-function `fpgm` — in **10 variants**, writes a test PROGRAM into
+the glyph, hands it to FreeType at a ppem, and records the hinted position of every outline point,
+its tag byte with the touch bits still set, and the advance. `programs/hint_unit_vectors.cyr`
+(3,671 lines, generated) embeds the fonts and **127 programs**: 106 at 12 ppem, the rest at 16,
+18, 28, 40, 44 and 48. Group K of `programs/hint_test.cyr` runs the same bytes over the same
+outline and **rekha agrees point for point, tag for tag, and on the advance — 127 of 127.**
+
+⭐ **Every program was ALSO loaded under `FT_LOAD_PEDANTIC` on a fresh face and loaded clean.** In
+its default mode FreeType drops a bad point index, a short stack or an out-of-range control value
+and carries on with rc 0; pedantic mode fails the load. A program that passes both is one FreeType
+executed in full, so "rekha agrees" is not "rekha agrees with a skip".
+
+| fonts | what differs from font 0 (prep `RTG`) | what the programs on it read out |
+|---|---|---|
+| 1, 2, 3 | prep `SMD 96 SCVTCI 40 SDB 10 SDS 4` / `WCVTF 8 400` / `DELTAC1 63 8` | the carry-over of a `prep` into a glyph program — minimum distance, cut-in, delta band, a rewritten and a delta'd control value — measured on FreeType |
+| 4, 5, 6 | preps carrying `IDEF`s: opcode 0x91 on a static face, four unassigned opcodes, and a standard one | a font-defined instruction runs; `IDEF` of a standard opcode is never reached |
+| 7 | an `fpgm` defining functions **0, 1 and 100 under `maxFunctionDefs` 3** | FreeType bounds the COUNT of definitions, not their numbers |
+| 8 | an `fpgm` whose `FDEF` sits under `IF` on `GETINFO`'s grayscale bit | that bit is **0** while `fpgm` runs and 1 in a glyph program |
+| 9 | an `fpgm` with two functions under `maxFunctionDefs` **1** | FreeType floors the table at **64** |
+
+⚠ **The recorded programs are evidence, not proof.** All 79 first-round programs passed, and the
+verification pass that followed added probes that found two more divergences from FreeType — the
+projection fast path and the single-width sign restore under a negative `SSW`, both in *Fixed*
+below. The second round is what put the module at 127.
+
+### Liberation Sans's `prep` runs — and reaches no point instruction
+
+The embedded face's 835-byte `prep` runs to completion at **8, 12, 16, 24, 48 and 100 ppem**: it
+CALLs five `fpgm` functions **65 times** (31 ×36, 70 ×5, 83 ×1, 84 ×1, 85 ×22), executes
+**858–1,037 instructions** per size, and rewrites **53 / 57 / 59 / 54 / 37 / 22** of the 324
+control values. ⚠ **It touches no point.** 0.8.0's roadmap said this `prep` "exercises most of
+that list at once"; it was wrong. The point machine is measured on the 127 unit programs and is
+**unmeasured on a face in the wild** until 0.8.2 runs a glyph program.
+
+Its post-`prep` control values, storage and the ten graphics-state fields a glyph program inherits
+— minimum distance 64, cut-in 128 at 48 ppem and below / 64 at 100, delta base 9, delta shift 3,
+auto-flip 1, `SCANCTRL` 1, `SCANTYPE` 5 — are pinned in group M from
+`scripts/hint_prep_vectors.py`, a second `fpgm` + `prep` interpreter written from the FreeType
+sources and not from `src/hint.cyr`.
+⭐ And that script is itself checked: `scripts/hint_prep_xcheck.py` replaces one glyph of the face
+in memory with a program that copies interpreter state onto its points, reads it back out of
+`libfreetype` through `ftshim`, and compares — **2,442 values, 0 mismatches.**
+
+Group C keeps 0.8.0's rounding evidence on the FRESH scale, since `rekha_hint_cvt_px` now answers
+what `prep` left behind. ⚠ **At 12 ppem five control values land on a negative half pixel, not
+four**: `cvt[19]`, `[22]`, `[25]`, `[237]` and **`[315]`**, which 0.8.0 missed.
+
+### Added
+
+`rekha_hint_run_prep(ctx)` — the whole per-size entry, in FreeType's order: re-scale the control
+values from the font, reset the graphics state and empty the stack, zero the twilight zone, clear
+the storage area, invalidate the glyph zone, then run `prep`. Idempotent: called for you by
+`rekha_hint_ctx` on every size change, and a second call rebuilds first. `rekha_hint_point(ctx,
+zone, i, field)` with `REKHA_PT_ORUSX` / `ORUSY` / `ORGX` / `ORGY` / `CURX` / `CURY` / `TAGS` — one
+accessor, like `rekha_hint_gs`, over the three positions a point has (font units, scaled original,
+current) and its tag byte (`REKHA_TAG_ONCURVE` / `TOUCHX` / `TOUCHY`); `rekha_hint_zone_points`,
+`rekha_hint_zone_contours`; `rekha_max_zone_points` / `rekha_max_zone_contours`, the larger of
+`maxp`'s simple and composite maxima.
+
+⛔ **`rekha_hint_ctx` still answers the HANDLE on a standing `fpgm` or `prep` refusal** — the one
+public call whose non-zero return does not mean success. A refusal is a property of the face or
+of the size; it is re-raised into `rekha_hint_error` on every call for that size and mirrored onto
+`rekha_font_error`, so the two agree. 0.8.2's glyph call is the one that answers 0.
+
+Refusals, each by the string it names itself with: `"<MNEMONIC> point"` for every point index in
+every point instruction, `"MIAP cvt"` / `"MIRP cvt"` (index −1 is legal for `MIRP`), `"SHC
+contour"`, `"SHZ zone"`, `"DELTAP count"`, `"IDEF opcode"`, `"DEBUG"`, `"FDEF number"`, `"FDEF
+over maxFunctionDefs"` (the count, not the number), `"undefined function"`, and `"stack underflow"`
+for a short stack — what a point opcode on an empty stack answers now, where 0.8.0 refused the
+opcode itself.
+
+Scripts: `scripts/ftshim.py` (the `ctypes` binding, pinned to the classic interpreter and
+`FT_LOAD_NO_AUTOHINT`, refusing any FreeType but 2.14.x), `scripts/hint_unit_vectors.py`,
+`scripts/hint_prep_vectors.py`, `scripts/hint_prep_xcheck.py`; `scripts/hint_ft_vectors.py`
+rewritten on `ftshim` as 0.8.2's real-glyph oracle — 18 characters × 10 ppems of Liberation Sans,
+table generated, **not transcribed until 0.8.2**; `scripts/hint_vectors.py`'s context-bytes
+formula updated (it still needs fontTools). `.gitignore` gains `__pycache__/`.
+
+### Fixed — each one measured against FreeType
+
+- **`S45ROUND`'s default threshold was one unit short**: `period − 256` instead of `period − 1`
+  before the shift, so 44 where FreeType has 45 at the 45° grid, and `round(0)` is **45**, not 0.
+- **`MPS` answered ppem · 64** — the version-40 branch. The classic interpreter answers the ppem.
+- **`ODD` / `EVEN` tested bit 6 of `& 127`**; 2.14.3 tests bit 6 alone, and 96 is odd there.
+- **`INSTCTRL` bound in every program** with a raw selector; it binds only while `prep` runs, with
+  FreeType's `Kf = 1 << (K − 1)` and a value of 0 or `Kf`.
+- **The stack margin was +32**; FreeType's is `max(maxStackElements / 2, 128)`.
+- **`SCANCTRL` stored the raw operand**; the field holds FreeType's computed Bool
+  (Liberation's `0x190` → 1). **`SCANTYPE`** keeps 16 bits and ignores a negative.
+- **`SPVFS` / `SFVFS` with (0, 0) set the x axis**; they leave the vector (and `SPVFS` still copies
+  the projection onto the dual).
+- **`IDEF`** of an opcode already defined redefined it in place; an operand outside 0..255 refused.
+- **`DELTAC`** follows 2.14.3's pop discipline — the pairs popped up front, no index check when
+  the ppem is outside the band — and pre-checks every index before the first write.
+- **`GETINFO`'s grayscale bit is 0 inside `fpgm`**, because FreeType runs the font program before
+  it sets the flag; font 8 above is the measurement.
+- **The function table is keyed by number with a count**: a font defining functions 0, 1 and 100
+  under `maxFunctionDefs` 3 hints (0.8.0 refused any number ≥ `maxFunctionDefs`), and FreeType's
+  floor of **64** on the table is honoured.
+- **0x91 / 0x92** fall through to the font's own `IDEF`, or a refusal, unless an axis is live;
+  `GETVARIATION` truncates its coordinates (`>> 2`) as FreeType does.
+- **A top-level `JMPR` / `JROT` / `JROF` past the end ends the program** — FreeType's normal end —
+  instead of refusing. **`DEBUG` refuses**, as FreeType errors in every mode.
+- **The vector normaliser is a verbatim port of `FT_Vector_NormLen`.** 0.8.0's integer square root
+  truncated its inputs to 16 bits. **`SDB`** stores 16 bits.
+- ⭐ **Projection and dual projection take FreeType's `Project_x` / `Project_y` fast path whenever
+  one component is exactly 0x4000, regardless of the other.** A near-axis `SPVTL` edge normalises
+  to (0x4000, 42), and every measurement along it was off by up to 5/64 before. Found by the
+  verification round, after the first 79 programs had passed.
+- **The single-width sign restore under a negative `SSW`** — the other one the second round found.
+
+### Bounded
+
+Still one `sd_alloc` per font, built lazily and re-scaled in place: **32,888 B** for the embedded
+face (0.8.0: 11,232) and **7,040 B** for the suite's synthetic face, both asserted, with a 648-byte
+header. The function table holds `max(64, maxFunctionDefs)` records of 32 B. The stack holds
+`maxStackElements + max(maxStackElements / 2, 128)` — FreeType 2.14.3's margin — so the 8,192 cap
+now bites from a declared **5,462**. The twilight zone holds `maxTwilightPoints` points, addressed
+per run under FreeType's own bound `min(maxTwilightPoints, max(30, 2 · (zone-1 points + cvt
+entries)))`. Zone 1 is sized from `maxp`'s larger of the simple and composite maxima, plus the
+four phantom points, under a new `REKHA_HINT_MAXZONE` of **4,096** — not from rekha's outline cap,
+which would cost 197 KB per context for a face whose largest glyph has 338 points.
+
+`REKHA_FONT_SIZE` **816 -> 832** (+816 `max_zone_pts`, +824 `max_zone_ctrs`). `src/hint.cyr` is
+**3,266 lines, 123 functions, 26 `@public` comments** (0.8.0: 1,686 lines).
+
+### ⚠ Divergences from FreeType, stated at their sites and pinned in the roadmap
+
+- **rekha REFUSES what FreeType silently skips** — an index outside a zone, a control value outside
+  the table, a short stack — as 0.8.0 did for storage. ⚠ **Unmeasured on a real face**, since
+  Liberation's `prep` reaches no point instruction.
+- A point, contour or reference index **≥ 65536 is refused** where FreeType's `FT_UShort` cast wraps
+  it onto a real point in both modes. Only stack arithmetic can produce one.
+- A **backward jump before a function's own start is refused**; FreeType executes the bytes before
+  the body.
+- The twilight zone is **zeroed with its tags and font-unit positions** per `prep` (FreeType zeroes
+  org and cur only), and has **no +4 spare points** above `maxTwilightPoints`.
+- A font whose `prep` is **absent or empty** gets the default graphics state; 2.14.3 saves a stale
+  execution-context GS there, which is a FreeType defect rather than a behaviour to copy.
+- FreeType's **`LOOPCALL` and backward-jump caps and its call depth of 32** are not modelled; rekha
+  keeps its instruction budget of 1,000,000 and depth 64.
+- `GETVARIATION`'s gate is **an axis actually off its default**; FreeType's is any variation API
+  call on the face.
+- **CI's FreeType is 2.13.2**, whose move arithmetic, cvt scaling, `ODD` / `EVEN`, stack margin and
+  `DELTAP` pop discipline differ from 2.14.3 — one recorded program, `fv_b1_regime`, is a move the
+  two versions disagree on. So `programs/hint_unit_vectors.cyr` is **not regenerated in CI**: it is
+  regenerated by hand on a 2.14.x host and reviewed like every other transcription, and none of the
+  four oracle scripts runs there.
+
+`programs/hint_test.cyr` — **7,387 checks** over fifteen groups A..O (0.8.0: 411). New: **K** the
+127 FreeType-recorded programs, point for point; **L** the twilight zone by hand — `MIAP` / `MIRP`
+/ `MSIRP` / `SCFS` writing org and cur, the loop counter reset after every looped instruction, and
+every refusal detail; **M** Liberation Sans's `prep` at six sizes, the digests, the count of
+control values it rewrote computed in the test, the ten inherited fields, a second
+`rekha_hint_run_prep` answering the same digests, and the standing-refusal paths for a bad `fpgm`
+and a bad `prep` on the synthetic face; the byte pins re-derived with the arithmetic in the
+comment; and group C on the fresh scale with the fifth half-pixel entry.
+
 ## [0.8.0] - 2026-09-20 — the hint machine, and the font program
 
 `grep -rn -E 'fpgm|prep' src/` answered with WOFF2 tag strings and nothing else, and had since

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.8.0
+Version: 0.8.1
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -126,28 +126,47 @@ an advance query measured at 47 ns, so it is pinned rather than shipped.
   **433,648 B → 59,784 B**). Every byte rekha allocates goes through `sd_alloc` (0.3.10), so 20
   `rekha_char_to_sdpath` calls under an arena hook cost the global heap **exactly 0 bytes**.
 
-### Hinting — the machine, and the font program
+### Hinting — the machine, the zones, and the control-value program
 
 A TrueType face carries its own bytecode: `fpgm` is its function library, `prep` the program run
 once per size, `cvt ` the control values both read, and each glyph may carry a program too. 0.8.0
-is **the interpreter**, not yet the hinting.
+was **the interpreter**; 0.8.1 is the two zones, every point instruction but `IUP`, and `prep`
+running at every size. **Not yet a hinted glyph**: nothing loads an outline into the glyph zone
+until 0.8.2.
 
 | | since | checked against |
 |---|---|---|
 | `cvt ` / `fpgm` / `prep` / `gasp`, and the six `maxp` 1.0 limits | 0.8.0 | the embedded face, against `scripts/hint_vectors.py` |
-| the machine: stack, storage, control values, arithmetic, all eight rounding modes, flow control, `FDEF` / `CALL` / `LOOPCALL` / `IDEF`, the graphics state | 0.8.0 | 411 checks, one instruction at a time |
+| the machine: stack, storage, control values, arithmetic, all eight rounding modes, flow control, `FDEF` / `CALL` / `LOOPCALL` / `IDEF`, the graphics state | 0.8.0 | one instruction at a time, in `programs/hint_test.cyr` — **7,387 checks** over fifteen groups as of 0.8.1 |
 | running the **real font program** | 0.8.0 | Liberation Sans's own 1,972 bytes: **all 71 functions defined, by number, stack empty** |
+| the twilight and glyph zones, and **26 point instructions / 99 opcodes** — every one but `IUP` | 0.8.1 | **FreeType 2.14.3 itself**: 127 glyph programs it ran on 10 synthetic font variants, recorded in `programs/hint_unit_vectors.cyr`, every one also loaded clean under `FT_LOAD_PEDANTIC`; rekha agrees **point for point, tag for tag, and on the advance** |
+| running the **real control-value program**, once per size | 0.8.1 | Liberation Sans's 835-byte `prep` at 8 / 12 / 16 / 24 / 48 / 100 ppem: 65 `CALL`s, 858–1,037 instructions, 53 / 57 / 59 / 54 / 37 / 22 of 324 control values rewritten; digests and the ten inherited graphics-state fields pinned from a second interpreter written from the FreeType sources, itself read back out of `libfreetype` — **2,442 values, 0 mismatches** |
 
-⛔ **No outline moves yet.** Every instruction that reads or writes a POINT — 101 of the 256
-opcodes — is **refused by name** with `REKHA_ERR_UNSUPPORTED`, never skipped: skipping leaves the
-stack at a depth the next instruction is not written for. `prep` and the glyph programs need zones,
-which is the next release.
+⛔ **Still no hinted outline.** `IUP`'s two opcodes are the one refusal left, by name with
+`REKHA_ERR_UNSUPPORTED`, never skipped: skipping leaves the stack at a depth the next instruction is
+not written for. The glyph loader, the four phantom points, composites and the call that answers
+a hinted outline are 0.8.2's. ⚠ Liberation Sans's `prep` **reaches no point instruction**, so the
+point machine is measured on the 127 recorded programs and unmeasured on a face in the wild until
+a glyph program runs.
 ⭐ `rekha_should_gridfit(font, ppem)` already answers the first question a consumer of hinting asks,
 from `gasp`. A face with no `gasp` answers 1, which is the long-standing convention, stated rather
 than left implicit.
 ⚠ This layer rounds **half away from zero**, not half up like the rest of rekha, because its
 reference is FreeType's interpreter rather than fontTools. They differ only on a negative value
-landing exactly on .5 — which at 12 ppem is four of Liberation Sans's control values.
+landing exactly on .5 — which at 12 ppem is **five** of Liberation Sans's control values (0.8.0
+counted four).
+⚠ rekha **refuses** where FreeType's default mode silently skips — a point index outside a zone, a
+control value outside the table, a short stack — and each refusal names its instruction through
+`rekha_hint_error`. `rekha_hint_ctx` is the one public call that still answers the handle on a
+standing `fpgm` / `prep` refusal: the refusal is a property of the size, re-raised on every call and
+mirrored onto `rekha_font_error`.
+⭐ **The hinting oracle is FreeType, reached through `ctypes`** — `scripts/ftshim.py` binds the
+installed `libfreetype`, pinned to the classic interpreter and `FT_LOAD_NO_AUTOHINT`, with no
+freetype-py and no fontTools; `scripts/hint_unit_vectors.py` records the unit programs from it,
+`scripts/hint_prep_xcheck.py` reads `prep`'s leftovers back out of it, and
+`scripts/hint_ft_vectors.py` is 0.8.2's real-glyph table. ⚠ Like every other differential sweep
+these run on the dev host and not in CI: CI's FreeType is 2.13.2, whose move arithmetic differs,
+so `programs/hint_unit_vectors.cyr` is a transcription, regenerated by hand on a 2.14.x host.
 
 ### Safety
 
@@ -189,8 +208,8 @@ The full list, with the evidence behind every item, is
 | ~~**0.5.x — conformance and the target**~~ | **Closed.** The CFF2 argument stack is the format's 513, not CFF's 48; `aarch64` and AGNOS are built in CI and the wrong syscall number that hid there is gone; `avar` 2.0's segment maps apply; `FontMatrix` is read and applied instead of assumed; the `tests/tcyr` tier three CI steps globbed and that never existed is gone. |
 | ~~**0.6.x — the font's own answers**~~ | **Closed.** The tables rekha transports and never reads: it resolved twelve, and now twenty-one. `HVAR` / `MVAR` (0.6.0), `OS/2` (0.6.1), `name` (0.6.2), `STAT` with `fvar`'s named instances (0.6.3), `post` (0.6.4), `kern` (0.6.5), **GPOS** pair positioning (0.6.6) and the **vertical metrics** (0.6.7) — which closed MVAR too: all 28 of its tags land. |
 | ~~**0.7.x — failures that say what failed**~~ | **Closed.** `RekhaErr` had been published and produced by nothing since 0.1.0. Every refusal now says which, out of the handle, with no byte allocated — and the ambiguity turned out to sit one level below where it was being looked for. |
-| **0.8.x — hinting** | **0.8.0 shipped the machine**: the tables, the interpreter and the font program. Left: the zones and `prep` (0.8.1), then the glyph programs and hinted outlines. ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
-| **0.9.0 — the freeze** | 125 `@public` markers against 362 `fn` in `src/`, so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |
+| **0.8.x — hinting** | **0.8.0 shipped the machine** and **0.8.1 the zones, every point instruction but `IUP`, and `prep` at every size** — measured against FreeType 2.14.3 itself. Left: the glyph loader and phantom points, `IUP`, composites and the hinted-outline call (0.8.2). ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
+| **0.9.0 — the freeze** | 128 `@public` markers against 421 `fn` in `src/` (re-measured at 0.8.1), so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |
 
 ⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
 complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and

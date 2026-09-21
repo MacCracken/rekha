@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-20, at **0.8.0**.
+> **Last updated:** 2026-09-20, at **0.8.1**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -26,7 +26,7 @@ out to sit one level below where it was being looked for — in `rekha_glyf_span
 
 | milestone | what it closes |
 |---|---|
-| **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. **0.8.0 shipped the machine**; two releases left. |
+| **0.8.x — hinting** | Outlines at small sizes. The last *rendering* gap. **0.8.0 shipped the machine, 0.8.1 the zones and `prep`**; one release left. |
 | **0.9.0 — the freeze** | An API that is declared, documented and promised, rather than merely exported. |
 | **1.0.0** | Lock it in. |
 
@@ -39,42 +39,85 @@ explicit **non-goal**.
 
 ⭐ **0.8.0 shipped `src/hint.cyr`**: `cvt ` / `fpgm` / `prep` / `gasp`, the six `maxp` 1.0 limits,
 the stack machine, the rounding engine, flow control, functions, the graphics state, and the FONT
-PROGRAM running to completion — Liberation Sans's real 1,972 bytes, all 71 functions defined. What
-it does not do is move a point: 101 of the 256 opcodes are refused **by name** through
-`REKHA_ERR_UNSUPPORTED`.
-
-### 0.8.1 — the zones, and `prep`
-
-`grep -n 'REKHA_ERR_UNSUPPORTED' src/hint.cyr` → `rekha_hint_point_op`, the whole list.
-
-The twilight zone (zone 0, `maxTwilightPoints` of them) and the point machinery every instruction
-above needs: the projection and freedom vectors actually projecting, `GC` / `SCFS` / `MD`,
-`MDAP` / `MIAP` / `MDRP` / `MIRP` with the control-value cut-in and the minimum distance,
-`SHP` / `SHC` / `SHZ` / `SHPIX`, `IP`, `ALIGNRP` / `ALIGNPTS`, `ISECT`, `UTP`, `FLIPPT` and the
-range forms, `SPVTL` / `SFVTL` / `SDPVTL`, and `DELTAP1/2/3`. Then `prep` runs, which is what makes
-a size's control values the ones the font intended. ⚠ Liberation Sans's `prep` is 835 bytes and
-CALLs into `fpgm` 65 times, so it exercises most of that list at once — a good gate and a poor
-first test; the synthetic suite comes first.
+PROGRAM running to completion — Liberation Sans's real 1,972 bytes, all 71 functions defined.
+⭐ **0.8.1 shipped the two zones, 26 point instructions / 99 opcodes — every one but `IUP` — and
+`prep` running once per size** (`rekha_hint_run_prep`, `src/hint.cyr:3143`), measured against
+**FreeType 2.14.3 itself**: 127 glyph programs FreeType ran on 10 synthetic font variants
+(`programs/hint_unit_vectors.cyr`, from `scripts/hint_unit_vectors.py`), every one also loaded
+clean under `FT_LOAD_PEDANTIC`, and rekha agrees point for point, tag for tag, and on the advance.
+⚠ **Liberation Sans's `prep` reaches no point instruction** — it CALLs five `fpgm` functions 65
+times and rewrites 53 / 57 / 59 / 54 / 37 / 22 of the 324 control values at the six sizes, and
+touches no point (`programs/hint_test.cyr`, group M). So the point machine is measured on the 127
+recorded programs and **unmeasured on a face in the wild** until 0.8.2 runs a glyph program; the
+0.8.0 line here that said this `prep` "exercises most of that list at once" was wrong. What is
+still refused by name: `grep -n '"IUP"' src/hint.cyr` → `rekha_hint_point_op`, two opcodes.
 
 ### 0.8.2 — the glyph zone, and a hinted outline
 
-Zone 1 with the four phantom points, the glyph program, composite hinting (`USE_MY_METRICS` and
-the per-component instruction rules), `IUP`, and the public call that returns a hinted outline.
-⚠ **The scaled-outline path does not exist yet either.** `rekha_load_glyph` answers in FONT UNITS
-and `rekha_outline_to_sdpath` scales at emit; a hinted glyph is fitted in F26Dot6 at a ppem, so
-this release also decides where that seam sits.
+Zone 1 gets a glyph: the loader that puts an outline into it, and the public call that answers a
+hinted outline. Booked, each with its rule already read out of the FreeType sources or measured:
 
-### Pinned by 0.8.0, and not blocking the milestone
+- **The four phantom points**: pp1 = (xMin − lsb, 0), pp2 = pp1 + advance, pp3 / pp4 from `vmtx`
+  or `hhea`; FreeType translates the hinted outline by −pp1.x and grid-rounds the advance.
+  `programs/hint_unit_vectors.cyr`'s header states the rule the recorded programs were measured
+  under (`grep -n 'hu_phantom_x/y' programs/hint_unit_vectors.cyr`); the suite's test-only
+  `zone1_load` in `programs/hint_test.cyr` group K is the placeholder the loader replaces.
+- **`IUP`** — `rekha_hint_point_op` (`src/hint.cyr:2745`), the last `REKHA_ERR_UNSUPPORTED`.
+- **Composites**: `USE_MY_METRICS` and the per-component instruction rules.
+- **The hinted-outline call**, which answers UNHINTED on a refusal where non-pedantic FreeType keeps
+  the partially hinted outline — the one public hinting call that answers 0, as `rekha_hint_ctx`'s
+  `@public` comment promises (`src/hint.cyr:720-731`).
+- **The glyph range's own rules**, stated in `rekha_hint_run`'s comment (`src/hint.cyr:3040-3051`):
+  `FDEF` / `IDEF` refused in a glyph program (`DEF_In_Glyf_Bytecode`); `WS` / `WCVTP` / `DELTAC`
+  writing a PER-GLYPH copy of storage and the control values, `WCVTF` alone writing through;
+  `INSTCTRL` bit 1 disabling glyph programs and bit 2 resetting the graphics state at every load
+  (`src/hint.cyr:3141-3142`).
+- **The post-`prep` graphics-state snapshot** a glyph run starts from — today the live GS is the
+  snapshot, because nothing runs after `prep` (`rekha_hint_run_prep`, `src/hint.cyr:3131-3136`).
+- **The `hdmx` advance rule**: 2.14.3 uses `hdmx` widths only when hinting is on and
+  `FT_LOAD_COMPUTE_METRICS` is off. rekha reads no `hdmx` (`grep -rn hdmx src/` → the WOFF2 tag
+  table only).
+- **The oracle is already written**: `scripts/hint_ft_vectors.py` — 18 characters × 10 ppems of
+  Liberation Sans through `ftshim`, table generated and NOT transcribed until this release.
+- ⚠ **The scaled-outline path does not exist yet either.** `rekha_load_glyph` answers in FONT UNITS
+  and `rekha_outline_to_sdpath` scales at emit; a hinted glyph is fitted in F26Dot6 at a ppem, so
+  this release also decides where that seam sits.
 
-- ⚠ **An out-of-range storage or control-value index is a refusal, where FreeType ignores it.**
-  `src/hint.cyr`, the `rekha_hint_op_mem` header. rekha's refuse-don't-guess policy, visible
-  through `rekha_hint_error`. The first thing to revisit if a real face trips it.
-- ⚠ **`INSTCTRL`'s operand order is unobserved.** The only site in the host corpus pushes `1 1`.
-  It follows FreeType and says so; a font that disagrees would be found by `prep` at 0.8.1.
-- ⚠ **`GETINFO` answers are fixed, not settable.** Version 35, grayscale on, no ClearType, not
-  rotated, not stretched. A consumer applying its own transform cannot tell the font about it.
-- ⚠ **`MPS` assumes 72 dpi**, because rekha carries no dpi. A font branching on it rather than on
-  `MPPEM` gets a consistent answer, not a device-correct one.
+### Pinned by 0.8.0 and 0.8.1, and not blocking the milestone
+
+Each is a stated divergence from FreeType 2.14.3, said at its site and in CHANGELOG 0.8.1.
+
+- ⚠ **rekha refuses what FreeType's default mode silently skips** — a point index outside a zone
+  (`rekha_hint_pt_ok`, `src/hint.cyr:1009-1022`), a control value outside the table (`"MIAP cvt"`
+  / `"MIRP cvt"`, `src/hint.cyr:2420`, `:2687`), a storage or cvt index in `rekha_hint_op_mem`
+  (`:1768`), a short stack (`"stack underflow"`, `:528`). rekha's refuse-don't-guess policy, visible
+  through `rekha_hint_error`. ⚠ **Unmeasured on a real face**: Liberation's `prep` reaches no point
+  instruction. The first thing to revisit if a face in the wild trips it.
+- ⚠ **A point, contour or reference index ≥ 65536 is refused** where FreeType's `FT_UShort` cast
+  wraps it onto point k in both modes (`src/hint.cyr:1017-1021`). Only stack arithmetic reaches it.
+- ⚠ **A backward jump before a function's own start is refused** (`"jump out of range"`,
+  `src/hint.cyr:2870-2873`); FreeType executes the bytes before the body.
+- ⚠ **The twilight zone is zeroed with its tags and font-unit positions** per `prep`, where
+  FreeType zeroes org and cur only, and it has **no +4 spare points** above `maxTwilightPoints`
+  (`rekha_hint_twilight_bound`, `src/hint.cyr:3079-3084`; `rekha_hint_run_prep`'s comment).
+- ⚠ **A font whose `prep` is absent or empty gets the default graphics state**; 2.14.3 saves a
+  stale execution-context GS there (`src/hint.cyr:3137-3140`) — a FreeType defect, not copied.
+- ⚠ **FreeType's `LOOPCALL` / backward-jump caps and its call depth of 32 are not modelled**: rekha
+  has one instruction budget of 1,000,000 and a depth of 64 (`src/hint.cyr:96-98`,
+  `rekha_hint_exec`, `rekha_hint_call`).
+- ⚠ **`GETVARIATION`'s gate is an axis actually off its default**; FreeType's is any variation API
+  call on the face (`rekha_hint_op_getvariation`'s comment, `src/hint.cyr:1918-1929`).
+- ⚠ **`INSTCTRL` is now 2.14.3's** — bound only while `prep` runs, `Kf = 1 << (K − 1)` — but
+  its operand order is still **unobserved in the corpus**: the one real site pushes `1 1`
+  (`src/hint.cyr:74-75`, `:1719-1731`). Bits 1 and 2 take effect in 0.8.2's glyph call.
+- ⚠ **`GETINFO` answers are fixed, not settable.** Version 35, no ClearType, not rotated, not
+  stretched, grayscale on — **0 inside `fpgm`**, as FreeType has it (`rekha_hint_op_getinfo`,
+  `src/hint.cyr:1854`; unit font 8 is the measurement). A consumer applying its own transform
+  cannot tell the font about it.
+- ⚠ **CI's FreeType is 2.13.2, the host's 2.14.3**, and the two differ in the move arithmetic, cvt
+  scaling, `ODD` / `EVEN`, the stack margin and `DELTAP`'s pops (`programs/hint_unit_vectors.cyr`
+  header; `fv_b1_regime` is a program they disagree on). None of the four oracle scripts runs in
+  CI, and `scripts/ftshim.py` refuses any FreeType but 2.14.x.
 
 ### ⚠ CFF hinting is a separate question the wording hides
 
@@ -88,15 +131,15 @@ one has ever been named or scheduled.
 
 ### Declare the public surface, then promise it
 
-`cat src/*.cyr | grep -c '@public'` → **125**, against **362** `fn` in `src/`. `@internal` is a
-*module* header tag, one per file, and one `@public` comment often covers a run of sibling
+`cat src/*.cyr | grep -c '@public'` → **128**, against **421** `fn` in `src/` (0.8.1). `@internal`
+is a *module* header tag, one per file, and one `@public` comment often covers a run of sibling
 accessors — so neither number is a count of marked functions, which is itself the problem. The
 boundary is undeclared: `rekha_font_open`, `rekha_units_per_em`, `rekha_glyph_count`,
 `rekha_descender`, `rekha_line_gap` and `rekha_find_table` are public in practice — the README's
 own Quick Start and every consumer use them — and carry no marker.
-⚠ The figure here read "34 against 172" through 0.7.0 and was two milestones stale; eight releases
-of accessor-heavy modules and the interpreter moved it. Re-measure it at the freeze rather than
-quoting this line.
+⚠ The figure here read "34 against 172" through 0.7.0 and was two milestones stale, and "125
+against 362" at 0.8.0; eight releases of accessor-heavy modules and the interpreter moved it.
+Re-measure it at the freeze rather than quoting this line.
 
 The sibling shows the shape: **kashi** froze its API at 0.9.0, locked it at 1.0.0, and carries
 `docs/api/` with a written stability promise plus `docs/adr/` for the decisions behind it. rekha
@@ -163,9 +206,15 @@ quietly become permanent.
 - ⭐ **The hinting evidence is the exception to the whole bullet above**: `scripts/hint_vectors.py`
   reads `fonts/LiberationSans-Regular.ttf`, which is COMMITTED, and the suite drives the same bytes
   through the embedded face module — so the font program, the 71 function numbers, the `gasp`
-  ranges and the six per-size control-value digests all re-run in CI with no corpus at all. ⚠ What
-  is NOT in CI is the script itself: it needs fontTools, and the constants are transcribed into
-  `programs/hint_test.cyr` the way `programs/face_test.cyr`'s are.
+  ranges, the six per-size control-value digests and, since 0.8.1, `prep`'s post-run digests and
+  the 127 FreeType-recorded unit programs all re-run in CI with no corpus at all. ⚠ What is NOT in
+  CI is the oracle side: `scripts/hint_vectors.py` needs fontTools, and the four 0.8.1 scripts
+  (`scripts/ftshim.py`, `hint_unit_vectors.py`, `hint_prep_vectors.py`, `hint_prep_xcheck.py`)
+  reach the installed `libfreetype` through `ctypes` — **FreeType 2.14.3 on the dev host, where
+  CI's Ubuntu ships 2.13.2**, whose interpreter differs in ways one recorded program shows. So
+  `programs/hint_unit_vectors.cyr` is a transcription like `programs/face_test.cyr`'s constants:
+  regenerated by hand on a 2.14.x host and reviewed as a diff, never rebuilt by a gate. Worth
+  having: a CI runner with a 2.14.x FreeType, or a pinned build of one.
 - ⚠ **The hostile corpus never touches the container parsers.** `grep -cin woff
   programs/hostile_test.cyr` → **0**. The seeded mutation sweep and the A/B sentinel differential
   cover the bare-SFNT reader; `.woff` and `.woff2` — the two inputs most likely to arrive off a

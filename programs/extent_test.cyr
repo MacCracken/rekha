@@ -645,8 +645,9 @@ fn t_alloc(buf): i64 {
     # 608 -> 672 in 0.6.7 for vhea, vmtx, VORG and VVAR,
     # 672 -> 688 in 0.7.0 for the code and detail of this font's last refusal,
     # 688 -> 816 in 0.8.0 for cvt / fpgm / prep / gasp, the six `maxp` 1.0 limits the bytecode
-    # interpreter is sized by, and the lazily built interpreter itself.
-    check(REKHA_FONT_SIZE, 816);
+    # interpreter is sized by, and the lazily built interpreter itself,
+    # 816 -> 832 in 0.8.1 for the glyph zone's point and contour capacity.
+    check(REKHA_FONT_SIZE, 832);
     g_mark = alloc_used();
     var f = rekha_font_open(buf, FONT_LEN);
     check(no_alloc(), REKHA_FONT_SIZE);

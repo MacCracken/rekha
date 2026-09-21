@@ -119,13 +119,29 @@ def main(path="fonts/LiberationSans-Regular.ttf"):
     print()
     print("gasp                 %s" % dict(sorted(f["gasp"].gaspRange.items())))
     print()
+    # src/hint.cyr's one allocation (0.8.1): a 648-byte header, the stack with FreeType 2.14.3's
+    # margin (ref2143/ttobjs.c:1078), storage, the FDEF table at max(64, maxFunctionDefs) records
+    # of 32 bytes (FreeType's floor), the IDEF table, the scaled cvt, the twilight
+    # zone and the glyph zone at 48 bytes a point (orus / org / cur, x and y), the contour ends, and
+    # one tag byte per point rounded up to 8. The glyph zone holds the larger of the simple and the
+    # composite maxima plus the four phantom points.
+    stk = mx.maxStackElements + max(mx.maxStackElements // 2, 128)
+    fdn = max(64, mx.maxFunctionDefs)
+    tz = mx.maxTwilightPoints
+    gz = max(mx.maxPoints, mx.maxCompositePoints) + 4
+    gc = max(mx.maxContours, mx.maxCompositeContours)
+    tagb = (tz + gz + 7) & ~7
     ctx_bytes = (
-        392
-        + (mx.maxStackElements + 32) * 8
+        648
+        + stk * 8
         + mx.maxStorage * 8
-        + mx.maxFunctionDefs * 24
+        + fdn * 32
         + mx.maxInstructionDefs * 32
         + len(cvt) * 8
+        + tz * 48
+        + gz * 48
+        + gc * 8
+        + tagb
     )
     print("hint context bytes   %d" % ctx_bytes)
     print()

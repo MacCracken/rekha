@@ -29,3 +29,6 @@ coverage/
 
 # Claude Code worktrees for spawned tasks — never part of the repo.
 /.claude/
+
+# Python
+__pycache__/

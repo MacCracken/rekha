@@ -1,26 +1,35 @@
-# programs/hint_test.cyr — RUN test for the TrueType bytecode interpreter (src/hint.cyr, 0.8.0).
+# programs/hint_test.cyr — RUN test for the TrueType bytecode interpreter (src/hint.cyr, 0.8.1).
 #
-# ⭐ THE HEADLINE IS GROUP B: rekha executes the REAL 1,972-byte font program of the embedded
-# Liberation Sans and defines all 71 of its functions, by number, with an empty stack at the end.
-# Those numbers come from scripts/hint_vectors.py, which re-walks the same bytes in Python with
-# its own instruction-length table and its own FDEF scan, so "71" is not rekha agreeing with
-# itself. The gaps matter as much as the hits: 12, 18, 19, 21..23, 25..30, 32, 41..43, 50..52, 86
-# and 87 are NOT defined, and an off-by-one in the FDEF walk fills one of them.
+# ⭐ THE HEADLINE IS GROUP K: every point instruction but IUP, checked against FreeType 2.14.3 ITSELF.
+# programs/hint_unit_vectors.cyr embeds a synthetic font and the glyph programs FreeType ran through
+# it, with every outline point's hinted position and tag byte as FreeType's glyph slot reported them;
+# each program also loaded clean under FT_LOAD_PEDANTIC, so no instruction was skipped silently. rekha
+# runs the same bytes over the same outline and must agree point for point, tag for tag, and on the
+# advance. Nothing in that module was computed by rekha or by a second hand-written interpreter.
+#
+# ⭐ GROUP M RUNS LIBERATION SANS'S REAL `prep` AT SIX SIZES. The control values it rewrites, the
+# storage it fills and the ten graphics-state fields it leaves for a glyph program are pinned from
+# scripts/hint_prep_vectors.py: a second fpgm + prep interpreter written from the FreeType sources
+# and NOT from src/hint.cyr; scripts/hint_prep_xcheck.py reads that state back out of libfreetype. That prep
+# reaches no point instruction at all, which is why the point machine's evidence is group K.
 #
 # ⛔ GROUP C IS WHERE THE ROUNDING DECISION IS PINNED. src/hint.cyr rounds HALF AWAY FROM ZERO,
 # not half up like the rest of rekha, because its reference is FreeType's interpreter. The two
 # disagree on a negative value landing exactly on .5, which is not a contrived case: at 12 ppem
-# Liberation Sans has FOUR control values there, and cvt[19] scales to -8 one way and -7 the other.
-# Both the per-entry values and an FNV-1a over all 324 at six sizes are asserted.
+# Liberation Sans has FIVE control values there, and cvt[19] scales to -8 one way and -7 the other.
+# Both the per-entry values and an FNV-1a over all 324 at six sizes are asserted, on the FRESH scale:
+# since 0.8.1 `rekha_hint_cvt_px` answers what `prep` left behind, which group M pins separately.
 #
-# ⚠ Groups D through I drive a SYNTHETIC font, because the machine has to be exercised one
+# ⚠ Groups D through J and L drive a SYNTHETIC font, because the machine has to be exercised one
 # instruction at a time and a real fpgm exercises five of them. Its `maxp` declares small limits on
-# purpose, so group J can trip every cap and read back which one.
+# purpose, so group N can trip every cap and read back which one; its `prep` is a knob, so group M can
+# hand it a refusing one and read the standing refusal back at every size.
 #
 # Exit code = failed checks; each failure prints its number, group, got and want.
 
 include "programs/prelude.cyr"
 include "fonts/face_data.cyr"
+include "programs/hint_unit_vectors.cyr"
 
 var g_fails = 0;
 var g_n = 0;
@@ -39,6 +48,21 @@ fn check(got, want): i64 {
     fmt_int_fd(2, got);
     syscall(1, 2, " want ", 6);
     fmt_int_fd(2, want);
+    syscall(1, 2, "\n", 1);
+    return 1;
+}
+
+# check(), and on a mismatch a second line naming the program, the point and the field it was in.
+fn check_named(got, want, name, i, field): i64 {
+    if (check(got, want) == 0) { return 0; }
+    var m = "    in ";
+    syscall(1, 2, m, strlen(m));
+    if (name == 0) { name = "?"; }
+    syscall(1, 2, name, strlen(name));
+    syscall(1, 2, " point ", 7);
+    fmt_int_fd(2, i);
+    syscall(1, 2, " ", 1);
+    syscall(1, 2, field, strlen(field));
     syscall(1, 2, "\n", 1);
     return 1;
 }
@@ -70,14 +94,57 @@ fn fnv_u32(h, v): i64 {
     return h;
 }
 
+# FNV-1a over the interpreter's control values and over its storage area, the feed
+# scripts/hint_prep_vectors.py uses (the low 32 bits of each value, least significant byte first).
+fn cvt_digest(cx, n): i64 {
+    var h = FNV_OFFSET;
+    var i = 0;
+    while (i < n) { h = fnv_u32(h, rekha_hint_cvt_px(cx, i)); i = i + 1; }
+    return h;
+}
+
+fn storage_digest(cx, n): i64 {
+    var h = FNV_OFFSET;
+    var i = 0;
+    while (i < n) { h = fnv_u32(h, rekha_hint_storage(cx, i)); i = i + 1; }
+    return h;
+}
+
+# Control value i scaled from the font's own bytes at the context's size — D3's / 2.14.3's formula,
+# FT_MulFix(raw, scale) (ref2143/ttobjs.c:970 with ttpload.c:349) — as opposed to rekha_hint_cvt_px,
+# which since 0.8.1 answers the entry as `prep` left it.
+fn fresh_px(f, cx, i): i64 { return rekha_hint_mulfix(rekha_cvt_value(f, i), rekha_hint_scale(cx)); }
+
+# How many of the n points of a zone hold anything but 0 in any field: org, cur, orus or tags.
+fn zone_nonzero(cx, zone, n): i64 {
+    var bad = 0;
+    var i = 0;
+    while (i < n) {
+        var f = 0;
+        while (f < REKHA_PT_COUNT) {
+            if (rekha_hint_point(cx, zone, i, f) != 0) { bad = bad + 1; }
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+
 # ================================================================
 # A synthetic font: head / maxp 1.0 / cvt / fpgm / prep / gasp, nothing else. It has no outlines
-# and needs none — 0.8.0 never reaches a glyph.
+# and needs none — nothing before 0.8.2 loads a glyph, and the twilight zone needs no table.
 # ================================================================
 var FB = 0;
 var SYN_UPEM = 1024;
-var o_maxstack = 128;     # what the synthetic maxp declares; group K raises it over rekha's cap
+var o_maxstack = 128;     # what the synthetic maxp declares; group N raises it over rekha's cap
 var o_maxp05 = 0;         # write a version 0.5 maxp instead, which carries no interpreter limits
+var o_maxidef = 4;        # maxInstructionDefs; group M lowers it to 1 for the IDEF re-run check
+var o_badfpgm = 0;        # write a font program that refuses: an FDEF without its ENDF
+var o_badprep = 0;        # write a control-value program that refuses: the undefined opcode 0x84
+var o_prep = 0;           # the prep bytes to write, and how many; an RTG unless a group swaps them
+var o_prep_len = 0;
+var o_fvar = 0;           # add an `fvar` with one 'wght' axis 100..400..900, so an axis can go live
+var o_maxfdef = 64;       # maxFunctionDefs; group N lowers it under FreeType's floor of 64
 
 # A failure that does not print a number, for the 50-iteration allocation loop.
 fn check_quiet(got): i64 {
@@ -118,19 +185,41 @@ fn syn_cvt(i): i64 { return i * 101 - 505; }
 
 var SYN_LEN = 0;
 
+# The prep scratch: pp() empties it and points the o_prep knob at it, pe(b) appends one byte.
+var PP = 0;
+var ppn = 0;
+
+fn pp(): i64 {
+    ppn = 0;
+    o_prep = PP;
+    o_prep_len = 0;
+    return 0;
+}
+
+fn pe(b): i64 {
+    store8(PP + ppn, b & 255);
+    ppn = ppn + 1;
+    o_prep_len = ppn;
+    return 0;
+}
+
 fn build_syn(): i64 {
     var i = 0;
     while (i < 1024) { store8(FB + i, 0); i = i + 1; }
     pu32(0, 0x00010000);
     pu16(4, 6);
     var at = 108;
+    if (o_fvar == 1) { pu16(4, 7); at = 124; }         # a seventh directory entry, after prep's
     # 'cvt ' — 16 entries
     dirent(12, 0x63767420, at, 32);
     i = 0;
     while (i < 16) { pu16(at + i * 2, syn_cvt(i) & 65535); i = i + 1; }
     at = at + 32;
-    # 'fpgm' — PUSHB 3, FDEF (PUSHB 5, ADD) ENDF, PUSHB 7, FDEF (PUSHB 1, ADD) ENDF
-    dirent(28, 0x6670676D, at, 14);
+    # 'fpgm' — PUSHB 3, FDEF (PUSHB 5, ADD) ENDF, PUSHB 7, FDEF (PUSHB 1, ADD) ENDF; or, when
+    # o_badfpgm asks, only its first six bytes: the FDEF opens and the table ends before an ENDF
+    var fl = 14;
+    if (o_badfpgm == 1) { fl = 6; }
+    dirent(28, 0x6670676D, at, fl);
     store8(FB + at, 0xB0);      store8(FB + at + 1, 3);
     store8(FB + at + 2, 0x2C);
     store8(FB + at + 3, 0xB0);  store8(FB + at + 4, 5);
@@ -155,7 +244,7 @@ fn build_syn(): i64 {
     pu16(at + 18, SYN_UPEM);
     pu16(at + 50, 0);
     at = at + 56;
-    # 'maxp' — version 1.0, unless group K asks for the 0.5 form
+    # 'maxp' — version 1.0, unless group N asks for the 0.5 form
     dirent(76, 0x6D617870, at, 32);
     pu32(at, 0x00010000);
     if (o_maxp05 == 1) { pu32(at, 0x00005000); }
@@ -165,15 +254,31 @@ fn build_syn(): i64 {
     pu16(at + 14, 2);       # maxZones
     pu16(at + 16, 16);      # maxTwilightPoints
     pu16(at + 18, 32);      # maxStorage
-    pu16(at + 20, 64);      # maxFunctionDefs
-    pu16(at + 22, 4);       # maxInstructionDefs
+    pu16(at + 20, o_maxfdef & 65535);    # maxFunctionDefs
+    pu16(at + 22, o_maxidef & 65535);    # maxInstructionDefs
     pu16(at + 24, o_maxstack & 65535);   # maxStackElements
     pu16(at + 26, 256);     # maxSizeOfInstructions
     at = at + 32;
-    # 'prep' — one RTG, never run at 0.8.0 but its length is
-    dirent(92, 0x70726570, at, 1);
-    store8(FB + at, 0x18);
-    at = at + 4;
+    # 'prep' — the o_prep bytes, run once per size since 0.8.1; or the one undefined opcode
+    var pl = o_prep_len;
+    if (o_badprep == 1) { pl = 1; }
+    dirent(92, 0x70726570, at, pl);
+    i = 0;
+    while (i < pl) { store8(FB + at + i, load8(o_prep + i)); i = i + 1; }
+    if (o_badprep == 1) { store8(FB + at, 0x84); }
+    at = at + ((pl + 3) & (0 - 4));
+    # 'fvar' — version 1.0, one axis record of 20 bytes at +16: 'wght', min 100, default 400, max 900,
+    # name id 256, no instances. Enough for rekha_var_set_axis to put a coordinate where GETVARIATION
+    # reads it (F5); the glyphs it would vary do not exist and are not asked for.
+    if (o_fvar == 1) {
+        dirent(108, 0x66766172, at, 36);
+        pu16(at, 1);      pu16(at + 4, 16);   pu16(at + 6, 2);
+        pu16(at + 8, 1);  pu16(at + 10, 20);
+        pu32(at + 16, 0x77676874);
+        pu32(at + 20, 100 * 65536);   pu32(at + 24, 400 * 65536);   pu32(at + 28, 900 * 65536);
+        pu16(at + 34, 256);
+        at = at + 36;
+    }
     SYN_LEN = at;
     return 0;
 }
@@ -213,10 +318,90 @@ fn run1(): i64 {
     return rekha_hint_at(g_ctx, 0);
 }
 
+# Run, and require a BAD_HINT refusal whose detail is exactly this.
+fn refused(detail): i64 {
+    check(run(), 0);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(g_ctx), detail), 1);
+    return 0;
+}
+
+# ================================================================
+# Zone 1 filled by hand from programs/hint_unit_vectors.cyr's outline, the way FreeType's loader fills
+# it (ref2143/ttgload.c:873-1011, 776-860): orus in font units, org = cur = mulfix(orus, scale), then
+# the four phantom points rounded to the grid in cur ONLY, tags the on-curve bit and nothing else.
+# It writes the descriptor directly — rekha_hint_zone(ctx, 1) and the ZN_* offsets are visible to a
+# program — because 0.8.2's glyph loader (docs/development/roadmap.md) is what replaces it.
+# ================================================================
+var UB = 0;               # the unit programs' bytecode
+
+fn grid(v): i64 { return (v + 32) & (0 - 64); }
+
+fn zpt_set(zn, i, ox, oy, sc, tag): i64 {
+    store64(load64(zn + ZN_ORUSX) + i * 8, ox);
+    store64(load64(zn + ZN_ORUSY) + i * 8, oy);
+    var sx = rekha_hint_mulfix(ox, sc);
+    var sy = rekha_hint_mulfix(oy, sc);
+    store64(load64(zn + ZN_ORGX) + i * 8, sx);
+    store64(load64(zn + ZN_ORGY) + i * 8, sy);
+    store64(load64(zn + ZN_CURX) + i * 8, sx);
+    store64(load64(zn + ZN_CURY) + i * 8, sy);
+    store8(load64(zn + ZN_TAGS) + i, tag);
+    return 0;
+}
+
+fn zone1_load(cx): i64 {
+    var zn = rekha_hint_zone(cx, 1);
+    var sc = load64(cx + HC_SCALE);
+    var n = hu_outline_points();
+    var i = 0;
+    while (i < n) {
+        var tg = 0;
+        if (hu_outline_on(i) == 1) { tg = REKHA_TAG_ONCURVE; }
+        zpt_set(zn, i, hu_outline_x(i), hu_outline_y(i), sc, tg);
+        i = i + 1;
+    }
+    var k = 0;
+    while (k < 4) {
+        zpt_set(zn, n + k, hu_phantom_x(k), hu_phantom_y(k), sc, 0);
+        k = k + 1;
+    }
+    # pp1.x, pp2.x, pp3.y, pp4.y to the grid, in cur only (ref2143/ttgload.c:813-820)
+    var cxs = load64(zn + ZN_CURX);
+    var cys = load64(zn + ZN_CURY);
+    store64(cxs + n * 8, grid(load64(cxs + n * 8)));
+    store64(cxs + (n + 1) * 8, grid(load64(cxs + (n + 1) * 8)));
+    store64(cys + (n + 2) * 8, grid(load64(cys + (n + 2) * 8)));
+    store64(cys + (n + 3) * 8, grid(load64(cys + (n + 3) * 8)));
+    var nc = hu_outline_contours();
+    var ctrs = load64(zn + ZN_CTRS);
+    var c = 0;
+    while (c < nc) {
+        store64(ctrs + c * 8, hu_contour_end(c));
+        c = c + 1;
+    }
+    store64(zn + ZN_N, n + 4);
+    store64(zn + ZN_NC, nc);
+    store64(cx + HC_GZGID, 1);
+    return 0;
+}
+
+# FreeType's tag byte to rekha's: bit 0 on-curve stays 1, 8 (touched in x) becomes 2, 16 (touched in
+# y) becomes 4; bit 2 and the scan-type bits FreeType ORs into tags[0] after a run are dropped (A9).
+fn ft_tag(t): i64 {
+    var r = t & 1;
+    if ((t & 8) != 0) { r = r | 2; }
+    if ((t & 16) != 0) { r = r | 4; }
+    return r;
+}
+
 # ================================================================
 fn main(): i64 {
     FB = alloc(2048);
     PB = alloc(1024);
+    PP = alloc(64);
+    UB = alloc(4096);
+    pp(); pe(0x18);                                     # the default prep: one RTG
 
     # ── A: the tables and the limits of the embedded face ───────────────────
     g_group = "A tables";
@@ -235,6 +420,9 @@ fn main(): i64 {
     check(rekha_max_stack_elements(rf), 676);
     check(rekha_max_instruction_size(rf), 516);
     check(rekha_max_twilight_points(rf), 16);
+    # the glyph zone is sized by the larger of the simple and composite maxima: max(338, 92), max(84, 6)
+    check(rekha_max_zone_points(rf), 338);
+    check(rekha_max_zone_contours(rf), 84);
     check(rekha_cvt_value(rf, 0), 1484);
     check(rekha_cvt_value(rf, 19), 0 - 20);
     check(rekha_cvt_value(rf, 323), 207);
@@ -255,11 +443,16 @@ fn main(): i64 {
     g_group = "B fpgm";
     var fx = rekha_hint_ctx(rf, 12);
     check(fx != 0, 1);
-    check(rekha_hint_error(fx), REKHA_OK);
+    check(rekha_hint_error(fx), REKHA_OK);         # the fpgm AND this size's prep ran clean
     check(rekha_hint_ppem(fx), 12);
-    check(rekha_hint_bytes(fx), 11232);
+    # ⛔ THE ONE ALLOCATION, sized by maxp (A2): 648 + stk * 8 + sto * 8 + fdn * 32 + idn * 32 + cvn * 8
+    #    + tz * 48 + gz * 48 + gc * 8 + tagb, with stk = 676 + max(676 / 2, 128) = 1014 (D19), sto 47,
+    #    fdn = max(64, 92) = 92 records of four i64 (F4: number, start, end, buffer), idn 0, cvn 324,
+    #    tz 16, gz 338 + 4 = 342, gc 84, tagb = (16 + 342 + 7) & ~7 = 360:
+    #    648 + 8112 + 376 + 2944 + 0 + 2592 + 768 + 16416 + 672 + 360 = 32888
+    check(rekha_hint_bytes(fx), 32888);
     check(rekha_hint_func_count(fx), 71);
-    check(rekha_hint_depth(fx), 0);                # fpgm leaves nothing behind
+    check(rekha_hint_depth(fx), 0);                # empty by construction: prep's epilogue discards the stack
     # every number scripts/hint_vectors.py found, and the gaps between them
     check(rekha_hint_func_defined(fx, 0), 1);
     check(rekha_hint_func_defined(fx, 11), 1);
@@ -281,11 +474,15 @@ fn main(): i64 {
     check(rekha_hint_func_defined(fx, 87), 0);
     check(rekha_hint_func_defined(fx, 88), 1);
     check(rekha_hint_func_defined(fx, 91), 1);
-    check(rekha_hint_func_defined(fx, 92), 0);     # at maxFunctionDefs, so out of range
-    # ⚠ The same handle at another size must NOT rebuild the interpreter or re-run the program.
+    check(rekha_hint_func_defined(fx, 92), 0);     # never defined; a number is looked up, not indexed (F4)
+    check(rekha_hint_func_defined(fx, 0 - 1), 0);
+    check(rekha_hint_func_defined(fx, 65535), 0);
+    # ⚠ The same handle at another size must NOT rebuild the interpreter or re-run the font program;
+    # it re-runs prep, which keeps the function table (A4).
     var fx2 = rekha_hint_ctx(rf, 24);
     check(fx2, fx);
     check(rekha_hint_ppem(fx2), 24);
+    check(rekha_hint_error(fx2), REKHA_OK);
     check(rekha_hint_func_count(fx2), 71);
 
     # ── C: control values scaled, against scripts/hint_vectors.py ────────────────
@@ -304,10 +501,11 @@ fn main(): i64 {
     while (si < 6) {
         var pp = load64(&sizes + si * 8);
         var cx = rekha_hint_ctx(rf, pp);
+        check(rekha_hint_error(cx), REKHA_OK);
         var h = FNV_OFFSET;
         var i = 0;
         while (i < 324) {
-            h = fnv_u32(h, rekha_hint_cvt_px(cx, i));
+            h = fnv_u32(h, fresh_px(rf, cx, i));
             i = i + 1;
         }
         check(h, load64(&wantfnv + si * 8));
@@ -315,17 +513,18 @@ fn main(): i64 {
     }
     var c12 = rekha_hint_ctx(rf, 12);
     check(rekha_hint_scale(c12), 24576);
-    check(rekha_hint_cvt_px(c12, 0), 557);
-    check(rekha_hint_cvt_px(c12, 323), 78);
-    # ⛔ THE FOUR ENTRIES THAT LAND ON A HALF PIXEL. Rounded half up these are -7, -7, -7, -112.
-    check(rekha_hint_cvt_px(c12, 19), 0 - 8);
-    check(rekha_hint_cvt_px(c12, 22), 0 - 8);
-    check(rekha_hint_cvt_px(c12, 25), 0 - 8);
-    check(rekha_hint_cvt_px(c12, 237), 0 - 113);
+    check(fresh_px(rf, c12, 0), 557);
+    check(fresh_px(rf, c12, 323), 78);
+    # ⛔ THE FIVE ENTRIES THAT LAND ON A HALF PIXEL. Rounded half up these are -7, -7, -7, -112, -7.
+    check(fresh_px(rf, c12, 19), 0 - 8);
+    check(fresh_px(rf, c12, 22), 0 - 8);
+    check(fresh_px(rf, c12, 25), 0 - 8);
+    check(fresh_px(rf, c12, 237), 0 - 113);
+    check(fresh_px(rf, c12, 315), 0 - 8);
     var c100 = rekha_hint_ctx(rf, 100);
     check(rekha_hint_scale(c100), 204800);
-    check(rekha_hint_cvt_px(c100, 0), 4638);
-    check(rekha_hint_cvt_px(c100, 19), 0 - 63);
+    check(fresh_px(rf, c100, 0), 4638);
+    check(fresh_px(rf, c100, 19), 0 - 63);
     # the font's own bytes never moved
     check(rekha_cvt_value(rf, 19), 0 - 20);
 
@@ -337,11 +536,16 @@ fn main(): i64 {
     check(rekha_hint_present(sf), 1);
     check(rekha_cvt_count(sf), 16);
     check(rekha_fpgm_length(sf), 14);
-    check(rekha_prep_length(sf), 1);
+    check(rekha_prep_length(sf), o_prep_len);      # 1: the RTG the builder writes unless a group swaps it
+    check(rekha_max_zone_points(sf), 16);
+    check(rekha_max_zone_contours(sf), 2);
     g_ctx = rekha_hint_ctx(sf, 16);
     check(g_ctx != 0, 1);
     check(rekha_hint_error(g_ctx), REKHA_OK);
-    check(rekha_hint_bytes(g_ctx), 3720);
+    # A2 again: stk = 128 + max(128 / 2, 128) = 256, sto 32, fdn = max(64, 64) = 64 records of 32 bytes,
+    # idn 4, cvn 16, tz 16, gz 16 + 4 = 20, gc 2, tagb = (16 + 20 + 7) & ~7 = 40:
+    # 648 + 2048 + 256 + 2048 + 128 + 128 + 768 + 960 + 16 + 40 = 7040
+    check(rekha_hint_bytes(g_ctx), 7040);
     check(rekha_hint_scale(g_ctx), 65536);         # 16 ppem over 1024 upem is exactly 1.0
     check(rekha_hint_func_count(g_ctx), 2);
     check(rekha_hint_func_defined(g_ctx, 3), 1);
@@ -430,6 +634,12 @@ fn main(): i64 {
     P(); e(0xB0); e(128); e(0x56);                    check(run1(), 0);
     P(); e(0xB0); e(128); e(0x57);                    check(run1(), 1);
     P(); e(0xB0); e(40); e(0x56);                     check(run1(), 1);       # rounds up to 64
+    # ⭐ AND THEY TEST BIT 6 ALONE (D17, ref2143/ttinterp.c:2567): under RTHG 64 rounds to 96, whose
+    # pixel count is odd — 2.13.2 masked with 127 and called it neither.
+    P(); e(0x19); e(0xB0); e(64); e(0x56);            check(run1(), 1);
+    P(); e(0xB0); e(64); e(0x57);                     check(run1(), 0);
+    P(); e(0xB0); e(0); e(0x57);                      check(run1(), 1);       # 0 rounds to 32: even
+    P(); e(0x18); check(run(), 1);                                            # back to RTG
 
     # ── F: the rounding engine ────────────────────────────
     g_group = "F round";
@@ -479,12 +689,14 @@ fn main(): i64 {
     P(); e(0xB0); e(0xA0); e(0x76); check(run(), 1);
     check(rekha_hint_gs(g_ctx, REKHA_GS_PERIOD), 128);
     check(rekha_hint_gs(g_ctx, REKHA_GS_PHASE), 64);
-    # ⭐ S45ROUND's grid is sqrt(2)/2 of a pixel: 0x2D41 / 256 is 45, and 45/64 = 0.7031
+    # ⭐ S45ROUND's grid is sqrt(2)/2 of a pixel: 0x2D41 / 256 is 45, and 45/64 = 0.7031. The default
+    # threshold is period - 1 BEFORE the shift (D4, ref2143/ttinterp.c:2098): (0x2D41 - 1) >> 8 = 45,
+    # not (0x2D41 - 256) >> 8 = 44, so even 0 rounds up to one period: (0 + 45) / 45 * 45 = 45.
     P(); e(0xB0); e(0x40); e(0x77); check(run(), 1);
     check(rekha_hint_gs(g_ctx, REKHA_GS_ROUND), REKHA_RND_SUPER45);
     check(rekha_hint_gs(g_ctx, REKHA_GS_PERIOD), 45);
-    check(rekha_hint_gs(g_ctx, REKHA_GS_THRESHOLD), 44);
-    check(rekha_hint_round(g_ctx, 0), 0);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_THRESHOLD), 45);
+    check(rekha_hint_round(g_ctx, 0), 45);
     check(rekha_hint_round(g_ctx, 1), 45);
     check(rekha_hint_round(g_ctx, 46), 90);
     P(); e(0x18); check(run(), 1);                     # back to RTG for what follows
@@ -523,6 +735,30 @@ fn main(): i64 {
     # a count of zero calls nothing and is not an error
     P(); e(0xB2); e(10); e(0); e(7); e(0x2A);
     check(run1(), 10);
+    # ⭐ A FUNCTION NUMBER IS A NAME, NOT AN INDEX (F4, ref2143/ttinterp.c:3284-3309, 3404-3435): the
+    # table is a list of records and maxFunctionDefs (64 here) bounds how many DISTINCT numbers it
+    # holds, so function 100 is a third record on a table of 64, and a number up to 0xFFFF — built by
+    # arithmetic, since PUSHW is signed — is a fourth. Redefining 100 rewrites its record in place.
+    P(); e(0xB0); e(100); e(0x2C); e(0xB0); e(5); e(0x60); e(0x2D); e(0xB1); e(10); e(100); e(0x2B);
+    check(run1(), 15);
+    check(rekha_hint_func_count(g_ctx), 3);
+    check(rekha_hint_func_defined(g_ctx, 100), 1);
+    check(rekha_hint_func_defined(g_ctx, 64), 0);
+    P(); e(0xB0); e(100); e(0x2C); e(0xB0); e(6); e(0x60); e(0x2D); e(0xB1); e(10); e(100); e(0x2B);
+    check(run1(), 16);
+    check(rekha_hint_func_count(g_ctx), 3);
+    P(); e(0xB8); ew(32767); e(0x20); e(0x60); e(0xB0); e(1); e(0x60); e(0x2C);   # 65535 FDEF
+    e(0xB0); e(1); e(0x2D);
+    e(0xB8); ew(32767); e(0x20); e(0x60); e(0xB0); e(1); e(0x60); e(0x2B);        # 65535 CALL
+    check(run1(), 1);
+    check(rekha_hint_func_count(g_ctx), 4);
+    check(rekha_hint_func_defined(g_ctx, 65535), 1);
+    # ⭐ A FORWARD JUMP PAST THE END OF A TOP-LEVEL PROGRAM ENDS IT (F6, ref2143/ttinterp.c:7391-7401):
+    # JMPR 200 from a 4-byte program is where FreeType's main loop finds IP >= codeSize with nothing
+    # on the call stack, and that is a normal end, not an error. The stack is left as it was.
+    P(); e(0xB0); e(7); e(0xB0); e(200); e(0x1C); e(0xB0); e(99);
+    check(run1(), 7);
+    check(rekha_hint_error(g_ctx), REKHA_OK);
     # IDEF: an opcode the font defines for itself
     P(); e(0xB0); e(0x83); e(0x89); e(0xB0); e(9); e(0x2D); e(0x83);
     check(run1(), 9);
@@ -539,15 +775,18 @@ fn main(): i64 {
     check(rekha_hint_cvt_px(c8, 5), 0);
     check(rekha_hint_ctx(sf, 16), g_ctx);
     check(rekha_hint_cvt_px(g_ctx, 0), 0 - 505);        # 16 ppem over 1024 upem is exactly 1.0
-    # WS then RS, and the storage area survives a size change
+    # WS then RS
     P(); e(0xB1); e(5); e(77); e(0x42);
     check(run(), 1);
     check(rekha_hint_storage(g_ctx, 5), 77);
     P(); e(0xB0); e(5); e(0x43);
     check(run1(), 77);
+    # ⛔ A SIZE CHANGE CLEARS THE STORAGE AREA before it runs prep (D5, ref2143/ttobjs.c:960): what a
+    # glyph program reads there is what THIS size's prep wrote, never a previous size's leftovers.
     rekha_hint_ctx(sf, 8);
-    check(rekha_hint_storage(g_ctx, 5), 77);
+    check(rekha_hint_storage(g_ctx, 5), 0);
     rekha_hint_ctx(sf, 16);
+    check(rekha_hint_storage(g_ctx, 5), 0);
     # RCVT / WCVTP / WCVTF
     P(); e(0xB0); e(0); e(0x45);
     check(run1(), 0 - 505);
@@ -567,10 +806,17 @@ fn main(): i64 {
     P(); e(0xB2); e(0x70); e(4); e(1); e(0x73);
     check(run(), 1);
     check(rekha_hint_cvt_px(g_ctx, 4), 0 - 165);        # -101 font units, less one pixel
-    # the same exception at another size does nothing
+    # ⛔ EVERY PAIR'S INDEX IS CHECKED BEFORE THE FIRST ENTRY MOVES (F9, D1). The in-band pair for
+    # entry 4 is on TOP and would be applied first by a loop that checks as it pops; the pair below it
+    # names entry 99 of 16. The refusal names DELTAC and entry 4 still reads -165, not -229.
+    P(); e(0xB4); e(0x70); e(99); e(0x70); e(4); e(2); e(0x73); refused("DELTAC index");
+    check(rekha_hint_cvt_px(g_ctx, 4), 0 - 165);
+    # the same exception at another size does nothing: 8 - 9 is outside the band, so the pair is
+    # popped and no entry is looked at (C2 B9, ref2143/ttinterp.c:6337)
     rekha_hint_ctx(sf, 8);
     P(); e(0xB2); e(0x70); e(4); e(1); e(0x73);
     check(run(), 1);
+    check(rekha_hint_depth(g_ctx), 0);
     check(rekha_hint_cvt_px(g_ctx, 4), 0 - 51);         # -101 at half scale, untouched
     rekha_hint_ctx(sf, 16);
     # DELTAC2 shifts the selector by 16, so it needs base 9 + 16 + selector
@@ -624,9 +870,20 @@ fn main(): i64 {
     check(rekha_hint_gs(g_ctx, REKHA_GS_FVX), 9830);
     P(); e(0x0D); check(run(), 1);                      # GFV
     check(rekha_hint_at(g_ctx, 1), 13107);
-    P(); e(0xB9); ew(0); ew(0); e(0x0B);                # a zero vector answers the x axis
+    # ⚠ A ZERO VECTOR CHANGES NOTHING (D7, ref2143/ttinterp.c:2334-2338): Normalize returns without
+    # writing, so SFVFS 0 0 leaves the freedom vector where SFVTPV put it ...
+    P(); e(0xB9); ew(0); ew(0); e(0x0B);
     check(run(), 1);
-    check(rekha_hint_gs(g_ctx, REKHA_GS_FVX), 16384);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_FVX), 9830);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_FVY), 13107);
+    # ... and SPVFS 0 0 leaves the projection vector, which the dual vector still copies (group L
+    # shows the copy on a dual vector that differed).
+    P(); e(0xB9); ew(0); ew(0); e(0x0A);
+    check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_PVX), 9830);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_PVY), 13107);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_DVX), 9830);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_DVY), 13107);
     # the reference points, the zones and the loop counter
     P(); e(0xB0); e(4); e(0x10); e(0xB0); e(5); e(0x11); e(0xB0); e(6); e(0x12);
     check(run(), 1);
@@ -659,28 +916,100 @@ fn main(): i64 {
     P(); e(0xB0); e(4); e(0x5F); check(run(), 1);       # SDS
     check(rekha_hint_gs(g_ctx, REKHA_GS_DELTASHIFT), 4);
     P(); e(0xB0); e(3); e(0x5F); check(run(), 1);
+    # ⭐ SCANCTRL STORES FREETYPE'S COMPUTED FLAG, NOT THE OPERAND (A13, ref2143/ttinterp.c:4740):
+    # the low byte is a ppem threshold, the bits above it say when it applies. 2 names a threshold of
+    # 2 with no condition bit, so nothing changes; 0xFF is always on, 0 always off; 0x110 is "on at or
+    # below 16 ppem", which this is; 0x80F is "off above 15 ppem", which this is too.
     P(); e(0xB0); e(2); e(0x85); e(0xB0); e(1); e(0x8D);
     check(run(), 1);
-    check(rekha_hint_gs(g_ctx, REKHA_GS_SCANCTRL), 2);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_SCANCTRL), 0);
     check(rekha_hint_gs(g_ctx, REKHA_GS_SCANTYPE), 1);
-    P(); e(0xB1); e(1); e(1); e(0x8E); check(run(), 1); # INSTCTRL: selector on top
-    check(rekha_hint_gs(g_ctx, REKHA_GS_INSTCTRL), 1);
-    P(); e(0xB1); e(0); e(1); e(0x8E); check(run(), 1); # and clearing that same bit
+    P(); e(0xB8); ew(0x1FF); e(0x85); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_SCANCTRL), 1);
+    P(); e(0xB0); e(0); e(0x85); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_SCANCTRL), 0);
+    P(); e(0xB8); ew(0x110); e(0x85); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_SCANCTRL), 1);
+    P(); e(0xB8); ew(0x80F); e(0x85); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_SCANCTRL), 0);
+    # ⛔ INSTCTRL BINDS ONLY INSIDE `prep` (D18, ref2143/ttinterp.c:4715): here it pops its two operands
+    # and sets nothing. Group M runs the same instruction from a prep and reads 1 back.
+    P(); e(0xB1); e(1); e(1); e(0x8E); check(run(), 1);
+    check(rekha_hint_depth(g_ctx), 0);
     check(rekha_hint_gs(g_ctx, REKHA_GS_INSTCTRL), 0);
     # what the machine says about itself
     P(); e(0x4B); check(run1(), 16);                    # MPPEM
-    P(); e(0x4C); check(run1(), 1024);                  # MPS — ppem in F26Dot6, at 72 dpi
+    P(); e(0x4C); check(run1(), 16);                    # MPS — the ppem too: the v35 answer (D16)
     P(); e(0xB0); e(1); e(0x88); check(run1(), 35);     # GETINFO version: the classic interpreter
     P(); e(0xB0); e(0x20); e(0x88); check(run1(), 4096);        # grayscale smoothing
     P(); e(0xB0); e(0x21); e(0x88); check(run1(), 4096 + 35);
     P(); e(0xB0); e(0x02); e(0x88); check(run1(), 0);   # not rotated
     P(); e(0xB0); e(0x08); e(0x88); check(run1(), 0);   # no live axes on this face
     P(); e(0xB0); e(0x40); e(0x88); check(run1(), 0);   # no ClearType anywhere in this stack
-    P(); e(0x91); check(run(), 1);                      # GETVARIATION: no axes, so nothing
-    check(rekha_hint_depth(g_ctx), 0);
-    # DEBUG, SANGW and AA pop their operand and do nothing
-    P(); e(0xB0); e(1); e(0x4F); check(run(), 1);
-    check(rekha_hint_depth(g_ctx), 0);
+    # ⛔ GETVARIATION (0x91) AND GETDATA (0x92) EXIST ONLY ON A FACE WHOSE AXES ARE LIVE (F5,
+    # ref2143/ttinterp.c:7306-7324). This face has none, so the two bytes are whatever the font defined
+    # them as — nothing, here — and an IDEF of 0x91 is what runs, exactly as a shipping font expects.
+    P(); e(0x91); refused("undefined opcode");
+    P(); e(0x92); refused("undefined opcode");
+    P(); e(0xB0); e(0x91); e(0x89); e(0xB0); e(9); e(0x2D); e(0x91);
+    check(run1(), 9);
+    # ⭐ AND ON A FACE WITH A LIVE AXIS THEY ANSWER: a second synthetic face with a one-axis fvar, built
+    # into its own buffer so g_ctx's font bytes stay put. Until an axis is set off its default the two
+    # opcodes are still undefined (FreeType's gate is any variation API call; rekha's is an axis actually
+    # moved — stated at rekha_hint_op_getvariation). wght 650 of 100..400..900 normalises to +0.5, which
+    # is 32768 in 16.16 and 8192 in F2Dot14; GETDATA pushes 17; GETINFO's selector bit 3 answers 0x400.
+    # ⚠ THE CONVERSION TRUNCATES, as FreeType's `>> 2` does (ref2143/ttinterp.c:6627): 401 normalises to
+    # 131 in 16.16 (fx_div(1, 500) = (65536 + 250) / 500), and 131 >> 2 is 32 where rounding would say
+    # 33; 399 normalises to -218 and -218 >> 2 is -55, not -54.
+    var save_fb = FB;
+    FB = alloc(2048);
+    o_fvar = 1;
+    build_syn();
+    var vf = rekha_font_open(FB, SYN_LEN);
+    o_fvar = 0;
+    FB = save_fb;
+    check(vf != 0, 1);
+    check(rekha_var_axis_count(vf), 1);
+    var vc = rekha_hint_ctx(vf, 16);
+    check(vc != 0, 1);
+    check(rekha_hint_error(vc), REKHA_OK);
+    check(rekha_hint_bytes(vc), 7040);                  # the same maxp: group D's arithmetic
+    P(); e(0x91);
+    check(rekha_hint_run(vc, PB, 0, pn), 0);            # the IDEF above lives in g_ctx, not here
+    check(str_same(rekha_hint_error_detail(vc), "undefined opcode"), 1);
+    check(rekha_var_set_axis(vf, 0, 650 * 65536), 1);
+    check(rekha_var_live(vf), 1);
+    P(); e(0x91);
+    check(rekha_hint_run(vc, PB, 0, pn), 1);
+    check(rekha_hint_depth(vc), 1);
+    check(rekha_hint_at(vc, 0), 8192);
+    P(); e(0x92);
+    check(rekha_hint_run(vc, PB, 0, pn), 1);
+    check(rekha_hint_at(vc, 0), 17);
+    P(); e(0xB0); e(0x08); e(0x88);
+    check(rekha_hint_run(vc, PB, 0, pn), 1);
+    check(rekha_hint_at(vc, 0), 0x400);
+    check(rekha_var_set_axis(vf, 0, 401 * 65536), 1);
+    check(rekha_var_coord(vf, 0), 131);
+    P(); e(0x91);
+    check(rekha_hint_run(vc, PB, 0, pn), 1);
+    check(rekha_hint_at(vc, 0), 32);
+    check(rekha_var_set_axis(vf, 0, 399 * 65536), 1);
+    check(rekha_var_coord(vf, 0), 0 - 218);
+    P(); e(0x91);
+    check(rekha_hint_run(vc, PB, 0, pn), 1);
+    check(rekha_hint_at(vc, 0), 0 - 55);
+    # back at the default the face is static again, and 0x91 is undefined once more
+    check(rekha_var_set_axis(vf, 0, 400 * 65536), 1);
+    check(rekha_var_live(vf), 0);
+    P(); e(0x91);
+    check(rekha_hint_run(vc, PB, 0, pn), 0);
+    check(str_same(rekha_hint_error_detail(vc), "undefined opcode"), 1);
+    # ⛔ DEBUG IS A REFUSAL IN EVERY CODE RANGE (F8, ref2143/ttinterp.c:2895-2898): FreeType raises
+    # Debug_OpCode in both modes, so nothing after it runs and the operand is not even popped.
+    P(); e(0xB0); e(1); e(0x4F); refused("DEBUG");
+    check(rekha_hint_depth(g_ctx), 1);
+    # SANGW and AA pop their operand and do nothing
     P(); e(0xB1); e(1); e(2); e(0x7E); e(0x7F); check(run(), 1);
     check(rekha_hint_depth(g_ctx), 0);
 
@@ -695,21 +1024,59 @@ fn main(): i64 {
     check(run(), 1);
     check(rekha_hint_error(g_ctx), REKHA_OK);
     check(rekha_hint_error_detail(g_ctx), 0);
-    # 200 pushes against a declared 128 (plus rekha's 32 of margin)
-    P(); e(0x40); e(200);
+    # ⭐ THE STACK IS maxStackElements PLUS FREETYPE'S MARGIN of max(maxStackElements / 2, 128) (D19,
+    # ref2143/ttobjs.c:1078): 128 + 128 = 256 slots. 250 pushes fit, 300 do not.
+    P(); e(0x40); e(125);
     var pi = 0;
-    while (pi < 200) { e(1); pi = pi + 1; }
+    while (pi < 125) { e(1); pi = pi + 1; }
+    e(0x40); e(125);
+    pi = 0;
+    while (pi < 125) { e(1); pi = pi + 1; }
+    check(run(), 1);
+    check(rekha_hint_depth(g_ctx), 250);
+    P(); e(0x40); e(150);
+    pi = 0;
+    while (pi < 150) { e(1); pi = pi + 1; }
+    e(0x40); e(150);
+    pi = 0;
+    while (pi < 150) { e(1); pi = pi + 1; }
     check(run(), 0);
     check(str_same(rekha_hint_error_detail(g_ctx), "stack overflow"), 1);
     P(); e(0xB1); e(4); e(0); e(0x62);
     check(run(), 0);
     check(str_same(rekha_hint_error_detail(g_ctx), "DIV by zero"), 1);
+    # a number no program defined is one refusal, whatever its size (F4): 9, 200, -1 and 65536
     P(); e(0xB0); e(9); e(0x2B);
     check(run(), 0);
     check(str_same(rekha_hint_error_detail(g_ctx), "undefined function"), 1);
     P(); e(0xB0); e(200); e(0x2B);
     check(run(), 0);
-    check(str_same(rekha_hint_error_detail(g_ctx), "function number"), 1);
+    check(str_same(rekha_hint_error_detail(g_ctx), "undefined function"), 1);
+    P(); e(0xB8); ew(65535); e(0x2B);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "undefined function"), 1);
+    P(); e(0xB8); ew(32767); e(0x20); e(0x60); e(0xB0); e(2); e(0x60); e(0x2B);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "undefined function"), 1);
+    P(); e(0xB2); e(1); e(1); e(200); e(0x2A);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "undefined function"), 1);
+    # ⛔ FDEF's number must be 0..0xFFFF (F4, ref2143/ttinterp.c:3305-3311): -1 and 65536 refuse before
+    # anything is recorded; IDEF's opcode must be a byte (F7, :3590-3595): -1 and 256 refuse, unmasked
+    P(); e(0xB8); ew(65535); e(0x2C); e(0x2D);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "FDEF number"), 1);
+    P(); e(0xB8); ew(32767); e(0x20); e(0x60); e(0xB0); e(2); e(0x60); e(0x2C); e(0x2D);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "FDEF number"), 1);
+    check(rekha_hint_func_count(g_ctx), 4);             # group G's 3, 7, 100 and 65535, nothing more
+    P(); e(0xB8); ew(65535); e(0x89); e(0x2D);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "IDEF opcode"), 1);
+    P(); e(0xB8); ew(256); e(0x89); e(0x2D);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "IDEF opcode"), 1);
+    check(load64(g_ctx + HC_IDEFN), 2);                 # 0x83 and 0x91, from groups G and I
     P(); e(0xB0); e(0); e(0x58);
     check(run(), 0);
     check(str_same(rekha_hint_error_detail(g_ctx), "IF without EIF"), 1);
@@ -738,24 +1105,33 @@ fn main(): i64 {
     P(); e(0xB1); e(1); e(4); e(0x8E);
     check(run(), 0);
     check(str_same(rekha_hint_error_detail(g_ctx), "INSTCTRL"), 1);
-    # ⛔ A POINT INSTRUCTION IS NAMED AND REFUSED, NOT SKIPPED — and UNSUPPORTED says "rekha is
-    #    not there" rather than "the bytecode is broken", which it is not. Roadmap 0.8.1.
+    # ⛔ A POINT INSTRUCTION NOW RUNS, so on an empty stack it refuses for the ordinary reason. Only
+    # IUP is still named and refused as UNSUPPORTED — "rekha is not there" rather than "the bytecode
+    # is broken": it needs the loaded glyph zone, which is 0.8.2's (docs/development/roadmap.md).
     P(); e(0xC0);
     check(run(), 0);
-    check(rekha_hint_error(g_ctx), REKHA_ERR_UNSUPPORTED);
-    check(str_same(rekha_hint_error_detail(g_ctx), "MDRP"), 1);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(g_ctx), "stack underflow"), 1);
     P(); e(0xE7);
     check(run(), 0);
-    check(str_same(rekha_hint_error_detail(g_ctx), "MIRP"), 1);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(g_ctx), "stack underflow"), 1);
     P(); e(0x30);
     check(run(), 0);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_UNSUPPORTED);
+    check(str_same(rekha_hint_error_detail(g_ctx), "IUP"), 1);
+    P(); e(0x31);
+    check(run(), 0);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_UNSUPPORTED);
     check(str_same(rekha_hint_error_detail(g_ctx), "IUP"), 1);
     P(); e(0x39);
     check(run(), 0);
-    check(str_same(rekha_hint_error_detail(g_ctx), "IP"), 1);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(g_ctx), "stack underflow"), 1);
     P(); e(0x5D);
     check(run(), 0);
-    check(str_same(rekha_hint_error_detail(g_ctx), "DELTAP1"), 1);
+    check(rekha_hint_error(g_ctx), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(g_ctx), "stack underflow"), 1);
     P(); e(0x84);
     check(run(), 0);
     check(rekha_hint_error(g_ctx), REKHA_ERR_BAD_HINT);
@@ -767,9 +1143,20 @@ fn main(): i64 {
     P(); e(0x40); e(200); e(1);
     check(run(), 0);
     check(rekha_hint_error(g_ctx), REKHA_ERR_TRUNCATED);
-    P(); e(0xB0); e(200); e(0x1C);
+    # ⛔ WHERE A JUMP MAY NOT LAND (F6). Past the end of a TOP-LEVEL program it ends it (group G);
+    # before the start it refuses, as FreeType's Ins_JMPR refuses a negative IP (ref2143/ttinterp.c:
+    # 3204-3210). Inside a function, past the function's end refuses there too (the same lines), and
+    # before the function's start refuses HERE ONLY — FreeType would run the bytes before the body.
+    P(); e(0xB8); ew(65336); e(0x1C);                                  # JMPR -200 from byte 3
     check(run(), 0);
     check(str_same(rekha_hint_error_detail(g_ctx), "jump out of range"), 1);
+    P(); e(0xB0); e(40); e(0x2C); e(0xB0); e(100); e(0x1C); e(0x2D); e(0xB0); e(40); e(0x2B);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "jump out of range"), 1);
+    P(); e(0xB0); e(41); e(0x2C); e(0xB8); ew(65486); e(0x1C); e(0x2D); e(0xB0); e(41); e(0x2B);
+    check(run(), 0);                                                   # JMPR -50 inside function 41
+    check(str_same(rekha_hint_error_detail(g_ctx), "jump out of range"), 1);
+    check(rekha_hint_func_count(g_ctx), 6);             # 40 and 41 were defined before their bodies ran
     # ⛔ THE HALTING GUARD. PUSHW -3 then JMPR lands back on the push, forever.
     P(); e(0xB8); ew(65533); e(0x1C);
     check(run(), 0);
@@ -779,9 +1166,524 @@ fn main(): i64 {
     P(); e(0xB1); e(3); e(4); e(0x60);
     check(run1(), 7);
     check(rekha_hint_error(g_ctx), REKHA_OK);
+    # ⛔ THE TABLE IS FULL AT maxFunctionDefs DISTINCT NUMBERS (F4, ref2143/ttinterp.c:3294-3303): six
+    # are defined, 58 more (101..158) fill the 64, the 65th refuses with nothing recorded, and a number
+    # already in the table is still redefinable in place after that.
+    P();
+    var fk = 0;
+    while (fk < 58) { e(0xB0); e(101 + fk); e(0x2C); e(0x2D); fk = fk + 1; }
+    check(run(), 1);
+    check(rekha_hint_func_count(g_ctx), 64);
+    check(rekha_hint_func_defined(g_ctx, 158), 1);
+    P(); e(0xB0); e(159); e(0x2C); e(0x2D);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(g_ctx), "FDEF over maxFunctionDefs"), 1);
+    check(rekha_hint_func_count(g_ctx), 64);
+    check(rekha_hint_func_defined(g_ctx, 159), 0);
+    P(); e(0xB0); e(100); e(0x2C); e(0xB0); e(7); e(0x60); e(0x2D); e(0xB1); e(10); e(100); e(0x2B);
+    check(run1(), 17);
+    check(rekha_hint_func_count(g_ctx), 64);
 
-    # ── K: caps and the shape of a face rekha will not interpret ────────────────
-    g_group = "K caps";
+    # ── K: FreeType's own answers, program by program ────────────────
+    g_group = "K unit";
+    check(str_same(hu_ft_version(), "2.14.3"), 1);
+    # every font variant the module carries (they differ only in prep, A11), opened once
+    var nuf = hu_font_count();
+    check(nuf >= 1, 1);
+    var ufh = alloc(nuf * 8 + 8);
+    var fi = 0;
+    while (fi < nuf) {
+        var ul = hu_font_len(fi);
+        var ub = alloc(ul + 64);
+        check(hu_font_copy(fi, ub), ul);
+        var uf = rekha_font_open(ub, ul);
+        check(uf != 0, 1);
+        check(rekha_hint_present(uf), 1);
+        store64(ufh + fi * 8, uf);
+        fi = fi + 1;
+    }
+    check(rekha_max_zone_points(load64(ufh)), 14);
+    check(rekha_max_zone_contours(load64(ufh)), 2);
+    check(rekha_max_twilight_points(load64(ufh)), 16);
+    check(hu_outline_points(), 14);
+    check(hu_outline_contours(), 2);
+    # ⭐ For each program: this size's prep from a clean slate (rekha_hint_run_prep is idempotent, so a
+    # program after another at the same size starts equal), the outline into zone 1, the bytes through
+    # rekha_hint_run, then every point's cur and tags and the advance against what FreeType reported.
+    # x is compared RELATIVE TO pp1, because FreeType's slot is translated so that pp1 is the origin
+    # (A10, ref2143/ttgload.c:2583); y is absolute; the advance is pp2 - pp1 rounded to the grid.
+    var np = hu_program_count();
+    check(np, 127);                                     # the module's count, a transcription pin
+    var pg = 0;
+    while (pg < np) {
+        var nm = hu_program_name(pg);
+        var pf = load64(ufh + hu_program_font(pg) * 8);
+        var uc = rekha_hint_ctx(pf, hu_program_ppem(pg));
+        check_named(uc != 0, 1, nm, 0, "ctx");
+        check_named(rekha_hint_error(uc), REKHA_OK, nm, 0, "ctx error");
+        check_named(rekha_hint_run_prep(uc), 1, nm, 0, "prep");
+        zone1_load(uc);
+        var kl = hu_program_len(pg);
+        check_named(kl < 4096, 1, nm, 0, "length");
+        var ki = 0;
+        while (ki < kl) { store8(UB + ki, hu_program_byte(pg, ki)); ki = ki + 1; }
+        check_named(rekha_hint_run(uc, UB, 0, kl), 1, nm, 0, "run");
+        check_named(rekha_hint_error(uc), REKHA_OK, nm, 0, "error");
+        var n1 = hu_outline_points();
+        var p1x = rekha_hint_point(uc, 1, n1, REKHA_PT_CURX);
+        var i = 0;
+        while (i < n1) {
+            check_named(rekha_hint_point(uc, 1, i, REKHA_PT_CURX) - p1x, hu_expect_x(pg, i), nm, i, "x");
+            check_named(rekha_hint_point(uc, 1, i, REKHA_PT_CURY), hu_expect_y(pg, i), nm, i, "y");
+            check_named(rekha_hint_point(uc, 1, i, REKHA_PT_TAGS), ft_tag(hu_expect_tag(pg, i)), nm, i, "tag");
+            i = i + 1;
+        }
+        var adv = rekha_hint_point(uc, 1, n1 + 1, REKHA_PT_CURX) - p1x;
+        check_named(grid(adv), hu_expect_advance(pg), nm, n1 + 1, "advance");
+        pg = pg + 1;
+    }
+
+    # ── L: the twilight zone, by hand ─────────────────────
+    g_group = "L twilight";
+    check(rekha_hint_run_prep(g_ctx), 1);
+    check(rekha_hint_error(g_ctx), REKHA_OK);
+    check(rekha_hint_ppem(g_ctx), 16);
+    # ⭐ THE PER-RUN TWILIGHT BOUND (A7, ref2143/ttinterp.c:7449-7462) is min(maxTwilightPoints,
+    # max(30, 2 * (zone-1 points + cvt entries))) = min(16, max(30, 2 * (0 + 16))) = 16: the whole zone.
+    check(rekha_hint_zone_points(g_ctx, 0), 16);
+    check(rekha_hint_zone_contours(g_ctx, 0), 0);
+    check(rekha_hint_zone_points(g_ctx, 1), 0);           # nothing loads a glyph before 0.8.2
+    check(rekha_hint_zone_contours(g_ctx, 1), 0);
+    check(REKHA_PT_COUNT, 7);
+    # the readers answer 0 — never a trap — for a null context, a zone that is not 0 or 1, an index
+    # the zone does not have and a field past REKHA_PT_TAGS
+    check(rekha_hint_point(0, 0, 0, REKHA_PT_CURX), 0);
+    check(rekha_hint_point(g_ctx, 2, 0, REKHA_PT_CURX), 0);
+    check(rekha_hint_point(g_ctx, 0 - 1, 0, REKHA_PT_CURX), 0);
+    check(rekha_hint_point(g_ctx, 0, 16, REKHA_PT_CURX), 0);
+    check(rekha_hint_point(g_ctx, 0, 0 - 1, REKHA_PT_CURX), 0);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_COUNT), 0);
+    check(rekha_hint_point(g_ctx, 0, 0, 0 - 1), 0);
+    check(rekha_hint_point(g_ctx, 1, 0, REKHA_PT_CURX), 0);      # zone 1 holds no point
+    check(rekha_hint_zone_points(0, 0), 0);
+    check(rekha_hint_zone_points(g_ctx, 2), 0);
+    check(rekha_hint_zone_contours(0, 0), 0);
+    check(rekha_hint_zone_contours(g_ctx, 0 - 1), 0);
+    check(rekha_hint_run_prep(0), 0);
+    # after prep every twilight point is at the origin, untouched; its orus is 0 by definition
+    check(zone_nonzero(g_ctx, 0, 16), 0);
+    # ⭐ THE WORKED EXAMPLE, at scale 1.0 (16 ppem over 1024 upem: a control value is its own F26Dot6).
+    P(); e(0x01); e(0xB0); e(0); e(0x16); check(run(), 1);   # SVTCA[1]: every vector x; SZPS 0: twilight
+    # MIAP[1] point 0 to cvt[10] = 505. In twilight org = cur = (MulFix14(505, fvx), MulFix14(505, fvy))
+    # = (505, 0); org_dist 505; |505 - 505| = 0 is not above the cut-in of 68, so the cvt stands; RTG
+    # rounds 505 to 512; the move of +7 goes along x only (F.P = 0x4000 with fvx = 0x4000, the X-only
+    # fast path of A1) and touches x. rp0 = rp1 = point.
+    P(); e(0xB1); e(0); e(10); e(0x3F); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_ORGX), 505);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_ORGY), 0);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_CURX), 512);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_CURY), 0);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_ORUSX), 0);     # twilight has no font-unit position
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP0), 0);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP1), 0);
+    # MIRP[11101] point 1 from rp0 = 0 with cvt[6] = 101: no single width (cut-in 0); the twilight
+    # target gets org[1] = org[0] + MulFix14(101, fv) = (606, 0) and cur = org; org_dist 606 - 505 =
+    # 101, cur_dist 606 - 512 = 94; same sign, no flip; both zones twilight, so the cut-in applies and
+    # |101 - 101| = 0 keeps the cvt; RTG 101 -> 128; the minimum distance 64 is met; move 128 - 94 = 34
+    # -> cur 640. rp1 = old rp0, rp2 = point, and bit 4 makes rp0 = point.
+    P(); e(0xB1); e(1); e(6); e(0xFD); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_ORGX), 606);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_ORGY), 0);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_CURX), 640);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_CURY), 0);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP0), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP1), 0);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP2), 1);
+    # MSIRP[0] point 2 to 100 from rp0 = 1: the twilight target gets org[2] = org[1] = (606, 0) moved
+    # by 100 along the move vector -> 706, and cur = org; cur_dist 706 - 640 = 66; move 100 - 66 = 34
+    # -> cur 740. rp1 = old rp0, rp2 = point, rp0 stays (bit 0 clear).
+    P(); e(0xB1); e(2); e(100); e(0x3A); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_ORGX), 706);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_CURX), 740);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_CURY), 0);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP0), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP1), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP2), 2);
+    # SCFS point 2 to 200: cur 740 -> 200, and in twilight org follows cur afterwards
+    P(); e(0xB1); e(2); e(200); e(0x48); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_ORGX), 200);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_CURX), 200);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    # GC[0] reads cur along the projection vector, GC[1] org along the dual
+    P(); e(0xB0); e(0); e(0x46); check(run1(), 512);
+    P(); e(0xB0); e(0); e(0x47); check(run1(), 505);
+    # MD is (the deeper operand, in zp0) minus (the top one, in zp1): MD[0] current 200 - 512, MD[1]
+    # original 200 - 505 — org, not orus, because a twilight zone is involved
+    P(); e(0xB1); e(2); e(0); e(0x49); check(run1(), 0 - 312);
+    P(); e(0xB1); e(2); e(0); e(0x4A); check(run1(), 0 - 305);
+    # a control-value index of -1 is legal for MIRP and means a distance of 0: point 3 takes rp0 = 1's
+    # original (606, 0) as its own, org_dist 0, cur_dist 606 - 640 = -34, no rounding without bit 2, so
+    # the move of +34 puts it on rp0's current position, 640
+    P(); e(0xB0); e(3); e(0xB8); ew(65535); e(0xE0); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 3, REKHA_PT_ORGX), 606);
+    check(rekha_hint_point(g_ctx, 0, 3, REKHA_PT_CURX), 640);
+    check(rekha_hint_point(g_ctx, 0, 3, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_RP2), 3);
+    # ⭐ SPVFS 0 0 LEAVES THE PROJECTION VECTOR ALONE AND STILL COPIES IT ONTO THE DUAL (D7): give the
+    # two different directions first. SVTCA[0] then SHPIX point 0 by 64 lifts cur[0] to (512, 64) while
+    # org[0] stays (505, 0) — SHPIX never writes org; SDPVTL[0] 0 3 takes the dual from org, (505, 0) -
+    # (606, 0), i.e. the -x axis, and the projection from cur, (512, 64) - (640, 0), which is off-axis.
+    P(); e(0x00); e(0xB1); e(0); e(64); e(0x38); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_CURY), 64);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_ORGY), 0);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_TAGS), REKHA_TAG_TOUCHX | REKHA_TAG_TOUCHY);
+    P(); e(0xB1); e(0); e(3); e(0x86); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_DVX), 0 - 16384);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_DVY), 0);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_PVY) != 0, 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_PVX) != rekha_hint_gs(g_ctx, REKHA_GS_DVX), 1);
+    P(); e(0xB1); e(0); e(0); e(0x0A); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_PVY) != 0, 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_DVX) == rekha_hint_gs(g_ctx, REKHA_GS_PVX), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_DVY) == rekha_hint_gs(g_ctx, REKHA_GS_PVY), 1);
+    # ── the loop counter is consumed, and put back to 1, by every looped instruction ──
+    check(rekha_hint_run_prep(g_ctx), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_ZP0), 1);       # prep put the graphics state back
+    check(zone_nonzero(g_ctx, 0, 16), 0);               # and zeroed the zone
+    P(); e(0x01); e(0xB0); e(0); e(0x16); e(0xB1); e(0); e(10); e(0x3F); check(run(), 1);   # as above
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_CURX), 512);
+    # SHPIX: three points by one pixel along x; the amount is on top, the points under it
+    P(); e(0xB0); e(3); e(0x17); e(0xB3); e(1); e(2); e(3); e(64); e(0x38); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_LOOP), 1);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_CURX), 64);
+    check(rekha_hint_point(g_ctx, 0, 3, REKHA_PT_CURX), 64);
+    check(rekha_hint_point(g_ctx, 0, 3, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    check(rekha_hint_point(g_ctx, 0, 3, REKHA_PT_ORGX), 0);
+    # SHP[1]: rp1 = 0 sits 512 - 505 = 7 from its original, so points 4 and 5 move by 7
+    P(); e(0xB0); e(2); e(0x17); e(0xB1); e(4); e(5); e(0x33); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_LOOP), 1);
+    check(rekha_hint_point(g_ctx, 0, 4, REKHA_PT_CURX), 7);
+    check(rekha_hint_point(g_ctx, 0, 5, REKHA_PT_CURX), 7);
+    check(rekha_hint_point(g_ctx, 0, 5, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    # ALIGNRP: points 1 and 2 onto rp0 = 0's projection, 512
+    P(); e(0xB0); e(2); e(0x17); e(0xB1); e(1); e(2); e(0x3C); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_LOOP), 1);
+    check(rekha_hint_point(g_ctx, 0, 1, REKHA_PT_CURX), 512);
+    check(rekha_hint_point(g_ctx, 0, 2, REKHA_PT_CURX), 512);
+    # IP: rp1 = 0 (org 505 -> cur 512) and rp2 = 3 (org 0 -> cur 64) span the interpolation; points 4
+    # and 5 sit at org 0 like rp2 and land where it did: old range 0 - 505, current range 64 - 512,
+    # new distance muldiv(-505, -448, -505) = -448 from rp1, i.e. 512 - 448 = 64
+    P(); e(0xB0); e(3); e(0x12); e(0xB0); e(2); e(0x17); e(0xB1); e(4); e(5); e(0x39); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_LOOP), 1);
+    check(rekha_hint_point(g_ctx, 0, 4, REKHA_PT_CURX), 64);
+    check(rekha_hint_point(g_ctx, 0, 5, REKHA_PT_CURX), 64);
+    # ⭐ FLIPPT / FLIPRGON / FLIPRGOFF WORK ON ZONE 1 whatever the zone pointers say (D13): load the unit
+    # font's outline into it and read it back through the same reader
+    zone1_load(g_ctx);
+    check(rekha_hint_zone_points(g_ctx, 1), 18);
+    check(rekha_hint_zone_contours(g_ctx, 1), 2);
+    check(rekha_hint_point(g_ctx, 1, 3, REKHA_PT_ORUSX), 503);
+    check(rekha_hint_point(g_ctx, 1, 3, REKHA_PT_ORGX), 503);   # scale 1.0
+    check(rekha_hint_point(g_ctx, 1, 3, REKHA_PT_CURX), 503);
+    check(rekha_hint_point(g_ctx, 1, 0, REKHA_PT_TAGS), REKHA_TAG_ONCURVE);
+    check(rekha_hint_point(g_ctx, 1, 1, REKHA_PT_TAGS), 0);
+    check(rekha_hint_point(g_ctx, 1, 15, REKHA_PT_ORGX), 600);  # pp2: the advance, unrounded in org
+    check(rekha_hint_point(g_ctx, 1, 15, REKHA_PT_CURX), 576);  # and on the grid in cur
+    check(rekha_hint_point(g_ctx, 1, 17, REKHA_PT_CURY), 0 - 192); # pp4: -200 rounds to -192
+    P(); e(0xB0); e(2); e(0x17); e(0xB1); e(0); e(1); e(0x80); check(run(), 1);
+    check(rekha_hint_gs(g_ctx, REKHA_GS_LOOP), 1);
+    check(rekha_hint_point(g_ctx, 1, 0, REKHA_PT_TAGS), 0);
+    check(rekha_hint_point(g_ctx, 1, 1, REKHA_PT_TAGS), REKHA_TAG_ONCURVE);
+    P(); e(0xB1); e(0); e(1); e(0x81); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 1, 0, REKHA_PT_TAGS), REKHA_TAG_ONCURVE);
+    check(rekha_hint_point(g_ctx, 1, 1, REKHA_PT_TAGS), REKHA_TAG_ONCURVE);
+    P(); e(0xB1); e(0); e(13); e(0x82); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 1, 0, REKHA_PT_TAGS), 0);
+    check(rekha_hint_point(g_ctx, 1, 13, REKHA_PT_TAGS), 0);
+    # ⛔ SHC AND SHZ DO NOT TRUST THE CONTOUR-END TABLE (F10): an end past the zone's 18 points, a
+    # contour whose first point comes after its last, or a negative end is refused BEFORE the walk,
+    # and no point moves. The descriptor 0.8.2's loader will fill is poisoned by hand here and
+    # restored by loading it again; zp2 is zone 1 for these, the reference point stays twilight 3.
+    var z1 = rekha_hint_zone(g_ctx, 1);
+    var ends = load64(z1 + ZN_CTRS);
+    var x8 = rekha_hint_point(g_ctx, 1, 8, REKHA_PT_CURX);
+    check(x8, hu_outline_x(8));
+    store64(ends + 8, 100);                                     # contour 1 ends at point 100
+    P(); e(0xB0); e(1); e(0x15); e(0xB0); e(1); e(0x34); refused("SHC contour");
+    P(); e(0xB0); e(1); e(0x36); refused("SHZ zone");
+    store64(ends, 12);   store64(ends + 8, 5);                  # contour 1 runs from 13 to 5
+    P(); e(0xB0); e(1); e(0x34); refused("SHC contour");
+    store64(ends, 0 - 5);   store64(ends + 8, 0 - 3);           # contour 1 starts at -4
+    P(); e(0xB0); e(1); e(0x34); refused("SHC contour");
+    P(); e(0xB0); e(1); e(0x36); refused("SHZ zone");
+    check(rekha_hint_point(g_ctx, 1, 8, REKHA_PT_CURX), x8);
+    check(rekha_hint_point(g_ctx, 1, 8, REKHA_PT_TAGS), 0);     # FLIPRGOFF left it 0; no touch since
+    zone1_load(g_ctx);
+    check(load64(ends + 8), 13);
+    check(rekha_hint_point(g_ctx, 1, 8, REKHA_PT_TAGS), REKHA_TAG_ONCURVE);
+    # and prep — a size change — invalidates zone 1 (D20)
+    check(rekha_hint_run_prep(g_ctx), 1);
+    check(rekha_hint_zone_points(g_ctx, 1), 0);
+    check(rekha_hint_point(g_ctx, 1, 3, REKHA_PT_CURX), 0);
+    # ── every refusal names its instruction and what was wrong (D1), before anything moves ──
+    P(); e(0x01); e(0xB0); e(0); e(0x16); check(run(), 1);
+    P(); e(0xB1); e(16); e(0); e(0x06); refused("SPVTL point");        # index 16 in a 16-point zone (D6)
+    P(); e(0xB1); e(16); e(0); e(0x08); refused("SFVTL point");
+    P(); e(0xB4); e(16); e(0); e(1); e(2); e(3); e(0x0F); refused("ISECT point");
+    P(); e(0xB1); e(16); e(0); e(0x27); refused("ALIGNPTS point");
+    P(); e(0xB0); e(16); e(0x29); refused("UTP point");
+    P(); e(0xB0); e(16); e(0x2E); refused("MDAP point");
+    P(); e(0xB0); e(16); e(0x32); refused("SHP point");
+    P(); e(0xB0); e(1); e(0x34); refused("SHC contour");                # twilight has one contour, #0
+    P(); e(0xB0); e(2); e(0x36); refused("SHZ zone");
+    P(); e(0xB1); e(16); e(64); e(0x38); refused("SHPIX point");
+    P(); e(0xB0); e(16); e(0x39); refused("IP point");
+    P(); e(0xB1); e(16); e(0); e(0x3A); refused("MSIRP point");
+    P(); e(0xB0); e(16); e(0x3C); refused("ALIGNRP point");
+    P(); e(0xB1); e(16); e(0); e(0x3E); refused("MIAP point");
+    P(); e(0xB1); e(0); e(16); e(0x3E); refused("MIAP cvt");            # 16 entries: 0..15
+    P(); e(0xB0); e(16); e(0x46); refused("GC point");                  # FreeType would push 0 (D15)
+    P(); e(0xB1); e(16); e(0); e(0x48); refused("SCFS point");
+    P(); e(0xB1); e(16); e(0); e(0x49); refused("MD point");
+    P(); e(0xB2); e(0x70); e(16); e(1); e(0x5D); refused("DELTAP point");   # 16 - 9 = 7 is in the band
+    P(); e(0xB0); e(1); e(0x5D); refused("stack underflow");            # one pair promised, none there
+    P(); e(0xB0); e(0); e(0x80); refused("FLIPPT point");               # zone 1 is empty
+    P(); e(0xB1); e(0); e(0); e(0x81); refused("FLIPRGON point");
+    P(); e(0xB1); e(0); e(0); e(0x82); refused("FLIPRGOFF point");
+    P(); e(0xB1); e(16); e(0); e(0x86); refused("SDPVTL point");
+    P(); e(0xB0); e(16); e(0xC0); refused("MDRP point");
+    P(); e(0xB1); e(16); e(0); e(0xE0); refused("MIRP point");
+    P(); e(0xB1); e(0); e(16); e(0xE0); refused("MIRP cvt");            # -1..15 are legal, 16 is not
+    # the boundaries on the legal side. SHC contour 0: rp2 = 0 has not moved, so the shift is 0 — and
+    # every twilight point but the reference itself (same zone as zp2, C §7.7) is still touched in x
+    P(); e(0xB0); e(0); e(0x34); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_TAGS), 0);
+    check(rekha_hint_point(g_ctx, 0, 15, REKHA_PT_TAGS), REKHA_TAG_TOUCHX);
+    check(rekha_hint_point(g_ctx, 0, 15, REKHA_PT_CURX), 0);
+    # SHZ takes 0 and 1 (and shifts zp2 either way, without touching)
+    P(); e(0xB0); e(0); e(0x36); check(run(), 1);
+    P(); e(0xB0); e(1); e(0x36); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 0, REKHA_PT_TAGS), 0);
+    # and the last point to the last entry: MIAP[0] takes cvt[15] = 1010 as it is, no cut-in, no rounding
+    P(); e(0xB1); e(15); e(15); e(0x3E); check(run(), 1);
+    check(rekha_hint_point(g_ctx, 0, 15, REKHA_PT_ORGX), 1010);
+    check(rekha_hint_point(g_ctx, 0, 15, REKHA_PT_CURX), 1010);
+    check(rekha_hint_error(g_ctx), REKHA_OK);
+
+    # ── M: the control-value program, per size ──────────────
+    g_group = "M prep";
+    # ⭐ LIBERATION SANS'S 835-BYTE prep, at the six sizes of group C. The digests, the ten fields and
+    # the storage are SECOND-INTERPRETER DERIVED: `python3 scripts/hint_prep_vectors.py table`. That
+    # prep CALLs functions 31, 70, 83, 84 and 85 and reaches no point instruction.
+    var wantcvt: i64[6];
+    store64(&wantcvt, 0x81ba6ac004d81f46);
+    store64(&wantcvt + 8, 0x727cc730e27d4209);
+    store64(&wantcvt + 16, 0xd484cf59a70c3618);
+    store64(&wantcvt + 24, 0x8dce433986cba0dc);
+    store64(&wantcvt + 32, 0x6c5674ea66047687);
+    store64(&wantcvt + 40, 0xf0c9f1af99d75c7b);
+    var wantsto = 0x7d0a64915a2b0144;             # the same 47 slots at every size
+    var wantchg: i64[6];
+    store64(&wantchg, 53);       store64(&wantchg + 8, 57);   store64(&wantchg + 16, 59);
+    store64(&wantchg + 24, 54);  store64(&wantchg + 32, 37);  store64(&wantchg + 40, 22);
+    var mi = 0;
+    while (mi < 6) {
+        var mp = load64(&sizes + mi * 8);
+        var mc = rekha_hint_ctx(rf, mp);
+        check(mc != 0, 1);
+        check(mc, fx);
+        check(rekha_hint_error(mc), REKHA_OK);
+        check(rekha_font_error(rf), REKHA_OK);
+        check(rekha_hint_ppem(mc), mp);
+        # the ten fields TT_Save_Context keeps (D10, ref2143/ttinterp.c:329-338) ...
+        var wcut = 128;
+        if (mp == 100) { wcut = 64; }
+        check(rekha_hint_gs(mc, REKHA_GS_MINDIST), 64);
+        check(rekha_hint_gs(mc, REKHA_GS_CVTCUTIN), wcut);
+        check(rekha_hint_gs(mc, REKHA_GS_SWCUTIN), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_SWVALUE), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_DELTABASE), 9);
+        check(rekha_hint_gs(mc, REKHA_GS_DELTASHIFT), 3);
+        check(rekha_hint_gs(mc, REKHA_GS_AUTOFLIP), 1);
+        check(rekha_hint_gs(mc, REKHA_GS_INSTCTRL), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_SCANCTRL), 1);      # SCANCTRL 0x190: on at or below 144 ppem
+        check(rekha_hint_gs(mc, REKHA_GS_SCANTYPE), 5);
+        # ... and everything else at its default, whatever prep did with it
+        check(rekha_hint_gs(mc, REKHA_GS_PVX), 16384);
+        check(rekha_hint_gs(mc, REKHA_GS_PVY), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_FVX), 16384);
+        check(rekha_hint_gs(mc, REKHA_GS_FVY), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_DVX), 16384);
+        check(rekha_hint_gs(mc, REKHA_GS_DVY), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_RP0), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_RP1), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_RP2), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_ZP0), 1);
+        check(rekha_hint_gs(mc, REKHA_GS_ZP1), 1);
+        check(rekha_hint_gs(mc, REKHA_GS_ZP2), 1);
+        check(rekha_hint_gs(mc, REKHA_GS_LOOP), 1);
+        check(rekha_hint_gs(mc, REKHA_GS_ROUND), REKHA_RND_GRID);
+        check(rekha_hint_gs(mc, REKHA_GS_PERIOD), 64);
+        check(rekha_hint_gs(mc, REKHA_GS_PHASE), 0);
+        check(rekha_hint_gs(mc, REKHA_GS_THRESHOLD), 32);
+        # the control values as prep left them, and the storage it filled
+        check(cvt_digest(mc, 324), load64(&wantcvt + mi * 8));
+        check(storage_digest(mc, 47), wantsto);
+        # how many entries prep rewrote, counted here against the fresh scale
+        var chg = 0;
+        var ci = 0;
+        while (ci < 324) {
+            if (rekha_hint_cvt_px(mc, ci) != fresh_px(rf, mc, ci)) { chg = chg + 1; }
+            ci = ci + 1;
+        }
+        check(chg, load64(&wantchg + mi * 8));
+        # the twilight zone is untouched: prep reaches no point instruction. Its bound (A7) is
+        # min(16, max(30, 2 * (0 + 324))) = 16.
+        check(rekha_hint_zone_points(mc, 0), 16);
+        check(zone_nonzero(mc, 0, 16), 0);
+        check(rekha_hint_zone_points(mc, 1), 0);
+        # ⭐ IDEMPOTENT: running prep again re-scales, re-zeroes and lands on the same state.
+        check(rekha_hint_run_prep(mc), 1);
+        check(rekha_hint_error(mc), REKHA_OK);
+        check(cvt_digest(mc, 324), load64(&wantcvt + mi * 8));
+        check(storage_digest(mc, 47), wantsto);
+        check(rekha_hint_gs(mc, REKHA_GS_CVTCUTIN), wcut);
+        check(rekha_hint_gs(mc, REKHA_GS_SCANCTRL), 1);
+        check(rekha_hint_func_count(mc), 71);              # the function table is what a re-run keeps
+        mi = mi + 1;
+    }
+    # ── the lifecycle, on the synthetic builder ──
+    # ⛔ A FONT PROGRAM THAT REFUSES IS A REFUSAL OF EVERY SIZE. rekha_hint_ctx still answers the handle
+    # (0.8.0's contract: the refusal is a property of the size and the consumer needs the context to
+    # read it), and the code lands on the context AND on the font (A5) — the same both times, and at
+    # another size; rekha_hint_run_prep re-raises it without running.
+    o_badfpgm = 1;
+    build_syn();
+    var bff = rekha_font_open(FB, SYN_LEN);
+    check(bff != 0, 1);
+    check(rekha_fpgm_length(bff), 6);
+    var bfc = rekha_hint_ctx(bff, 16);
+    check(bfc != 0, 1);
+    check(rekha_hint_error(bfc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(bfc), "FDEF without ENDF"), 1);
+    check(rekha_font_error(bff), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_font_error_detail(bff), "FDEF without ENDF"), 1);
+    check(rekha_hint_ctx(bff, 16), bfc);
+    check(rekha_hint_error(bfc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(bfc), "FDEF without ENDF"), 1);
+    check(rekha_font_error(bff), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_font_error_detail(bff), "FDEF without ENDF"), 1);
+    check(rekha_hint_ctx(bff, 24), bfc);
+    check(rekha_hint_error(bfc), REKHA_ERR_BAD_HINT);
+    check(rekha_font_error(bff), REKHA_ERR_BAD_HINT);
+    check(rekha_hint_run_prep(bfc), 0);
+    check(rekha_hint_error(bfc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(bfc), "FDEF without ENDF"), 1);
+    o_badfpgm = 0;
+    # a control-value program that refuses: the same standing refusal, per size; the font program did
+    # run, and the graphics state shows the pure defaults (A6, ref2143/ttobjs.c:997-1000)
+    o_badprep = 1;
+    build_syn();
+    var bpf = rekha_font_open(FB, SYN_LEN);
+    check(bpf != 0, 1);
+    check(rekha_prep_length(bpf), 1);
+    var bpc = rekha_hint_ctx(bpf, 16);
+    check(bpc != 0, 1);
+    check(rekha_hint_error(bpc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(bpc), "undefined opcode"), 1);
+    check(rekha_font_error(bpf), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_font_error_detail(bpf), "undefined opcode"), 1);
+    check(rekha_hint_ctx(bpf, 16), bpc);
+    check(rekha_hint_error(bpc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(bpc), "undefined opcode"), 1);
+    check(rekha_font_error(bpf), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_font_error_detail(bpf), "undefined opcode"), 1);
+    check(rekha_hint_ctx(bpf, 24), bpc);
+    check(rekha_hint_error(bpc), REKHA_ERR_BAD_HINT);
+    check(rekha_hint_run_prep(bpc), 0);
+    check(rekha_hint_error(bpc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(bpc), "undefined opcode"), 1);
+    check(rekha_hint_func_count(bpc), 2);
+    check(rekha_hint_gs(bpc, REKHA_GS_MINDIST), 64);
+    check(rekha_hint_gs(bpc, REKHA_GS_CVTCUTIN), 68);
+    o_badprep = 0;
+    # ⛔ SMD 96 AND THEN THE BAD OPCODE: a refused prep keeps NONE of the ten fields (A6), so the minimum
+    # distance is back at 64, where a prep that ran to its end would have left 96.
+    pp(); pe(0xB0); pe(96); pe(0x1A); pe(0x84);
+    build_syn();
+    var spf = rekha_font_open(FB, SYN_LEN);
+    check(rekha_prep_length(spf), 4);
+    var spc = rekha_hint_ctx(spf, 16);
+    check(spc != 0, 1);
+    check(rekha_hint_error(spc), REKHA_ERR_BAD_HINT);
+    check(str_same(rekha_hint_error_detail(spc), "undefined opcode"), 1);
+    check(rekha_hint_gs(spc, REKHA_GS_MINDIST), 64);
+    check(rekha_hint_gs(spc, REKHA_GS_ZP0), 1);
+    # SMD 96 SZPS 1 SRP0 5 SLOOP 3: the one field TT_Save_Context keeps survives, the other three are
+    # back at their defaults (D10) — and a size change re-runs it, so 96 holds at 24 ppem too
+    pp(); pe(0xB0); pe(96); pe(0x1A);
+    pe(0xB0); pe(1); pe(0x16);
+    pe(0xB0); pe(5); pe(0x10);
+    pe(0xB0); pe(3); pe(0x17);
+    build_syn();
+    var tpf = rekha_font_open(FB, SYN_LEN);
+    check(rekha_prep_length(tpf), 12);
+    var tpc = rekha_hint_ctx(tpf, 16);
+    check(tpc != 0, 1);
+    check(rekha_hint_error(tpc), REKHA_OK);
+    check(rekha_font_error(tpf), REKHA_OK);
+    check(rekha_hint_gs(tpc, REKHA_GS_MINDIST), 96);
+    check(rekha_hint_gs(tpc, REKHA_GS_RP0), 0);
+    check(rekha_hint_gs(tpc, REKHA_GS_ZP0), 1);
+    check(rekha_hint_gs(tpc, REKHA_GS_LOOP), 1);
+    check(rekha_hint_depth(tpc), 0);
+    check(rekha_hint_ctx(tpf, 24), tpc);
+    check(rekha_hint_error(tpc), REKHA_OK);
+    check(rekha_hint_gs(tpc, REKHA_GS_MINDIST), 96);
+    check(rekha_hint_gs(tpc, REKHA_GS_LOOP), 1);
+    # ⭐ INSTCTRL FROM A prep BINDS (D18): selector 1 set, where group I's identical program set nothing
+    pp(); pe(0xB1); pe(1); pe(1); pe(0x8E);
+    build_syn();
+    var ipf = rekha_font_open(FB, SYN_LEN);
+    check(rekha_prep_length(ipf), 4);
+    var ipc = rekha_hint_ctx(ipf, 16);
+    check(ipc != 0, 1);
+    check(rekha_hint_error(ipc), REKHA_OK);
+    check(rekha_hint_gs(ipc, REKHA_GS_INSTCTRL), 1);
+    check(rekha_hint_run_prep(ipc), 1);
+    check(rekha_hint_gs(ipc, REKHA_GS_INSTCTRL), 1);
+    # ⭐ AN IDEF IN prep WITH maxInstructionDefs 1: the second run — another size, or run_prep again —
+    # finds the opcode already defined and OVERWRITES it instead of appending past the table (A4,
+    # ref2143/ttinterp.c:3571-3588). The instruction it defines pushes 9.
+    o_maxidef = 1;
+    pp(); pe(0xB0); pe(0x83); pe(0x89); pe(0xB0); pe(9); pe(0x2D);
+    build_syn();
+    var idf = rekha_font_open(FB, SYN_LEN);
+    check(rekha_max_instruction_defs(idf), 1);
+    check(rekha_prep_length(idf), 6);
+    var idc = rekha_hint_ctx(idf, 16);
+    check(idc != 0, 1);
+    check(rekha_hint_error(idc), REKHA_OK);
+    check(rekha_hint_ctx(idf, 24), idc);
+    check(rekha_hint_error(idc), REKHA_OK);
+    check(rekha_hint_run_prep(idc), 1);
+    check(rekha_hint_run_prep(idc), 1);
+    check(rekha_hint_error(idc), REKHA_OK);
+    P(); e(0x83);
+    check(rekha_hint_run(idc, PB, 0, pn), 1);
+    check(rekha_hint_depth(idc), 1);
+    check(rekha_hint_at(idc, 0), 9);
+    # the builder back to its defaults for the groups after this one
+    o_maxidef = 4;
+    pp(); pe(0x18);
+
+    # ── N: caps and the shape of a face rekha will not interpret ────────────────
+    g_group = "N caps";
+    # ⚠ With D19's margin the stack cap of 8192 bites from maxStackElements 5462 on (5462 * 3 / 2);
+    # 60000 is still well past it.
     o_maxstack = 60000;
     build_syn();
     var bigf = rekha_font_open(FB, SYN_LEN);
@@ -811,11 +1713,40 @@ fn main(): i64 {
     check(rekha_hint_error(0), REKHA_OK);
     check(rekha_hint_gs(0, REKHA_GS_LOOP), 0);
     check(rekha_hint_run(0, PB, 0, 1), 0);
+    check(rekha_max_zone_points(0), 0);
+    check(rekha_max_zone_contours(0), 0);
     check(rekha_gasp_behavior(zf, 4), 2);               # the synthetic gasp, for completeness
     check(rekha_gasp_behavior(zf, 13), 3);
+    # ⭐ maxFunctionDefs IS FLOORED AT 64 (F4). FreeType's maxp reader raises a declaration below 64 to
+    # 64 before the interpreter sizes its table (its sfnt loader; ref2143/ttobjs.c:1050 takes the
+    # floored value), and the host's libfreetype 2.14.3 was measured: under a declared 1, 64 distinct
+    # definitions load and a 65th fails, numbered densely or sparsely. So a face declaring 1 still costs
+    # group D's 7040 bytes, its fpgm's two functions define, 62 more fit, and the 65th refuses.
+    o_maxfdef = 1;
+    build_syn();
+    var f1 = rekha_font_open(FB, SYN_LEN);
+    check(rekha_max_function_defs(f1), 1);
+    var c1 = rekha_hint_ctx(f1, 16);
+    check(c1 != 0, 1);
+    check(rekha_hint_error(c1), REKHA_OK);
+    check(rekha_hint_bytes(c1), 7040);
+    check(rekha_hint_func_count(c1), 2);
+    g_ctx = c1;
+    P();
+    fk = 0;
+    while (fk < 62) { e(0xB0); e(100 + fk); e(0x2C); e(0x2D); fk = fk + 1; }
+    check(run(), 1);
+    check(rekha_hint_func_count(c1), 64);
+    check(rekha_hint_func_defined(c1, 161), 1);
+    P(); e(0xB0); e(200); e(0x2C); e(0x2D);
+    check(run(), 0);
+    check(str_same(rekha_hint_error_detail(c1), "FDEF over maxFunctionDefs"), 1);
+    check(rekha_hint_func_count(c1), 64);
+    o_maxfdef = 64;
+    build_syn();                                        # the default face again, for group O
 
-    # ── L: one allocation, of a size the font's own maxp decides ────────────────
-    g_group = "L alloc";
+    # ── O: one allocation, of a size the font's own maxp decides ────────────────
+    g_group = "O alloc";
     g_arena = arena_new_growable(1048576);
     check(g_arena != 0, 1);
     sd_alloc_set(&hook_alloc);
@@ -826,9 +1757,10 @@ fn main(): i64 {
     ab = arena_used(g_arena);
     var kc = rekha_hint_ctx(kf, 16);
     check(kc != 0, 1);
-    check(arena_used(g_arena) - ab, 3720);
-    check(rekha_hint_bytes(kc), 3720);
-    # ⛔ AND NOTHING AFTER IT. A second ask, three size changes and a program all cost zero.
+    check(arena_used(g_arena) - ab, 7040);              # group D's arithmetic, measured the other way
+    check(rekha_hint_bytes(kc), 7040);
+    # ⛔ AND NOTHING AFTER IT. A second ask, three size changes (each a prep run) and 50 programs all
+    # cost zero.
     ab = arena_used(g_arena);
     check(rekha_hint_ctx(kf, 16), kc);
     check(rekha_hint_ctx(kf, 24), kc);
@@ -845,7 +1777,7 @@ fn main(): i64 {
     sd_alloc_set(0);
 
     if (g_fails == 0) {
-        var ok = "hint_test: PASS (the machine, and Liberation Sans's own font program)\n";
+        var ok = "hint_test: PASS (the machine, the zones, Liberation Sans's prep, FreeType point for point)\n";
         syscall(1, 2, ok, strlen(ok));
     } else {
         var bad = "hint_test: FAIL\n";

@@ -160,6 +160,10 @@ fn rekha_rd_i8(buf, off): i64 {
 #                      limits the interpreter is sized by, and the interpreter itself, built
 #                      LAZILY on the first rekha_hint_ctx and re-scaled in place on a size change
 #                      so an open still costs exactly REKHA_FONT_SIZE. 0 = absent. 0.8.0.)
+#   +816 max_zone_pts  +824 max_zone_ctrs (i64 — the LARGER of maxp's simple and composite point
+#                      and contour maxima, which is what the interpreter's glyph zone is sized by:
+#                      that many points plus the four phantom points, and that many contour ends.
+#                      0 when maxp is not version 1.0. 0.8.1.)
 #   +672 err_code  +680 err_detail (i64 — why THIS font's last public call refused, and a static
 #                      cstring naming where. Cleared at the top of every public call that can set
 #                      it, so it describes the LAST call and not the last failure ever. 0.7.0.)
@@ -218,7 +222,7 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 816;
+var REKHA_FONT_SIZE = 832;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
