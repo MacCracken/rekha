@@ -1,4 +1,4 @@
-# @internal — HVAR and MVAR: metrics variations (0.6.0).
+# HVAR and MVAR: metrics variations (0.6.0).
 #
 # hvar.cyr — the other half of a variable font. 0.4.11 and 0.4.12 made a glyph's OUTLINE follow the
 # axes, for CFF2 and for TrueType; its ADVANCE did not move, because `rekha_advance_width` reads
@@ -237,7 +237,7 @@ fn rekha_hvar_resolve(f): i64 {
 # @public — how much `gid`'s advance width moves at the current axis setting, in design units.
 # 0 when the font has no HVAR, when no axis is set, or when the table refuses — in which case the
 # advance is its default, which is the right answer and not a guess.
-fn rekha_hvar_advance_delta(font, gid): i64 {
+public fn rekha_hvar_advance_delta(font, gid): i64 {
     if (font == 0) { return 0; }
     if (gid < 0) { return 0; }
     var hv = load64(font + 416);
@@ -269,7 +269,7 @@ fn rekha_hvar_advance_delta(font, gid): i64 {
 # this delta, which is the reading `rekha_advance_width` froze for the advance map, while the
 # HINTED loader's left phantom follows FreeType and leaves it out (src/hint.cyr
 # rekha_hint_hmetrics). Pinned in docs/development/roadmap.md.
-fn rekha_hvar_lsb_delta(font, gid): i64 {
+public fn rekha_hvar_lsb_delta(font, gid): i64 {
     if (font == 0) { return 0; }
     if (gid < 0) { return 0; }
     var hv = load64(font + 416);
@@ -290,7 +290,7 @@ fn rekha_hvar_lsb_delta(font, gid): i64 {
 
 # @public — how much the font-wide metric `tag` moves at the current axis setting, in design units.
 # 0 when there is no MVAR, no axis is set, the tag is absent, or the table refuses.
-fn rekha_mvar_delta(font, tag): i64 {
+public fn rekha_mvar_delta(font, tag): i64 {
     if (font == 0) { return 0; }
     var mv = load64(font + 432);
     if (mv == 0) { return 0; }

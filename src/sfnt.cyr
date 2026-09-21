@@ -1,4 +1,4 @@
-# @internal — SFNT container parse (TrueType / OpenType table directory).
+# SFNT container parse (TrueType / OpenType table directory).
 # sfnt.cyr — turn untrusted font bytes into a RekhaFont: validate the
 # SFNT header (sfnt version + numTables), resolve the tables rekha reads
 # (head / maxp / loca / glyf / hhea / hmtx / cmap) ONCE at open, and expose
@@ -108,7 +108,7 @@ fn rekha_rd_i8(buf, off): i64 {
 }
 
 # ================================================================
-# RekhaFont — parsed SFNT handle (240 bytes).
+# RekhaFont — parsed SFNT handle (REKHA_FONT_SIZE = 832 bytes).
 #   +0   data        (ptr — the raw font byte buffer, borrowed not owned)
 #   +8   len         (i64 — byte length of `data`)
 #   +16  sfnt_ver    (i64 — sfntVersion u32; 0x00010000 = TrueType)
@@ -222,7 +222,10 @@ fn rekha_rd_i8(buf, off): i64 {
 # ⚠ The accessors below dereference the handle unchecked; the PUBLIC readers (units_per_em,
 # glyph_count, hhea/hmtx, char_to_glyph, ...) each return 0 for a 0 handle.
 # ================================================================
-var REKHA_FONT_SIZE = 832;
+
+# @public — the bytes one handle costs: the one sd_alloc of rekha_font_open. ⚠ Frozen by NAME, not
+# by value: it grew 816 → 832 at 0.8.1 and may grow again in a minor release; size by the name.
+public var REKHA_FONT_SIZE = 832;
 
 fn rekha_font_data(f): i64       { return load64(f); }
 fn rekha_font_len(f): i64        { return load64(f + 8); }
@@ -230,18 +233,17 @@ fn rekha_font_sfnt_ver(f): i64   { return load64(f + 16); }
 fn rekha_font_num_tables(f): i64 { return load64(f + 24); }
 fn rekha_font_dir_off(f): i64    { return load64(f + 32); }
 
-# Open a font from an in-memory (buf, len). Parses the SFNT offset table
-# (sfntVersion + numTables), records the table-directory offset and resolves the
-# table cache (RekhaFont layout above).
-# Returns a RekhaFont pointer, or 0 when `buf` is 0, len < 12, sfntVersion is not
-# 0x00010000 / 'true' / 'OTTO', the table directory
-# overruns `len`, or the allocation fails. The caller treats 0 as "not a usable
-# TrueType font"; no distinct RekhaErr code is surfaced.
+# @public — open a font from an in-memory (buf, len): face 0 of a 'ttcf' collection, the one face
+# of anything else. Parses the SFNT offset table (sfntVersion + numTables), records the
+# table-directory offset and resolves the table cache (RekhaFont layout above).
+# Returns a RekhaFont pointer, or 0 when `buf` is 0, len < 12, sfntVersion is not 0x00010000 /
+# 'true' / 'OTTO' / 'ttcf', the table directory overruns `len`, or the allocation fails. The
+# caller treats 0 as "not a usable font"; rekha_font_open_why says which of those it was.
 #
 # ⚠ A MISSING OR MALFORMED TABLE NEVER FAILS THE OPEN. It is cached as absent and the reader that
 # needs it returns 0 ("unknown") — the same fonts open as before the cache existed.
 # Allocation: exactly one sd_alloc(REKHA_FONT_SIZE).
-fn rekha_font_open(buf, len): i64 {
+public fn rekha_font_open(buf, len): i64 {
     return rekha_font_open_index(buf, len, 0);
 }
 
@@ -251,7 +253,7 @@ fn rekha_font_open(buf, len): i64 {
 # ⚠ 0 does NOT mean "no font" — a plain .ttf is not a collection and answers 0 here while opening
 # perfectly. It means "not a collection", and rekha_font_open_index(buf, len, 0) is the right call
 # either way.
-fn rekha_ttc_count(buf, len): i64 {
+public fn rekha_ttc_count(buf, len): i64 {
     if (buf == 0) { return 0; }
     if (len < 12) { return 0; }
     if (rekha_rd_u32(buf, 0) != REKHA_TAG_TTCF) { return 0; }
@@ -273,6 +275,10 @@ fn rekha_ttc_count(buf, len): i64 {
 # instead carries the floor that DOES hold (+248): the end of the TTC header and its offset array.
 # rekha_find_table_len keeps the old rule for a plain SFNT and adds an overlap test that catches
 # what the floor no longer does.
+public fn rekha_font_open_index(buf, len, index): i64 {
+    return rekha_font_open_index_why(buf, len, index, 0);
+}
+
 # Set `*out` when the caller gave one. The open family's answer to "there is no handle to record
 # into" — a caller's own slot instead of rekha's, which keeps the whole thing reentrant.
 fn rekha_err_out(out, code): i64 {
@@ -285,7 +291,7 @@ fn rekha_err_out(out, code): i64 {
 # ⛔ THE OPEN FAMILY CANNOT USE `rekha_font_error`: there is no handle yet, which is the whole
 # failure. So these take a slot rather than rekha owning one — six functions rather than a global,
 # and rekha stays reentrant.
-fn rekha_font_open_index_why(buf, len, index, err_out): i64 {
+public fn rekha_font_open_index_why(buf, len, index, err_out): i64 {
     rekha_err_out(err_out, REKHA_OK);
     if (buf == 0) { return rekha_err_out(err_out, REKHA_ERR_OTHER); }
     if (index < 0) { return rekha_err_out(err_out, REKHA_ERR_OTHER); }
@@ -333,12 +339,8 @@ fn rekha_font_open_index_why(buf, len, index, err_out): i64 {
     return f;
 }
 
-fn rekha_font_open_index(buf, len, index): i64 {
-    return rekha_font_open_index_why(buf, len, index, 0);
-}
-
 # @public — open face 0 and say why when it will not. The twin of rekha_font_open.
-fn rekha_font_open_why(buf, len, err_out): i64 {
+public fn rekha_font_open_why(buf, len, err_out): i64 {
     return rekha_font_open_index_why(buf, len, 0, err_out);
 }
 
@@ -407,7 +409,10 @@ fn rekha_font_resolve(f): i64 {
 # span outside the file or over the header.
 # ⚠ The declared length may be anything the extent allows, 0 included — a caller that
 # reads a fixed field checks the length covers it (rekha_font_resolve does, once).
-fn rekha_find_table_len(f, tag, len_out): i64 {
+# @public — the byte offset of table `tag` (a big-endian u32 of its four characters) in the font's
+# bytes, its declared length stored at `len_out`; 0 (and a 0 length) when absent or lying. The
+# question to ask before reading a table rekha does not parse.
+public fn rekha_find_table_len(f, tag, len_out): i64 {
     store64(len_out, 0);
     if (f == 0) { return 0; }
     var buf = rekha_font_data(f);
@@ -437,10 +442,10 @@ fn rekha_find_table_len(f, tag, len_out): i64 {
     return 0;
 }
 
-# Like rekha_find_table_len, offset only: the table's byte offset, or 0 if the
+# @public — like rekha_find_table_len, offset only: the table's byte offset, or 0 if the
 # tag is absent or its entry breaks the extent rule. One directory walk; the
 # discarded length lives in a stack cell (0 B of heap).
-fn rekha_find_table(f, tag): i64 {
+public fn rekha_find_table(f, tag): i64 {
     var c: i64[1];
     return rekha_find_table_len(f, tag, &c);
 }
@@ -449,9 +454,6 @@ fn rekha_find_table(f, tag): i64 {
 # Font metadata — head + maxp (cached at open).
 # ================================================================
 
-# head.unitsPerEm (u16 at head+18) — the em-square size; glyph coords are in
-# these design units and the consumer scales by pixel_size / unitsPerEm.
-# Returns 0 if the handle is 0 or head is absent / shorter than 54 B.
 # ================================================================
 # Why the last call refused — the producer for src/error.cyr's codes (0.7.0)
 # ================================================================
@@ -492,7 +494,7 @@ fn rekha_find_table(f, tag): i64 {
 # order is what makes the answer describe the call you are holding, and reading a code with no
 # sentinel beside it is a stale answer to a question nobody asked. It is the single commonest
 # misuse of C's errno, and documentation is the only thing standing in front of it.
-fn rekha_font_error(font): i64 {
+public fn rekha_font_error(font): i64 {
     if (font == 0) { return REKHA_OK; }
     return load64(font + 672);
 }
@@ -500,13 +502,13 @@ fn rekha_font_error(font): i64 {
 # @public — a short static cstring naming WHERE the last refusal was — a table tag, a field — or 0
 # when there is none. ⛔ Never allocated and never owned by the caller: it is a literal in the
 # bundle and stays valid for the life of the program.
-fn rekha_font_error_detail(font): i64 {
+public fn rekha_font_error_detail(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 680);
 }
 
 # @public — forget it. Returns 0. Rarely needed, since every public call clears on entry.
-fn rekha_font_error_clear(font): i64 {
+public fn rekha_font_error_clear(font): i64 {
     if (font == 0) { return 0; }
     store64(font + 672, REKHA_OK);
     store64(font + 680, 0);
@@ -527,7 +529,10 @@ fn rekha_fail_outline(font, code, detail): i64 {
     return rekha_outline_empty();
 }
 
-fn rekha_units_per_em(font): i64 {
+# @public — head.unitsPerEm (u16 at head+18) — the em-square size; glyph coords are in these
+# design units and the consumer scales by pixel_size / unitsPerEm.
+# Returns 0 if the handle is 0 or head is absent / shorter than 54 B.
+public fn rekha_units_per_em(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 40);
 }
@@ -541,9 +546,9 @@ fn rekha_loca_format(font): i64 {
     return load64(font + 48);
 }
 
-# Number of glyphs in the font (maxp.numGlyphs — u16 at maxp+4).
+# @public — number of glyphs in the font (maxp.numGlyphs — u16 at maxp+4): the gid range.
 # Returns 0 if the handle is 0 or maxp is absent / shorter than 6 B.
-fn rekha_glyph_count(font): i64 {
+public fn rekha_glyph_count(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 56);
 }
@@ -575,59 +580,64 @@ fn rekha_glyph_count(font): i64 {
 # @public — hhea.numberOfHMetrics: how many glyphs carry their own advance.
 # Returns 0 if the handle is 0 or hhea is absent / shorter than its 36-byte fixed part, which
 # callers must treat as "no metrics".
-fn rekha_num_h_metrics(font): i64 {
+public fn rekha_num_h_metrics(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 104);
 }
 
-# @public — hhea.ascender / .descender / .lineGap, in design units.
+# @public — hhea.ascender, in design units (rekha_descender and rekha_line_gap below are its
+# siblings; all three read the same way).
 # ⚠ `descender` is NEGATIVE in every well-formed font (it measures downward from the baseline);
 # returning it signed rather than as a magnitude is deliberate, so `asc - desc + gap` is the line
 # height without the caller having to know which way it points.
 # Each returns 0 for a 0 handle or an absent / short hhea; hhea_off is non-zero only when the
 # table declares >= 36 B, so +4..+9 are inside it.
-fn rekha_ascender(font): i64 {
+public fn rekha_ascender(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
     return rekha_rd_i16(load64(font), hhea + 4);
 }
 
-fn rekha_descender(font): i64 {
+# @public — hhea.descender, in design units; NEGATIVE in a well-formed font (see rekha_ascender).
+public fn rekha_descender(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
     return rekha_rd_i16(load64(font), hhea + 6);
 }
 
-# @public — the caret slope, as a rise over a run, and its offset from the caret's intersection
-# with the baseline. All three in hhea, all three varying through MVAR — which is the ONLY thing in
-# hhea that MVAR has a tag for. ⛔ A rise of 1 and a run of 0 is upright: the pair is a vector, not
-# an angle, and `run` is the one that carries the lean.
+# @public — the caret slope's rise (rekha_caret_slope_run is the run, rekha_caret_offset the
+# offset from the caret's intersection with the baseline). All three in hhea, all three varying
+# through MVAR — which is the ONLY thing in hhea that MVAR has a tag for. ⛔ A rise of 1 and a run
+# of 0 is upright: the pair is a vector, not an angle, and `run` is the one that carries the lean.
 # ⚠ They are hhea's, not OS/2's. `rekha_italic_angle` in post.cyr says the same thing in degrees
 # and does not vary; the two need not agree, and a font that leans says so in both.
-fn rekha_caret_slope_rise(font): i64 {
+public fn rekha_caret_slope_rise(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
     return rekha_rd_i16(load64(font), hhea + 18) + rekha_mvar_delta(font, REKHA_MVAR_HCRS);
 }
 
-fn rekha_caret_slope_run(font): i64 {
+# @public — the caret slope's run, hhea + MVAR (see rekha_caret_slope_rise).
+public fn rekha_caret_slope_run(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
     return rekha_rd_i16(load64(font), hhea + 20) + rekha_mvar_delta(font, REKHA_MVAR_HCRN);
 }
 
-fn rekha_caret_offset(font): i64 {
+# @public — the caret offset, hhea + MVAR (see rekha_caret_slope_rise).
+public fn rekha_caret_offset(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
     return rekha_rd_i16(load64(font), hhea + 22) + rekha_mvar_delta(font, REKHA_MVAR_HCOF);
 }
 
-fn rekha_line_gap(font): i64 {
+# @public — hhea.lineGap, in design units (see rekha_ascender).
+public fn rekha_line_gap(font): i64 {
     if (font == 0) { return 0; }
     var hhea = load64(font + 96);
     if (hhea == 0) { return 0; }
@@ -648,7 +658,7 @@ fn rekha_line_gap(font): i64 {
 # same way; rekha_char_to_glyph never produces one.)
 # ⚠ Design units, not pixels. Scale with `rekha_units_per_em`: `px = adv * size / upem`, or use
 # rekha_glyph_advance_px / rekha_glyph_advance_fx below.
-fn rekha_advance_width(font, gid): i64 {
+public fn rekha_advance_width(font, gid): i64 {
     if (font == 0) { return 0; }
     # ⭐ 0 MEANT THREE THINGS. This reader's own note has always said its 0 is UNKNOWN and NOT
     # ZERO-WIDTH — and a zero advance is a legal metric for a combining mark, so a consumer could
@@ -688,7 +698,7 @@ fn rekha_advance_width(font, gid): i64 {
 # FreeType, not this reader: its left phantom is xMin minus the UNVARIED bearing (src/hint.cyr
 # rekha_hint_hmetrics), so on a variation instance of a face with an lsb map this metric and the
 # hinted outline's origin disagree by the delta. docs/development/roadmap.md pins the difference.
-fn rekha_left_side_bearing(font, gid): i64 {
+public fn rekha_left_side_bearing(font, gid): i64 {
     if (font == 0) { return 0; }
     rekha_font_error_clear(font);
     if (gid < 0) { return rekha_fail(font, REKHA_ERR_OTHER, "glyph id"); }
@@ -706,7 +716,7 @@ fn rekha_left_side_bearing(font, gid): i64 {
 # `(adv * px_size + upem / 2) / upem`. 0 = unknown (upem <= 0 or advance <= 0). Allocates 0 B.
 # ⭐ The gid-level form exists so a consumer maps a codepoint ONCE and reuses the gid for
 # rekha_glyph_to_sdpath and every advance pass; rekha_char_advance_px is this plus a cmap lookup.
-fn rekha_glyph_advance_px(font, gid, px_size): i64 {
+public fn rekha_glyph_advance_px(font, gid, px_size): i64 {
     var upem = rekha_units_per_em(font);
     if (upem <= 0) { return 0; }
     var adv = rekha_advance_width(font, gid);
@@ -720,7 +730,7 @@ fn rekha_glyph_advance_px(font, gid, px_size): i64 {
 # rounding is off by up to half a pixel and the errors add. Sum the 16.16 advances into the pen and
 # round the pen once when placing a glyph; the run width is then exact to 1/65536 px per glyph.
 # adv <= 65535, so the product fits i64 for any px_size below 2^31.
-fn rekha_glyph_advance_fx(font, gid, px_size): i64 {
+public fn rekha_glyph_advance_fx(font, gid, px_size): i64 {
     var upem = rekha_units_per_em(font);
     if (upem <= 0) { return 0; }
     var adv = rekha_advance_width(font, gid);

@@ -1,4 +1,4 @@
-# @internal — cmap: Unicode codepoint -> glyph id.
+# cmap: Unicode codepoint -> glyph id.
 #
 # cmap.cyr — picks ONE Unicode subtable at rekha_font_open and maps codepoints through it. Formats
 # read: 4 (BMP segment map), 12 (segmented coverage — the full Unicode range), 13 (many-to-one
@@ -254,7 +254,7 @@ fn rekha_cmap_lookup(font, cp): i64 {
 # ⚠ Coverage follows the chosen table: a format-4 / 6 / 0 map cannot reach past U+FFFF / its range
 # / U+00FF. A (3,0) SYMBOL table is looked up at cp and, when that misses and cp <= U+00FF, at
 # U+F000 + cp — symbol fonts put their glyphs in the private-use F0xx block.
-fn rekha_char_to_glyph(font, cp): i64 {
+public fn rekha_char_to_glyph(font, cp): i64 {
     if (font == 0) { return 0; }
     # ⭐ gid 0 IS A REAL, DRAWABLE GLYPH — the .notdef box — so 0 has always meant three different
     # things here: "this font does not map that character", "this font has no usable cmap at all",
@@ -289,7 +289,7 @@ fn rekha_char_to_glyph(font, cp): i64 {
 # ⚠ THE WRAPPER DOES NOT CLEAR, and it does not change what it RETURNS either: an empty path for a
 # character this font cannot draw is the contract every caller since 0.3.0 was written against.
 # What it adds is that the reason survives the second call.
-fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
+public fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
     var g = rekha_char_to_glyph(font, cp);
     var e = rekha_font_error(font);
     var d = rekha_font_error_detail(font);
@@ -311,7 +311,7 @@ fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
 # ⚠ An unmapped codepoint resolves to .notdef (gid 0), whose advance is a real metric in most fonts
 # — so a missing glyph advances by the .notdef box rather than collapsing to zero, which is what
 # makes a run of unmapped text still legible as "something is here".
-fn rekha_char_advance(font, cp): i64 {
+public fn rekha_char_advance(font, cp): i64 {
     return rekha_advance_width(font, rekha_char_to_glyph(font, cp));
 }
 
@@ -327,12 +327,12 @@ fn rekha_char_advance(font, cp): i64 {
 # 16.16 advances (rekha_char_advance_fx / rekha_glyph_advance_fx) and rounding the pen ONCE.
 # ⚠ Returns 0 when the metric is unknown OR `upem` is 0, so the caller's fallback path is a single
 # `== 0` test rather than two.
-fn rekha_char_advance_px(font, cp, px_size): i64 {
+public fn rekha_char_advance_px(font, cp, px_size): i64 {
     return rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size);
 }
 
 # @public — advance `cp` at pixel size `px_size` as 16.16 fixed-point pixels. 0 = unknown.
 # = rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size). Allocates 0 B.
-fn rekha_char_advance_fx(font, cp, px_size): i64 {
+public fn rekha_char_advance_fx(font, cp, px_size): i64 {
     return rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size);
 }

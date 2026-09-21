@@ -1,4 +1,4 @@
-# @public — rekha library include chain.
+# lib.cyr — the rekha library include chain.
 # rekha (रेखा — line / outline / contour / stroke) — pure-Cyrius
 # vector/outline font subsystem.
 #
@@ -36,7 +36,7 @@ include "lib/string.cyr"
 
 # sadish — the 2D vector rasterizer rekha emits glyph paths into (dep).
 # rekha is sadish's first consumer. src/ calls sd_path_* and sd_asr (glyf.cyr)
-# and the sd_alloc seam (error.cyr, sfnt.cyr, glyf.cyr); sd_canvas_* is
+# and the sd_alloc seam (sfnt.cyr, glyf.cyr, gvar.cyr, hint.cyr); sd_canvas_* is
 # test-only (programs/path_test.cyr) — rekha emits paths, not canvas ops.
 include "lib/sadish.cyr"
 
@@ -46,9 +46,10 @@ include "lib/sadish.cyr"
 # sfnt.cyr (big-endian byte readers + the RekhaFont SFNT handle + the
 # table cache) depends on neither; glyf.cyr (glyph-outline load + the
 # rekha->sadish path-verb seam) sits atop sfnt.cyr; cmap.cyr uses both.
-# ⚠ error.cyr stays FIRST: its rekha_err_new holds the first sd_alloc call
-# in code order, and that site is what decides how a build against a sadish
-# below the 0.5.5 floor degrades (see the [deps.sadish] note in cyrius.cyml).
+# ⚠ error.cyr stays FIRST for the enum every later module names. (Through 0.6.7 it also held
+# rekha_err_new, the first sd_alloc call in code order — the site that decided how a build
+# against a sadish below the 0.5.5 floor degraded; that record is gone since 0.7.0, and the first
+# sd_alloc is now rekha_font_open_index_why's. See the [deps.sadish] note in cyrius.cyml.)
 # ================================================================
 include "src/error.cyr"
 include "src/sfnt.cyr"

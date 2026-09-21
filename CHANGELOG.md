@@ -5,6 +5,117 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-09-21 — the freeze
+
+0.8.x closed with every rendering gap measured; what remained was an API that was *exported*
+rather than *declared*: 137 `# @public` comments against 465 functions, where one comment covered
+a run of accessors and `@internal` was a module-header tag, so neither number counted anything —
+`rekha_font_open` itself carried no marker, and a consumer of `dist/rekha.cyr` could link every
+internal. This release declares the surface, documents it, promises it, and makes the promise
+the compiler's to keep. **The API is frozen.** Through 1.x no documented name is removed or
+renamed, no signature changes, no documented answer changes its meaning; additions are additive.
+
+### The boundary is enforced, not described (ADR 0009)
+
+Cyrius 6.5.0 gave the language file-level visibility — a bare `private` line makes a file
+private-by-default, `public fn` / `public var` re-expose items, and a private item reached from
+another file is a compile error. `cyrius distlib` concatenates the module list into ONE file,
+while rekha's tests include the `src/` chain where each module is its own file. So:
+
+- **`src/freeze.cyr`** — a header comment and one code line, `private` — is the first module
+  of both `[lib]` lists and is not included by `src/lib.cyr`. Both bundles now begin with
+  `private`; the src chain the tests build is untouched, and every test seam
+  (`rekha_hint_run`, `rekha_hint_load_simple`, `rekha_rd_u16`, …) stays reachable to the suites
+  and unreachable to a consumer: `error: 'rekha_rd_u16' is private to its file`.
+- **178 `public fn` and 72 `public var` in `src/`** against **287 internal `fn`** — measured by
+  `grep -c '^public fn' src/*.cyr` and `grep -c '^fn ' src/*.cyr`, which are now exact counts.
+  The rule: a call or constant a consumer of "what the glyph is" needs, or that README or a
+  consumer already used. Public in practice and unmarked until now: `rekha_font_open`,
+  `_open_index`, `rekha_units_per_em`, `rekha_glyph_count`, `rekha_find_table` / `_len`, the six
+  `rekha_outline_*` readers, `rekha_descender`, `rekha_line_gap`, the caret pair, the three axis
+  extents, `rekha_var_coord`, `rekha_glyph_advance_height_fx` — each now under its own
+  `# @public` comment (four such comments were orphaned above the wrong function, one above
+  the error section). Unmarked: `rekha_hint_run` — the RANGE 3 test range, FDEF accepted and
+  writes persisting, which matches no FreeType range — with `rekha_hint_push` / `_pop` /
+  `_depth` / `_at`; `rekha_hint_run_fpgm`; `rekha_mac_roman_cp`, `rekha_err_out`,
+  `rekha_var_axis_at`. Constants are public only where a consumer compares against the *name*
+  — the `REKHA_GS_*` / `REKHA_PT_*` / `REKHA_TAG_*` / `REKHA_RND_*` / `REKHA_GASP_*` /
+  `REKHA_NAME_*` / `REKHA_STAT_*` sets, `REKHA_OS2_USE_TYPO`, `REKHA_FONT_SIZE` and
+  `REKHA_OUTLINE_SIZE`; every cap is a documented VALUE and its identifier stays rekha's.
+  `fonts/face_data.cyr`'s ten accessors are frozen too, outside the bundle, consumed by path.
+- **`scripts/api_surface.py`** (`--check` in CI, `--update` to regenerate
+  `docs/api/surface.txt`) pins what the compiler does not: the spelling (`public fn name(` on
+  the item's line — the textual `cyrius api-surface` scanner and the compiler agree only on
+  that form), governance (every public item under a `# @public` comment, no orphaned comment),
+  `freeze.cyr` first and alone in saying `private`, each bundle's first code line and its
+  exact public set, every surface name documented once in `docs/api/` and nothing else
+  documented, and the generated list — 188 functions, 72 constants, 9 enum members.
+- **CI compiles a probe** against each bundle that names three internals and must FAIL with
+  three `is private to its file` lines, and a twin naming only public items that must build. A
+  passing suite cannot show that something is unreachable; this can.
+- **Measured**: a consumer binary is byte-identical with and without the `private` line
+  (912,040 B; 473,768 under `CYRIUS_DCE=1`) — visibility only. `cyrius fmt`, `lint --strict`,
+  `vet`, `distlib --check`, the cross-target link checks and every suite pass. Consumers need
+  **cyrius 6.6.6+** — which the one-leaf sidecar already required (0.4.5).
+
+### `docs/api/` — the reference, and the promise
+
+`README.md` (the promise, the audience table, six cross-cutting rules: the handle, sentinel
+then `rekha_font_error`, units, refuse-don't-guess with every cap as a value, the sadish seam,
+what is NOT promised) and eight pages — `open.md` (20 + the 10 face accessors), `outline.md`
+(10, with the `RekhaOutline` layout now frozen), `metrics.md` (57), `variations.md` (18),
+`names.md` (23), `kern.md` (8), `hint.md` (38, the five consumer rules and the pinned
+divergences), `errors.md` (4, and `RekhaErrCode`'s nine members) — one entry per public name:
+signature, answer, units, sentinel and code, allocation, and the `src/` line it was written
+from. The source headers stay normative: where a page and a header disagree, the page is the
+bug. `docs/api/surface.txt` is the generated list.
+
+### `docs/adr/` — nine records
+
+The five the roadmap named and four more that were explained only in scattered comments:
+0001 the sadish seam and `sd_alloc` with no free; 0002 refuse-don't-guess, the hinting
+corollary, and the 0.8.2 trigger that fired and was kept; 0003 the one-leaf sidecar and the
+6.6.6 floor; 0004 the opt-in WOFF bundle; 0005 the rounding split; 0006 the error model on
+the handle; 0007 FreeType 2.14.3 as the hinting oracle; 0008 the embedded default face;
+0009 the freeze itself, with the alternatives — comment markers, a `_rekha_` prefix, `private`
+per module — and why each lost.
+
+### `SECURITY.md` and `CONTRIBUTING.md`
+
+Both were "WARN (optional, not yet present)" in CI's docs job since it was written; both are
+required now. `SECURITY.md`: the reporting address (security@agnosticos.org), the threat model
+as invariants each with its gate — no syscall in library code, every read bounded, caps as
+refusals with a budget for fan-out, allocation that never faults, refuse-don't-guess, the
+private bundle — what is out of scope, the evidence (0.3.11, `programs/hostile_test.cyr` in CI
+on every push, the 0.8.2 ~85 M-check sweep), and supported versions. `CONTRIBUTING.md`: the
+toolchain, the build, the nine gates in CI order, the rules rekha writes by, and how the
+surface changes from here — additions only, with the six steps an addition takes.
+
+### Changed
+
+- `src/*.cyr`: `public` on 178 functions and 72 constants; 25 `# @public` comments added,
+  moved onto the function they describe, or removed from a function that is internal; the 18
+  module-header `@internal` tags and `src/lib.cyr`'s `@public` tag removed (a file-level tag
+  means nothing once both kinds live in every file); `REKHA_PT_*` one constant per line; three
+  stale comments fixed (`src/lib.cyr` still credited `rekha_err_new`, gone since 0.7.0, as the
+  first `sd_alloc` site; `src/sfnt.cyr` said the handle is 240 bytes and `src/glyf.cyr` 176 —
+  it is `REKHA_FONT_SIZE`, 832); `rekha_font_open`'s comment says a collection opens face 0 and
+  names its `_why` twin. No code path changed: every suite's check count is what 0.8.2 pinned.
+- `cyrius.cyml`: `src/freeze.cyr` first in `[lib].modules` and `[lib.woff].modules`.
+- `programs/woff_dist_test.cyr` reached fourteen bundle internals at 30 sites to build its
+  WOFF fixture; it IS a consumer's include chain, so it carries its own twenty-line byte helpers
+  now, and its two checks of `rekha_w2_known_tag` / `rekha_w2_triplet` moved to
+  `programs/woff2_test.cyr` (`t_internals`; 186 checks). 15 checks, was 17.
+- `.github/workflows/ci.yml`: the freeze step (`api_surface.py --check` + the two probes per
+  bundle) after the dist sync; the docs job requires `CONTRIBUTING.md`, `SECURITY.md`,
+  `docs/api/README.md`, `docs/api/surface.txt` and `docs/adr/README.md`.
+- `dist/rekha.cyr`, `dist/rekha-woff.cyr` regenerated: each begins with `private`; the
+  sidecars are unchanged (`string`; `string` + `sankoch`).
+- README: the stability paragraph up top; the roadmap table closes 0.9.0 and names 1.0.0.
+- `docs/development/roadmap.md`: 0.9.0 leaves the file; **1.0.0** is Next, with what it needs —
+  a consumer on a 0.9.x tag, one release with no surface change, and the refuse-don't-guess
+  decision settled before it (flipping it changes a documented answer, which 1.x forbids).
+
 ## [0.8.2] - 2026-09-21 — the glyph zone, and a hinted outline
 
 0.8.1 shipped the two zones and every point instruction but `IUP`, and nothing to load an outline

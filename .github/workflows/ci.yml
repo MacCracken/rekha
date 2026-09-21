@@ -126,6 +126,48 @@ jobs:
           fi
           echo "dist/ matches src/"
 
+      - name: The API freeze (0.9.0) — surface, docs, and the private bundle
+        # Three facts, none of which `distlib --check` sees. (1) scripts/api_surface.py: every
+        # `public fn` / `public var` sits under a `# @public` doc comment and no such comment is
+        # orphaned; src/freeze.cyr is first in both module lists; each bundle begins with `private`
+        # and carries exactly the src surface; docs/api/*.md documents every public name once and
+        # nothing else; docs/api/surface.txt matches. (2) A probe that includes each bundle and
+        # names three INTERNALS must FAIL to build with `is private to its file` — a passing suite
+        # cannot show that something is unreachable, so this is the only evidence the freeze is
+        # enforced in the artefact a consumer takes. (3) Its twin naming only public items builds.
+        run: |
+          python3 scripts/api_surface.py --check
+          mkdir -p build
+          fail=0
+          probe() {   # probe <bundle> <includes...>
+            local bundle="$1"; shift
+            { for inc in "$@"; do echo "include \"$inc\""; done
+              echo "include \"$bundle\""
+              echo 'fn main(): i64 { return rekha_rd_u16(0, 0) + REKHA_TAG_HEAD + rekha_hint_run(0, 0, 0, 0); }'
+            } > build/probe_neg.cyr
+            { for inc in "$@"; do echo "include \"$inc\""; done
+              echo "include \"$bundle\""
+              echo 'fn main(): i64 { return rekha_font_open(0, 0) + REKHA_ERR_OOM + REKHA_FONT_SIZE + rekha_err_name(0); }'
+            } > build/probe_pos.cyr
+            if cyrius build build/probe_neg.cyr build/probe_neg > build/probe_neg.log 2>&1; then
+              echo "FAIL: $bundle let a consumer reach an internal name"; cat build/probe_neg.log; fail=1
+            elif [ "$(grep -c "is private to its file" build/probe_neg.log)" != "3" ]; then
+              echo "FAIL: $bundle refused the probe for the wrong reason"; cat build/probe_neg.log; fail=1
+            else
+              echo "$bundle: three internals refused as private"
+            fi
+            if ! cyrius build build/probe_pos.cyr build/probe_pos > build/probe_pos.log 2>&1 \
+               || grep -qi "warning\|error" build/probe_pos.log; then
+              echo "FAIL: $bundle refused a public name"; cat build/probe_pos.log; fail=1
+            else
+              echo "$bundle: the public probe builds"
+            fi
+          }
+          probe dist/rekha.cyr lib/string.cyr lib/sadish.cyr
+          probe dist/rekha-woff.cyr lib/string.cyr lib/sadish.cyr lib/sync.cyr lib/sankoch.cyr
+          git checkout -- cyrius.lock
+          exit $fail
+
       - name: Pin the published leaf requirements (dist/*.deps)
         # `--check` above only proves the sidecar matches src/ — it passes just as happily on a
         # sidecar that has GROWN. Every leaf named in dist/rekha.deps is one each consumer must
@@ -395,13 +437,12 @@ jobs:
       - name: Check required files
         run: |
           MISSING=0
-          for f in README.md CHANGELOG.md VERSION cyrius.cyml; do
+          # CONTRIBUTING.md and SECURITY.md were "WARN (optional, not yet present)" through 0.8.2;
+          # the 0.9.0 freeze wrote both, and a frozen library does not get to lose them.
+          for f in README.md CHANGELOG.md VERSION cyrius.cyml CONTRIBUTING.md SECURITY.md LICENSE \
+                   docs/api/README.md docs/api/surface.txt docs/adr/README.md; do
             if [ -f "$f" ]; then echo "  OK: $f"
             else echo "  MISSING (required): $f"; MISSING=1; fi
-          done
-          for f in CONTRIBUTING.md SECURITY.md LICENSE; do
-            if [ -f "$f" ]; then echo "  OK: $f"
-            else echo "  WARN (optional, not yet present): $f"; fi
           done
           exit $MISSING
       - name: Verify version consistency

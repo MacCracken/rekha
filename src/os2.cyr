@@ -1,4 +1,4 @@
-# @internal — OS/2: the metrics a font INTENDS (0.6.1).
+# OS/2: the metrics a font INTENDS (0.6.1).
 #
 # os2.cyr — `hhea` says how tall the font's glyphs are. `OS/2` says how the designer meant them to
 # be SET: which vertical pair to build a line box from, where the x-height and cap-height sit, how
@@ -37,10 +37,11 @@
 # returns -1 when the table is absent and is the probe to use before trusting a 0.
 
 var REKHA_TAG_OS2 = 0x4F532F32;    # 'OS/2'
-# fsSelection bit 7. ⛔ The one bit in this table a renderer must not ignore: it is the font saying
-# its sTypo trio is the intended line box, and a face that sets it and is laid out on usWin
-# metrics sets lines noticeably too far apart.
-var REKHA_OS2_USE_TYPO = 128;
+# @public — fsSelection bit 7, for a consumer masking rekha_fs_selection itself (rekha_use_typo_metrics
+# answers the question directly). ⛔ The one bit in this table a renderer must not ignore: it is
+# the font saying its sTypo trio is the intended line box, and a face that sets it and is laid
+# out on usWin metrics sets lines noticeably too far apart.
+public var REKHA_OS2_USE_TYPO = 128;
 
 # Cache the table at open. Validated for a minimum length only — every field below re-checks the
 # extent it needs, so a short table loses its tail rather than the whole reader.
@@ -81,7 +82,7 @@ fn rekha_os2_u16(font, off, tag, dflt): i64 {
 
 # @public — the OS/2 table's version, or -1 when the font has none. The probe to use before
 # trusting a 0 from anything below.
-fn rekha_os2_version(font): i64 {
+public fn rekha_os2_version(font): i64 {
     if (font == 0) { return 0 - 1; }
     if (load64(font + 448) == 0) { return 0 - 1; }
     return rekha_rd_u16(load64(font), load64(font + 448));
@@ -90,22 +91,22 @@ fn rekha_os2_version(font): i64 {
 # @public — usWeightClass, 1..1000 (400 = regular, 700 = bold). 0 when the font does not say.
 # ⚠ This is the STATIC class. A variable font's `wght` axis is the live one — `rekha_var_axis_tag`
 # / `rekha_var_coord` — and the two need not agree once an axis is set.
-fn rekha_weight_class(font): i64 { return rekha_os2_u16(font, 4, 0, 0); }
+public fn rekha_weight_class(font): i64 { return rekha_os2_u16(font, 4, 0, 0); }
 
 # @public — usWidthClass, 1..9 (5 = normal). 0 when the font does not say.
-fn rekha_width_class(font): i64 { return rekha_os2_u16(font, 6, 0, 0); }
+public fn rekha_width_class(font): i64 { return rekha_os2_u16(font, 6, 0, 0); }
 
 # @public — fsType, the embedding-permission bitfield, or -1 when the font does not say. rekha
 # neither enforces nor interprets it; a consumer that embeds fonts must.
-fn rekha_fs_type(font): i64 { return rekha_os2_u16(font, 8, 0, 0 - 1); }
+public fn rekha_fs_type(font): i64 { return rekha_os2_u16(font, 8, 0, 0 - 1); }
 
 # @public — fsSelection: bit 0 ITALIC, 5 BOLD, 6 REGULAR, 7 USE_TYPO_METRICS, 8 WWS, 9 OBLIQUE.
 # -1 when the font does not say.
-fn rekha_fs_selection(font): i64 { return rekha_os2_u16(font, 62, 0, 0 - 1); }
+public fn rekha_fs_selection(font): i64 { return rekha_os2_u16(font, 62, 0, 0 - 1); }
 
 # @public — 1 when the font asks for its sTypo trio to be the line box, else 0 (including when
 # there is no OS/2 to ask).
-fn rekha_use_typo_metrics(font): i64 {
+public fn rekha_use_typo_metrics(font): i64 {
     var v = rekha_fs_selection(font);
     if (v < 0) { return 0; }
     if ((v & REKHA_OS2_USE_TYPO) != 0) { return 1; }
@@ -113,36 +114,36 @@ fn rekha_use_typo_metrics(font): i64 {
 }
 
 # @public — the sTypo trio, in design units, each varying through MVAR.
-fn rekha_typo_ascender(font): i64  { return rekha_os2_i16(font, 68, REKHA_MVAR_HASC, 0); }
-fn rekha_typo_descender(font): i64 { return rekha_os2_i16(font, 70, REKHA_MVAR_HDSC, 0); }
-fn rekha_typo_line_gap(font): i64  { return rekha_os2_i16(font, 72, REKHA_MVAR_HLGP, 0); }
+public fn rekha_typo_ascender(font): i64  { return rekha_os2_i16(font, 68, REKHA_MVAR_HASC, 0); }
+public fn rekha_typo_descender(font): i64 { return rekha_os2_i16(font, 70, REKHA_MVAR_HDSC, 0); }
+public fn rekha_typo_line_gap(font): i64  { return rekha_os2_i16(font, 72, REKHA_MVAR_HLGP, 0); }
 
 # @public — the usWin clipping pair, in design units, each varying through MVAR. ⚠ Both are
 # UNSIGNED and usWinDescent is a POSITIVE distance below the baseline, where sTypoDescender is
 # negative. They are not interchangeable and a consumer that mixes them gets a line box that is
 # off by twice the descent.
-fn rekha_win_ascent(font): i64  { return rekha_os2_u16(font, 74, REKHA_MVAR_HCLA, 0); }
-fn rekha_win_descent(font): i64 { return rekha_os2_u16(font, 76, REKHA_MVAR_HCLD, 0); }
+public fn rekha_win_ascent(font): i64  { return rekha_os2_u16(font, 74, REKHA_MVAR_HCLA, 0); }
+public fn rekha_win_descent(font): i64 { return rekha_os2_u16(font, 76, REKHA_MVAR_HCLD, 0); }
 
 # @public — sxHeight and sCapHeight, version 2 and up, in design units, varying through MVAR.
 # 0 when the table is older or shorter than the field.
-fn rekha_x_height(font): i64   { return rekha_os2_i16(font, 86, REKHA_MVAR_XHGT, 0); }
-fn rekha_cap_height(font): i64 { return rekha_os2_i16(font, 88, REKHA_MVAR_CPHT, 0); }
+public fn rekha_x_height(font): i64   { return rekha_os2_i16(font, 86, REKHA_MVAR_XHGT, 0); }
+public fn rekha_cap_height(font): i64 { return rekha_os2_i16(font, 88, REKHA_MVAR_CPHT, 0); }
 
 # @public — the synthetic sub- and superscript boxes, in design units, all eight varying through
 # MVAR. A renderer with no real superscript glyphs scales and shifts by these rather than guessing
 # a fraction of the em. ⚠ The offsets are from the BASELINE, so a subscript's y offset is a
 # positive distance DOWN — the sign convention is the field's, not a mistake.
-fn rekha_subscript_x_size(font): i64   { return rekha_os2_i16(font, 10, REKHA_MVAR_SBXS, 0); }
-fn rekha_subscript_y_size(font): i64   { return rekha_os2_i16(font, 12, REKHA_MVAR_SBYS, 0); }
-fn rekha_subscript_x_offset(font): i64 { return rekha_os2_i16(font, 14, REKHA_MVAR_SBXO, 0); }
-fn rekha_subscript_y_offset(font): i64 { return rekha_os2_i16(font, 16, REKHA_MVAR_SBYO, 0); }
-fn rekha_superscript_x_size(font): i64   { return rekha_os2_i16(font, 18, REKHA_MVAR_SPXS, 0); }
-fn rekha_superscript_y_size(font): i64   { return rekha_os2_i16(font, 20, REKHA_MVAR_SPYS, 0); }
-fn rekha_superscript_x_offset(font): i64 { return rekha_os2_i16(font, 22, REKHA_MVAR_SPXO, 0); }
-fn rekha_superscript_y_offset(font): i64 { return rekha_os2_i16(font, 24, REKHA_MVAR_SPYO, 0); }
+public fn rekha_subscript_x_size(font): i64   { return rekha_os2_i16(font, 10, REKHA_MVAR_SBXS, 0); }
+public fn rekha_subscript_y_size(font): i64   { return rekha_os2_i16(font, 12, REKHA_MVAR_SBYS, 0); }
+public fn rekha_subscript_x_offset(font): i64 { return rekha_os2_i16(font, 14, REKHA_MVAR_SBXO, 0); }
+public fn rekha_subscript_y_offset(font): i64 { return rekha_os2_i16(font, 16, REKHA_MVAR_SBYO, 0); }
+public fn rekha_superscript_x_size(font): i64   { return rekha_os2_i16(font, 18, REKHA_MVAR_SPXS, 0); }
+public fn rekha_superscript_y_size(font): i64   { return rekha_os2_i16(font, 20, REKHA_MVAR_SPYS, 0); }
+public fn rekha_superscript_x_offset(font): i64 { return rekha_os2_i16(font, 22, REKHA_MVAR_SPXO, 0); }
+public fn rekha_superscript_y_offset(font): i64 { return rekha_os2_i16(font, 24, REKHA_MVAR_SPYO, 0); }
 
 # @public — the strikeout rule: its thickness, and its position above the baseline. Both vary.
 # ⚠ The UNDERLINE pair lives in `post`, which rekha does not read yet.
-fn rekha_strikeout_size(font): i64     { return rekha_os2_i16(font, 26, REKHA_MVAR_STRS, 0); }
-fn rekha_strikeout_position(font): i64 { return rekha_os2_i16(font, 28, REKHA_MVAR_STRO, 0); }
+public fn rekha_strikeout_size(font): i64     { return rekha_os2_i16(font, 26, REKHA_MVAR_STRS, 0); }
+public fn rekha_strikeout_position(font): i64 { return rekha_os2_i16(font, 28, REKHA_MVAR_STRO, 0); }

@@ -1,4 +1,4 @@
-# @internal — GPOS pair positioning: where a modern font keeps its kerning (0.6.6).
+# GPOS pair positioning: where a modern font keeps its kerning (0.6.6).
 #
 # gpos.cyr — 0.6.5 read the legacy `kern` table, and said plainly that a face with GPOS alone is
 # normal and answered 0 for one. This is that: the `kern` FEATURE's lookups, the two `PairPos`
@@ -300,7 +300,7 @@ fn rekha_gpos_lookups(font): i64 {
 }
 
 # @public — 1 when the font has a GPOS `kern` feature rekha can walk, else 0.
-fn rekha_gpos_kern_present(font): i64 {
+public fn rekha_gpos_kern_present(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 576) == 0) { return 0; }
     if (rekha_gpos_lookups(font) < 1) { return 0; }
@@ -311,7 +311,7 @@ fn rekha_gpos_kern_present(font): i64 {
 # ⛔ Lookups ACCUMULATE — each is a separate pass in a real shaper — while within one lookup the
 # FIRST subtable that matches wins and the rest are not consulted. Getting that backwards either
 # drops a font's kerning or applies it twice.
-fn rekha_gpos_kern_pair(font, l, r): i64 {
+public fn rekha_gpos_kern_pair(font, l, r): i64 {
     if (font == 0) { return 0; }
     if (l < 0 || r < 0) { return 0; }
     if (l > 65535 || r > 65535) { return 0; }

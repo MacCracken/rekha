@@ -1,4 +1,4 @@
-# @internal — TrueType hinting, part three: the glyph zone, and a hinted outline (0.8.0 – v0.8.2).
+# TrueType hinting, part three: the glyph zone, and a hinted outline (0.8.0 – v0.8.2).
 #
 # hint.cyr — the bytecode interpreter a TrueType face carries its own hints in. `fpgm` holds the
 # font's function library, `prep` the program run once per size, `cvt ` the control values both
@@ -114,14 +114,15 @@ var REKHA_HINT_BUDGET   = 1000000;
 # clamp is what keeps the products in rekha_hint_muldiv inside i64.
 var REKHA_HINT_CLAMP = 2147483647;
 
-var REKHA_RND_GRID    = 0;   # RTG  — to the nearest pixel
-var REKHA_RND_HALF    = 1;   # RTHG — to the nearest half pixel
-var REKHA_RND_DOUBLE  = 2;   # RTDG — to the nearest half pixel, on a half-pixel grid
-var REKHA_RND_DOWN    = 3;   # RDTG
-var REKHA_RND_UP      = 4;   # RUTG
-var REKHA_RND_OFF     = 5;   # ROFF — no rounding at all
-var REKHA_RND_SUPER   = 6;   # SROUND
-var REKHA_RND_SUPER45 = 7;   # S45ROUND
+# @public — the eight rounding states, the value `rekha_hint_gs(ctx, REKHA_GS_ROUND)` answers.
+public var REKHA_RND_GRID    = 0;   # RTG  — to the nearest pixel
+public var REKHA_RND_HALF    = 1;   # RTHG — to the nearest half pixel
+public var REKHA_RND_DOUBLE  = 2;   # RTDG — to the nearest half pixel, on a half-pixel grid
+public var REKHA_RND_DOWN    = 3;   # RDTG
+public var REKHA_RND_UP      = 4;   # RUTG
+public var REKHA_RND_OFF     = 5;   # ROFF — no rounding at all
+public var REKHA_RND_SUPER   = 6;   # SROUND
+public var REKHA_RND_SUPER45 = 7;   # S45ROUND
 
 # The two grid periods SROUND and S45ROUND decompose, in 1/16384 pixel so the 45-degree one keeps
 # its precision: 0x4000 is 1.0 pixel and 0x2D41 / 16384 = 0.70709, which is sqrt(2)/2. Both are
@@ -279,17 +280,23 @@ var ZN_TAGS  = 64;
 var ZN_CTRS  = 72;
 var ZN_SIZE  = 80;
 
-var REKHA_TAG_ONCURVE = 1;
-var REKHA_TAG_TOUCHX  = 2;
-var REKHA_TAG_TOUCHY  = 4;
+# @public — the tag bits of a hinted point (`rekha_hint_point(.., REKHA_PT_TAGS)`, and
+# `rekha_outline_on_curve` of the hinted view): on-curve, and touched in x / in y.
+public var REKHA_TAG_ONCURVE = 1;
+public var REKHA_TAG_TOUCHX  = 2;
+public var REKHA_TAG_TOUCHY  = 4;
 
-# The fields of one point, for rekha_hint_point. ⚠ The first six ARE the zone descriptor's array
-# order from ZN_ORUSX, so an index is an offset there too; the tag byte is the seventh.
-var REKHA_PT_ORUSX = 0;  var REKHA_PT_ORUSY = 1;    # original position, FONT UNITS (twilight: 0)
-var REKHA_PT_ORGX  = 2;  var REKHA_PT_ORGY  = 3;    # original position scaled to F26Dot6
-var REKHA_PT_CURX  = 4;  var REKHA_PT_CURY  = 5;    # where the point is now, F26Dot6
-var REKHA_PT_TAGS  = 6;                              # REKHA_TAG_ONCURVE | TOUCHX | TOUCHY
-var REKHA_PT_COUNT = 7;
+# @public — the fields of one point, for rekha_hint_point. ⚠ The first six ARE the zone
+# descriptor's array order from ZN_ORUSX, so an index is an offset there too; the tag byte is the
+# seventh.
+public var REKHA_PT_ORUSX = 0;   # original position, FONT UNITS (twilight: 0)
+public var REKHA_PT_ORUSY = 1;
+public var REKHA_PT_ORGX = 2;    # original position scaled to F26Dot6
+public var REKHA_PT_ORGY = 3;
+public var REKHA_PT_CURX = 4;    # where the point is now, F26Dot6
+public var REKHA_PT_CURY = 5;
+public var REKHA_PT_TAGS = 6;    # REKHA_TAG_ONCURVE | TOUCHX | TOUCHY
+public var REKHA_PT_COUNT = 7;
 
 # ⛔ THE GLYPH ZONE IS SIZED BY THE FONT'S OWN `maxp`, NOT BY rekha's outline cap. Sizing it at
 # REKHA_COMPOSITE_MAXP would cost 197 KB per context for a font whose largest glyph has 338 points.
@@ -354,8 +361,8 @@ fn rekha_hint_resolve(f): i64 {
 
 # @public — the point and contour capacity the interpreter's glyph zone is built at, taken from
 # `maxp` and NOT from rekha's own outline cap. 0 when the table is not version 1.0.
-fn rekha_max_zone_points(font): i64   { if (font == 0) { return 0; } return load64(font + 816); }
-fn rekha_max_zone_contours(font): i64 { if (font == 0) { return 0; } return load64(font + 824); }
+public fn rekha_max_zone_points(font): i64   { if (font == 0) { return 0; } return load64(font + 816); }
+public fn rekha_max_zone_contours(font): i64 { if (font == 0) { return 0; } return load64(font + 824); }
 
 # @public — 1 when this face carries TrueType bytecode rekha will run: a version 1.0 `maxp`, and
 # at least one of `fpgm` / `prep` / `cvt ` with a non-zero length. ⛔ GLYPH-ONLY BYTECODE IS NOT
@@ -370,7 +377,7 @@ fn rekha_max_zone_contours(font): i64 { if (font == 0) { return 0; } return load
 # will be hinted: the font program or a size's control-value program may still refuse, which
 # `rekha_hint_error` on the context reports, and `rekha_hint_glyph` answers 0 for a glyph whose
 # own program does.
-fn rekha_hint_present(font): i64 {
+public fn rekha_hint_present(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 752) == 0) { return 0; }
     if (load64(font + 712) > 0) { return 1; }
@@ -381,26 +388,28 @@ fn rekha_hint_present(font): i64 {
 
 # @public — the six `maxp` version 1.0 limits the interpreter is sized by. 0 when the table is
 # version 0.5, absent or short, which is also a legal answer for a font that declares 0.
-fn rekha_max_storage(font): i64          { if (font == 0) { return 0; } return load64(font + 760); }
-fn rekha_max_function_defs(font): i64    { if (font == 0) { return 0; } return load64(font + 768); }
-fn rekha_max_instruction_defs(font): i64 { if (font == 0) { return 0; } return load64(font + 776); }
-fn rekha_max_stack_elements(font): i64   { if (font == 0) { return 0; } return load64(font + 784); }
-fn rekha_max_instruction_size(font): i64 { if (font == 0) { return 0; } return load64(font + 792); }
-fn rekha_max_twilight_points(font): i64  { if (font == 0) { return 0; } return load64(font + 800); }
+public fn rekha_max_storage(font): i64          { if (font == 0) { return 0; } return load64(font + 760); }
+public fn rekha_max_function_defs(font): i64    { if (font == 0) { return 0; } return load64(font + 768); }
+public fn rekha_max_instruction_defs(font): i64 { if (font == 0) { return 0; } return load64(font + 776); }
+public fn rekha_max_stack_elements(font): i64   { if (font == 0) { return 0; } return load64(font + 784); }
+public fn rekha_max_instruction_size(font): i64 { if (font == 0) { return 0; } return load64(font + 792); }
+public fn rekha_max_twilight_points(font): i64  { if (font == 0) { return 0; } return load64(font + 800); }
 
 # @public — the byte length of the font program and the control-value program. 0 = absent.
-fn rekha_fpgm_length(font): i64 { if (font == 0) { return 0; } return load64(font + 712); }
-fn rekha_prep_length(font): i64 { if (font == 0) { return 0; } return load64(font + 728); }
+public fn rekha_fpgm_length(font): i64 { if (font == 0) { return 0; } return load64(font + 712); }
+public fn rekha_prep_length(font): i64 { if (font == 0) { return 0; } return load64(font + 728); }
 
 # @public — how many entries the `cvt ` table holds, and entry `i` in FONT UNITS, unscaled and
 # unhinted. ⚠ This reads the FONT; `rekha_hint_cvt_px` reads the interpreter's own copy, which
 # `prep` is entitled to have rewritten. They answer different questions at the same index.
-fn rekha_cvt_count(font): i64 {
+public fn rekha_cvt_count(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 696) / 2;
 }
 
-fn rekha_cvt_value(font, i): i64 {
+# @public — entry `i` of `cvt `, in FONT UNITS as written; 0 when there is none, or `i` is out of
+# range. The scaled, `prep`-rewritten value of the same index is rekha_hint_cvt_px.
+public fn rekha_cvt_value(font, i): i64 {
     if (font == 0) { return 0; }
     if (i < 0) { return 0; }
     if (i >= rekha_cvt_count(font)) { return 0; }
@@ -414,13 +423,15 @@ fn rekha_cvt_value(font, i): i64 {
 # Version 0 defines the low two behavior bits; version 1 adds the symmetric pair, which describe
 # ClearType and are reported unchanged rather than folded into the other two.
 # ================================================================
-var REKHA_GASP_GRIDFIT           = 1;
-var REKHA_GASP_DOGRAY            = 2;
-var REKHA_GASP_SYMMETRIC_GRIDFIT = 4;
-var REKHA_GASP_SYMMETRIC_SMOOTH  = 8;
+
+# @public — the behavior bits rekha_gasp_behavior answers.
+public var REKHA_GASP_GRIDFIT           = 1;
+public var REKHA_GASP_DOGRAY            = 2;
+public var REKHA_GASP_SYMMETRIC_GRIDFIT = 4;
+public var REKHA_GASP_SYMMETRIC_SMOOTH  = 8;
 
 # @public — 1 when the face carries a `gasp` rekha can read.
-fn rekha_gasp_present(font): i64 {
+public fn rekha_gasp_present(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 736) == 0) { return 0; }
     return 1;
@@ -431,7 +442,7 @@ fn rekha_gasp_present(font): i64 {
 # smooth at this size", and a font without the table has said nothing at all.
 # ⚠ A font with no `gasp` is conventionally grid-fit at every size; rekha reports the absence and
 # leaves that convention to `rekha_should_gridfit`, so the two questions stay separable.
-fn rekha_gasp_behavior(font, ppem): i64 {
+public fn rekha_gasp_behavior(font, ppem): i64 {
     if (rekha_gasp_present(font) == 0) { return 0 - 1; }
     var buf = load64(font);
     var t = load64(font + 736);
@@ -449,7 +460,7 @@ fn rekha_gasp_behavior(font, ppem): i64 {
 
 # @public — 1 when this size should be grid-fit, 0 when it should not. ⚠ A face with no `gasp`
 # answers 1: that is the long-standing convention and it is stated here rather than left implicit.
-fn rekha_should_gridfit(font, ppem): i64 {
+public fn rekha_should_gridfit(font, ppem): i64 {
     var b = rekha_gasp_behavior(font, ppem);
     if (b < 0) { return 1; }
     if ((b & REKHA_GASP_GRIDFIT) != 0) { return 1; }
@@ -536,20 +547,20 @@ fn rekha_hint_clamp(v): i64 {
 
 # @public — why the last run on this context refused, as a RekhaErrCode. REKHA_OK when it did not.
 # ⛔ IT IS NOT A SUCCESS TEST: `rekha_hint_run` already returns 1 or 0. This says WHICH refusal.
-fn rekha_hint_error(ctx): i64 {
+public fn rekha_hint_error(ctx): i64 {
     if (ctx == 0) { return REKHA_OK; }
     return load64(ctx + HC_ERR);
 }
 
 # @public — a short STATIC cstring naming the instruction or invariant, never allocated and never
 # owned by the caller. 0 when there is nothing to name.
-fn rekha_hint_error_detail(ctx): i64 {
+public fn rekha_hint_error_detail(ctx): i64 {
     if (ctx == 0) { return 0; }
     return load64(ctx + HC_DETAIL);
 }
 
 # @public — clear it. Every run clears first, so a code describes the LAST run.
-fn rekha_hint_error_clear(ctx): i64 {
+public fn rekha_hint_error_clear(ctx): i64 {
     if (ctx == 0) { return 0; }
     store64(ctx + HC_ERR, REKHA_OK);
     store64(ctx + HC_DETAIL, 0);
@@ -569,8 +580,9 @@ fn rekha_hint_fail(ctx, code, detail): i64 {
 # declares 676 gets 676, and overflowing it is the font contradicting itself.
 # ================================================================
 
-# @public — how deep the stack is, and the value `i` from the BOTTOM. Both for a consumer reading
-# out what a program computed, and for programs/hint_test.cyr.
+# How deep the stack is, and the value `i` from the BOTTOM — for programs/hint_test.cyr, which
+# drives one instruction at a time through rekha_hint_run. Internal since 0.9.0: after
+# rekha_hint_glyph the stack holds only what a program left behind.
 fn rekha_hint_depth(ctx): i64 {
     if (ctx == 0) { return 0; }
     return load64(ctx + HC_SP);
@@ -583,7 +595,7 @@ fn rekha_hint_at(ctx, i): i64 {
     return load64(load64(ctx + HC_STACK) + i * 8);
 }
 
-# @public — push a value. 1 on success, 0 when the stack is full (and the refusal is recorded).
+# Push a value. 1 on success, 0 when the stack is full (and the refusal is recorded).
 fn rekha_hint_push(ctx, v): i64 {
     if (ctx == 0) { return 0; }
     var sp = load64(ctx + HC_SP);
@@ -601,7 +613,7 @@ fn rekha_hint_need(ctx, n): i64 {
     return rekha_hint_fail(ctx, REKHA_ERR_BAD_HINT, "stack underflow");
 }
 
-# @public — pop. ⚠ Answers 0 on an EMPTY stack, which is also a legal value; call rekha_hint_need
+# Pop. ⚠ Answers 0 on an EMPTY stack, which is also a legal value; call rekha_hint_need
 # first, as every instruction here does.
 fn rekha_hint_pop(ctx): i64 {
     if (ctx == 0) { return 0; }
@@ -647,7 +659,7 @@ fn rekha_hint_set_super(ctx, grid, sel): i64 {
 # @public — put `d` (an F26Dot6 distance) through the current rounding state. Exposed because it
 # is the one piece of the graphics state whose effect a consumer can see without a glyph, and
 # because every mode below has a spec-stated answer a test can pin.
-fn rekha_hint_round(ctx, d): i64 {
+public fn rekha_hint_round(ctx, d): i64 {
     if (ctx == 0) { return d; }
     var st = load64(ctx + HC_RSTATE);
     if (st == REKHA_RND_OFF) { return d; }
@@ -739,7 +751,7 @@ fn rekha_hint_scale_cvt(ctx): i64 {
 # programs wrote a control value through WCVTP or DELTAC that is the GLYPH's private copy, which
 # the next glyph load discards — so a value read here right after a glyph is that glyph's, and
 # the size's again after the next load (see HC_CVTS). WCVTF writes wherever the pointer stands.
-fn rekha_hint_cvt_px(ctx, i): i64 {
+public fn rekha_hint_cvt_px(ctx, i): i64 {
     if (ctx == 0) { return 0; }
     if (i < 0) { return 0; }
     if (i >= load64(ctx + HC_CVTCAP)) { return 0; }
@@ -750,7 +762,7 @@ fn rekha_hint_cvt_px(ctx, i): i64 {
 # before every `prep` run, so it holds what this size's `prep` wrote and nothing older — through
 # the CURRENT pointer, as rekha_hint_cvt_px: a glyph program's WS writes a private copy that this
 # answers until the next glyph load repoints it at the size's.
-fn rekha_hint_storage(ctx, i): i64 {
+public fn rekha_hint_storage(ctx, i): i64 {
     if (ctx == 0) { return 0; }
     if (i < 0) { return 0; }
     if (i >= load64(ctx + HC_STORECAP)) { return 0; }
@@ -760,9 +772,9 @@ fn rekha_hint_storage(ctx, i): i64 {
 # @public — the size this context is scaled for (0 after an axis change, until the next
 # rekha_hint_ctx rebuilds it), the 16.16 font-unit-to-F26Dot6 multiplier, and the exact byte
 # count of its single allocation.
-fn rekha_hint_ppem(ctx): i64  { if (ctx == 0) { return 0; } return load64(ctx + HC_PPEM); }
-fn rekha_hint_scale(ctx): i64 { if (ctx == 0) { return 0; } return load64(ctx + HC_SCALE); }
-fn rekha_hint_bytes(ctx): i64 { if (ctx == 0) { return 0; } return load64(ctx + HC_BYTES); }
+public fn rekha_hint_ppem(ctx): i64  { if (ctx == 0) { return 0; } return load64(ctx + HC_PPEM); }
+public fn rekha_hint_scale(ctx): i64 { if (ctx == 0) { return 0; } return load64(ctx + HC_SCALE); }
+public fn rekha_hint_bytes(ctx): i64 { if (ctx == 0) { return 0; } return load64(ctx + HC_BYTES); }
 
 # The record of function `n` — [number, start, end, buffer] — or 0 when no program defined it.
 # FreeType's lookup (ref2143/ttinterp.c:3404-3435): when every function so far is numbered by its
@@ -786,13 +798,14 @@ fn rekha_hint_find_fdef(ctx, n): i64 {
 # @public — how many functions the font program defined, and whether `n` is one of them. ⚠ The
 # count is of DISTINCT numbers: a function redefined takes no second record, and the numbers need
 # not be 0..count-1 — Liberation Sans's 71 functions run up to 91 with gaps.
-fn rekha_hint_func_defined(ctx, n): i64 {
+public fn rekha_hint_func_defined(ctx, n): i64 {
     if (ctx == 0) { return 0; }
     if (rekha_hint_find_fdef(ctx, n) == 0) { return 0; }
     return 1;
 }
 
-fn rekha_hint_func_count(ctx): i64 {
+# @public — how many DISTINCT function numbers the font program defined.
+public fn rekha_hint_func_count(ctx): i64 {
     if (ctx == 0) { return 0; }
     return load64(ctx + HC_FDEFN);
 }
@@ -831,7 +844,7 @@ fn rekha_hint_func_count(ctx): i64 {
 # the size keeps the previous instance's prep state until the size is requested again
 # (tt_size_reset, ttobjs.c:1292). rekha re-runs it for every axis change — the one rule a consumer
 # can rely on — and a hinted variable instance is off-reference regardless (rekha_hint_glyph).
-fn rekha_hint_ctx(font, ppem): i64 {
+public fn rekha_hint_ctx(font, ppem): i64 {
     if (font == 0) { return 0; }
     rekha_font_error_clear(font);
     if (rekha_hint_present(font) == 0) {
@@ -3404,7 +3417,7 @@ fn rekha_hint_call(ctx, f, count): i64 {
     return 1;
 }
 
-# @public — run `len` bytes of bytecode at `off` in `buf`. 1 when it ran, 0 when it refused, with
+# Run `len` bytes of bytecode at `off` in `buf`. 1 when it ran, 0 when it refused, with
 # `rekha_hint_error` saying why. This is how a test drives one instruction at a time; the font
 # program and `prep` go through the same executor with their own code range (rekha_hint_run_fpgm,
 # rekha_hint_run_prep). A program run this way is RANGE 3, the test range: to two of the four
@@ -3458,7 +3471,7 @@ fn rekha_hint_twilight_bound(ctx): i64 {
     return n;
 }
 
-# @public — run the font program. Called for you by `rekha_hint_ctx` on the first build and never
+# Run the font program. Called for you by `rekha_hint_ctx` on the first build and never
 # again: `fpgm` defines functions, and a function is a range into font bytes that does not move
 # with size. ⚠ It resets the graphics state first and marks the face done EVEN IF IT REFUSES, so a
 # broken `fpgm` is reported once rather than re-run at every size — and its refusal is kept as
@@ -3514,7 +3527,7 @@ fn rekha_hint_run_fpgm(ctx): i64 {
 # applied by rekha_hint_glyph at the next load, in FreeType's order (ref2143/ttgload.c:2269-2274).
 # ⚠ A glyph program's WCVTP at size A is that load's alone; the context re-scaled to size B and
 # back to A answers the fresh scale at both, because this rebuilds first.
-fn rekha_hint_run_prep(ctx): i64 {
+public fn rekha_hint_run_prep(ctx): i64 {
     if (ctx == 0) { return 0; }
     var font = load64(ctx + HC_FONT);
     store64(ctx + HC_CVT, load64(ctx + HC_CVTS));
@@ -4393,7 +4406,7 @@ fn rekha_hint_finish(ctx, gid, n): i64 {
 # After an axis change call rekha_hint_ctx again, at the same ppem if you like: the setters mark
 # the context stale and that call re-runs `prep` for the new instance (rekha_hint_axes_changed).
 # A hinted glyph at the default location is bit-exact.
-fn rekha_hint_glyph(ctx, gid): i64 {
+public fn rekha_hint_glyph(ctx, gid): i64 {
     if (ctx == 0) { return 0; }
     var font = load64(ctx + HC_FONT);
     rekha_hint_error_clear(ctx);
@@ -4516,14 +4529,14 @@ fn rekha_hint_load_simple(ctx, gid): i64 {
 # TOUCHY, rekha_hint_point's REKHA_PT_TAGS) are the zone's; FreeType's outline tags carry them as
 # 8 / 16 and, on the first point of every instructed glyph, a scan-mode marker rekha does not
 # keep — the oracle masks FreeType's byte with 0x19 to compare.
-fn rekha_hint_outline(ctx): i64 {
+public fn rekha_hint_outline(ctx): i64 {
     if (ctx == 0) { return 0; }
     if (load64(ctx + HC_GZGID) < 0) { return 0; }
     return ctx + HC_VIEW;
 }
 
 # @public — the gid zone 1 holds, or -1 when it holds no glyph.
-fn rekha_hint_gid(ctx): i64 {
+public fn rekha_hint_gid(ctx): i64 {
     if (ctx == 0) { return 0 - 1; }
     return load64(ctx + HC_GZGID);
 }
@@ -4534,7 +4547,7 @@ fn rekha_hint_gid(ctx): i64 {
 # path with its advance still on rekha_hint_advance_px. 0 for a null context or no glyph loaded
 # (REKHA_ERR_OTHER "no glyph" on the context and the font, nothing allocated) and when an
 # allocation is refused (REKHA_ERR_OOM "sdpath") — never a truncated path.
-fn rekha_hint_to_sdpath(ctx, ox, oy): i64 {
+public fn rekha_hint_to_sdpath(ctx, ox, oy): i64 {
     if (ctx == 0) { return 0; }
     var font = load64(ctx + HC_FONT);
     if (load64(ctx + HC_GZGID) < 0) {
@@ -4561,7 +4574,7 @@ fn rekha_hint_to_sdpath(ctx, ox, oy): i64 {
 # and :1974-1975 takes the advance from it instead of pp2 - pp1), where this answers the hinted
 # phantom distance — equal only when the table is a faithful cache of the programs. Unmeasured
 # on the host, which has no hinted hdmx face; the embedded face carries none.
-fn rekha_hint_advance_px(ctx): i64 {
+public fn rekha_hint_advance_px(ctx): i64 {
     if (ctx == 0) { return 0; }
     if (load64(ctx + HC_GZGID) < 0) { return 0; }
     var zn = ctx + HC_ZONE1;
@@ -4575,43 +4588,46 @@ fn rekha_hint_advance_px(ctx): i64 {
 # ================================================================
 # Reading the graphics state.
 # ⭐ ONE ACCESSOR, NOT TWENTY-SEVEN. The fields are laid out in this exact order from HC_PVX, so an
-# index IS the offset, and a surface about to be frozen at 0.9.0 gains one name instead of a
-# getter per field. ⚠ The bytecode can read four of these itself (GPV, GFV, and MPPEM / MPS for
-# the size); the other twenty-three are write-only from inside a program, which is why a consumer
-# — or a test — that wants to see what `prep` decided needs this.
+# index IS the offset, and a surface frozen at 0.9.0 gained one name instead of a getter per
+# field. ⚠ The bytecode can read four of these itself (GPV, GFV, and MPPEM / MPS for the size);
+# the other twenty-three are write-only from inside a program, which is why a consumer — or a
+# test — that wants to see what `prep` decided needs this.
 # ================================================================
-var REKHA_GS_PVX        = 0;    # projection vector, F2Dot14
-var REKHA_GS_PVY        = 1;
-var REKHA_GS_FVX        = 2;    # freedom vector
-var REKHA_GS_FVY        = 3;
-var REKHA_GS_DVX        = 4;    # dual projection vector
-var REKHA_GS_DVY        = 5;
-var REKHA_GS_RP0        = 6;    # the three reference points
-var REKHA_GS_RP1        = 7;
-var REKHA_GS_RP2        = 8;
-var REKHA_GS_ZP0        = 9;    # the three zone pointers: 0 twilight, 1 glyph
-var REKHA_GS_ZP1        = 10;
-var REKHA_GS_ZP2        = 11;
-var REKHA_GS_LOOP       = 12;
-var REKHA_GS_ROUND      = 13;   # one of the REKHA_RND_* states
-var REKHA_GS_PERIOD     = 14;   # SROUND's decomposition, all three F26Dot6
-var REKHA_GS_PHASE      = 15;
-var REKHA_GS_THRESHOLD  = 16;
-var REKHA_GS_MINDIST    = 17;   # F26Dot6
-var REKHA_GS_CVTCUTIN   = 18;   # F26Dot6
-var REKHA_GS_SWCUTIN    = 19;   # F26Dot6
-var REKHA_GS_SWVALUE    = 20;   # F26Dot6, scaled from font units by SSW
-var REKHA_GS_AUTOFLIP   = 21;
-var REKHA_GS_DELTABASE  = 22;   # unsigned 16-bit, as SDB stores it (FreeType's FT_UShort delta_base)
-var REKHA_GS_DELTASHIFT = 23;
-var REKHA_GS_INSTCTRL   = 24;
-var REKHA_GS_SCANCTRL   = 25;
-var REKHA_GS_SCANTYPE   = 26;
-var REKHA_GS_COUNT      = 27;
+
+# @public — the field indices rekha_hint_gs takes, and REKHA_GS_COUNT, their bound. ⛔ Frozen
+# with their values: the order of the graphics-state slots is part of the promise.
+public var REKHA_GS_PVX        = 0;    # projection vector, F2Dot14
+public var REKHA_GS_PVY        = 1;
+public var REKHA_GS_FVX        = 2;    # freedom vector
+public var REKHA_GS_FVY        = 3;
+public var REKHA_GS_DVX        = 4;    # dual projection vector
+public var REKHA_GS_DVY        = 5;
+public var REKHA_GS_RP0        = 6;    # the three reference points
+public var REKHA_GS_RP1        = 7;
+public var REKHA_GS_RP2        = 8;
+public var REKHA_GS_ZP0        = 9;    # the three zone pointers: 0 twilight, 1 glyph
+public var REKHA_GS_ZP1        = 10;
+public var REKHA_GS_ZP2        = 11;
+public var REKHA_GS_LOOP       = 12;
+public var REKHA_GS_ROUND      = 13;   # one of the REKHA_RND_* states
+public var REKHA_GS_PERIOD     = 14;   # SROUND's decomposition, all three F26Dot6
+public var REKHA_GS_PHASE      = 15;
+public var REKHA_GS_THRESHOLD  = 16;
+public var REKHA_GS_MINDIST    = 17;   # F26Dot6
+public var REKHA_GS_CVTCUTIN   = 18;   # F26Dot6
+public var REKHA_GS_SWCUTIN    = 19;   # F26Dot6
+public var REKHA_GS_SWVALUE    = 20;   # F26Dot6, scaled from font units by SSW
+public var REKHA_GS_AUTOFLIP   = 21;
+public var REKHA_GS_DELTABASE  = 22;   # unsigned 16-bit, as SDB stores it (FreeType's FT_UShort delta_base)
+public var REKHA_GS_DELTASHIFT = 23;
+public var REKHA_GS_INSTCTRL   = 24;
+public var REKHA_GS_SCANCTRL   = 25;
+public var REKHA_GS_SCANTYPE   = 26;
+public var REKHA_GS_COUNT      = 27;
 
 # @public — one graphics-state field by its REKHA_GS_* index. 0 for a null context or an index
 # outside the set, which is also a legal value for most of them.
-fn rekha_hint_gs(ctx, field): i64 {
+public fn rekha_hint_gs(ctx, field): i64 {
     if (ctx == 0) { return 0; }
     if (field < 0) { return 0; }
     if (field >= REKHA_GS_COUNT) { return 0; }
@@ -4631,7 +4647,7 @@ fn rekha_hint_gs(ctx, field): i64 {
 # every field. The glyph zone holds nothing until rekha_hint_glyph (or rekha_hint_load_simple)
 # loads a glyph into it, and then its n real points followed by the four phantom points, cur x
 # already translated so that the left phantom is the origin after rekha_hint_glyph.
-fn rekha_hint_point(ctx, zone, i, field): i64 {
+public fn rekha_hint_point(ctx, zone, i, field): i64 {
     if (ctx == 0) { return 0; }
     if (zone < 0) { return 0; }
     if (zone > 1) { return 0; }
@@ -4648,14 +4664,15 @@ fn rekha_hint_point(ctx, zone, i, field): i64 {
 # count is the per-run bound (see rekha_hint_twilight_bound) and the contour count 0; for the
 # glyph zone both are 0 until a glyph is loaded, the four phantom points included when one is (an
 # empty glyph holds exactly four).
-fn rekha_hint_zone_points(ctx, zone): i64 {
+public fn rekha_hint_zone_points(ctx, zone): i64 {
     if (ctx == 0) { return 0; }
     if (zone < 0) { return 0; }
     if (zone > 1) { return 0; }
     return load64(rekha_hint_zone(ctx, zone) + ZN_N);
 }
 
-fn rekha_hint_zone_contours(ctx, zone): i64 {
+# @public — how many contours the zone holds (the twilight zone: 0).
+public fn rekha_hint_zone_contours(ctx, zone): i64 {
     if (ctx == 0) { return 0; }
     if (zone < 0) { return 0; }
     if (zone > 1) { return 0; }

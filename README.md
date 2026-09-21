@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.8.2
+Version: 0.9.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -13,6 +13,14 @@ glyph-outline path; `sadish` fills it. The two form a clean seam: rekha
 owns *what the glyph is* (SFNT tables → outlines), sadish owns *how it
 becomes pixels* (fill → coverage). rekha is pure CPU Cyrius: no GPU, no C
 shim, no external binaries.
+
+⭐ **The API is frozen (0.9.0).** [`docs/api/`](docs/api/README.md) is the reference — 178
+functions and 72 constants in the bundle, 10 in the data module, each with its signature,
+units, sentinel and allocation — and the boundary is the compiler's, not a comment's: the
+bundle begins with `private`, so a name that is not `public fn` in `src/` will not link from a
+consumer (`'rekha_rd_u16' is private to its file`). Through 1.x no documented name is removed
+or changed; additions are additive. Consumers need **cyrius 6.6.6+**. The decisions behind the
+shape are in [`docs/adr/`](docs/adr/README.md); the threat model in [`SECURITY.md`](SECURITY.md).
 
 ## Scope
 
@@ -238,7 +246,8 @@ The full list, with the evidence behind every item, is
 | ~~**0.6.x — the font's own answers**~~ | **Closed.** The tables rekha transports and never reads: it resolved twelve, and now twenty-one. `HVAR` / `MVAR` (0.6.0), `OS/2` (0.6.1), `name` (0.6.2), `STAT` with `fvar`'s named instances (0.6.3), `post` (0.6.4), `kern` (0.6.5), **GPOS** pair positioning (0.6.6) and the **vertical metrics** (0.6.7) — which closed MVAR too: all 28 of its tags land. |
 | ~~**0.7.x — failures that say what failed**~~ | **Closed.** `RekhaErr` had been published and produced by nothing since 0.1.0. Every refusal now says which, out of the handle, with no byte allocated — and the ambiguity turned out to sit one level below where it was being looked for. |
 | ~~**0.8.x — hinting**~~ | **Closed.** 0.8.0 shipped the machine, 0.8.1 the zones and `prep`, 0.8.2 the glyph loader, the phantom points, `IUP`, composites and the **hinted-outline call** — measured against FreeType 2.14.3 itself: 233 (glyph, ppem) rows of its hinted Liberation Sans point for point, the whole face and 165 + 50 host faces through `scripts/hint_glyph_diff.py` with 0 differences. ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
-| **0.9.0 — the freeze** | **Next.** 137 `@public` markers against 465 `fn` in `src/` (re-measured at 0.8.2), so the API boundary is undeclared. Mark it, document it in `docs/api/`, write the 1.x stability promise, add `SECURITY.md`. |
+| ~~**0.9.0 — the freeze**~~ | **Closed.** 178 `public fn` and 72 `public var` in `src/` against 287 internals, a `private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs, `SECURITY.md`, `CONTRIBUTING.md`, and a CI probe that must fail to reach an internal. |
+| **1.0.0** | **Next.** Lock it in: a release with no change to the surface after the freeze has been consumed. |
 
 ⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
 complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and

@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-21, at **0.8.2**.
+> **Last updated:** 2026-09-21, at **0.9.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -16,19 +16,21 @@ out, for `sadish` to fill. 1.0.0 is that promise **complete, correct and frozen*
 surface, but no remaining place where a consumer has to reach around rekha to a byte rekha already
 holds, and no published name that does nothing.
 
-⭐ **0.5.x, 0.6.x, 0.7.x and 0.8.x are all closed.** 0.5.x was the conformance milestone that opened
+⭐ **0.5.x, 0.6.x, 0.7.x, 0.8.x and 0.9.0 are all closed.** 0.5.x was the conformance milestone that opened
 this file; 0.6.x was "the tables rekha transports and never reads", and there are none left —
 rekha resolves **twenty-one**, and **all 28 of MVAR's tags** land on the field the spec names;
 0.7.x gave the published error vocabulary a producer, and the ambiguity turned out to sit one level
 below where it was being looked for — in `rekha_glyf_span`, whose 0 meant both "this glyph is a
 space" and "loca is lying"; 0.8.x is TrueType hinting, measured against FreeType itself. See
-CHANGELOG 0.5.0 through 0.8.2. What remains is **the freeze**.
+CHANGELOG 0.5.0 through 0.8.2; 0.9.0 is the freeze — `public fn` / `public var` in `src/`, a
+`private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs,
+`SECURITY.md` and `CONTRIBUTING.md` (CHANGELOG 0.9.0, ADR 0009). What remains is **1.0.0**.
 
 | milestone | what it closes |
 |---|---|
 | **0.8.x — hinting** | **Closed at 0.8.2.** The last *rendering* gap: a hinted outline, bit-exact with FreeType 2.14.3 on every face measured. The divergences are pinned below. |
-| **0.9.0 — the freeze** | **Next.** An API that is declared, documented and promised, rather than merely exported. |
-| **1.0.0** | Lock it in. |
+| **0.9.0 — the freeze** | **Closed at 0.9.0.** 178 public functions and 72 constants declared with the keyword, documented in `docs/api/`, and unreachable otherwise: `dist/rekha.cyr` begins with `private`. |
+| **1.0.0** | **Next.** Lock it in — see below. |
 
 Everything else is **pinned** (real, evidenced, unscheduled), **blocked on a sibling**, or an
 explicit **non-goal**.
@@ -54,10 +56,9 @@ programs on 39 synthetic fonts**, every row three times (`programs/hint_unit_vec
 whole face at ten ppems, **26,200 loads, 0 differ**; **165 host faces at 12 ppem, 2,593,954 loads,
 and 50 more at 9 / 11 / 13 / 20 ppem, 2,812,516 loads — 0 differ** (`scripts/hint_glyph_diff.py`). Every instruction of the machine runs; the interpreter produces no
 `REKHA_ERR_UNSUPPORTED` (`grep -c UNSUPPORTED src/hint.cyr` → the header's one mention). What is
-left of hinting is the pinned table below — each row a stated divergence with its site — and the
-freeze.
+left of hinting is the pinned table below — each row a stated divergence with its site.
 
-### Pinned by 0.8.x, and not blocking the freeze
+### Pinned by 0.8.x, and not blocking 1.0.0
 
 Each is a stated divergence from FreeType 2.14.3, said at its site and in CHANGELOG 0.8.1 / 0.8.2.
 The first row's "revisit" trigger has fired and the decision is recorded there.
@@ -174,51 +175,28 @@ one has ever been named or scheduled.
 
 ---
 
-## 0.9.0 — the freeze
+## 1.0.0 — lock it in
 
-### Declare the public surface, then promise it
+The freeze shipped at 0.9.0 (CHANGELOG 0.9.0; `docs/adr/0009-the-freeze.md`). 1.0.0 is the same
+surface, promised for a major line, once the freeze has been *consumed*: the surface is only
+proven frozen by a release that changes nothing on it.
 
-`cat src/*.cyr | grep -c '@public'` → **137**, against **465** `fn` in `src/` (0.8.2). `@internal`
-is a *module* header tag, one per file, and one `@public` comment often covers a run of sibling
-accessors — so neither number is a count of marked functions, which is itself the problem. The
-boundary is undeclared: `rekha_font_open`, `rekha_units_per_em`, `rekha_glyph_count`,
-`rekha_descender`, `rekha_line_gap` and `rekha_find_table` are public in practice — the README's
-own Quick Start and every consumer use them — and carry no marker.
-⚠ The figure here read "34 against 172" through 0.7.0 and was two milestones stale, "125
-against 362" at 0.8.0 and "128 against 421" at 0.8.1; nine releases of accessor-heavy modules and
-the interpreter moved it. Re-measure it at the freeze rather than quoting this line.
-
-The sibling shows the shape: **kashi** froze its API at 0.9.0, locked it at 1.0.0, and carries
-`docs/api/` with a written stability promise plus `docs/adr/` for the decisions behind it. rekha
-has neither directory.
-
-For 0.9.0: mark every function, write `docs/api/`, state the 1.x promise (no signature changes, no
-removals, no semantic changes; additions are additive), and record as ADRs the decisions already
-made and currently explained only in scattered comments — the opt-in WOFF bundle, the `sd_alloc`
-seam, the refuse-don't-guess policy (and the hinting corollary above: a refused glyph program
-draws unhinted, never partially hinted), the one-leaf sidecar, the half-away-from-zero rounding
-of `src/hint.cyr` against the half-up of everything else.
-⚠ **What to freeze includes the hinting family**, 33 `@public` comments in `src/hint.cyr` alone:
-`rekha_hint_ctx` (the one non-zero answer that is not success — a standing `fpgm` / `prep`
-refusal rides on the handle), `rekha_hint_glyph` and its three refusal classes,
-`rekha_hint_outline`'s view (rewritten by every call, never kept), `rekha_hint_to_sdpath`,
-`rekha_hint_advance_px` (whole pixels, the only advance published), `rekha_hint_gid`,
-`rekha_hint_run_prep`, `rekha_hint_run` (RANGE 3, the test range, FDEF allowed and writes
-persisting — say so in `docs/api/` or unmark it), the readers `rekha_hint_gs` / `_point` /
-`_zone_points` / `_cvt_px` / `_storage` / `_error` / `_detail`, `rekha_should_gridfit`,
-`rekha_left_side_bearing` and `rekha_hvar_lsb_delta`; and the seam that is NOT public,
-`rekha_hint_load_simple` (`src/hint.cyr:4436-4449`), which every consumer of `dist/rekha.cyr` can
-link anyway — the freeze decides whether an `_` prefix or a `docs/api/` line keeps it out. The
-consumer rules a frozen `docs/api/` must carry are README's five steps: `gasp` is the consumer's,
-the context warmed outside a per-frame hook (and one glyph on a variable face), whole-pixel
-`ox` / `oy`, `rekha_hint_advance_px` per glyph, `rekha_hint_ctx` again after an axis change.
-
-### `SECURITY.md` and `CONTRIBUTING.md`
-
-`.github/workflows/ci.yml:362` already names both and prints *"WARN (optional, not yet present)"* —
-deferred, not declined. For a library whose whole job is parsing untrusted input, which shipped a
-hardening release (0.3.11: four out-of-bounds reads) and maintains a standing hostile corpus, the
-`SECURITY.md` — reporting channel and threat model — is the consequential one.
+- **A consumer on 0.9.x.** crab and dhancha pin tag 0.3.10 (`crab/cyrius.cyml`,
+  `dhancha/cyrius.cyml`, the `[deps.rekha]` blocks), nine minor lines behind, and agnos takes
+  `fonts/face_data.cyr` by path. A consumer that vendors `dist/rekha.cyr` at a 0.9.x tag and
+  builds against the private bundle on cyrius 6.6.6 is the evidence the promise can be kept —
+  the compile error a consumer's internal reach produces is the test. Until one has, 1.0.0 is a
+  promise about a boundary nobody has leaned on.
+- **One release with no surface change.** `docs/api/surface.txt` identical between 0.9.0 and
+  the release before 1.0.0 (`git diff <tag>..HEAD -- docs/api/surface.txt` empty), with any
+  fixes recorded as measurements, is the proof the freeze holds under maintenance.
+- **The refuse-don't-guess decision stands or is flipped before, not after.** The 0.8.2 trigger
+  fired (AdwaitaMono, 2,624 of 8,818 glyphs at 9 of 25 ppems); the alternative — FreeType's
+  default-mode fallbacks in the glyph range only — is named in the pinned table and in ADR 0002.
+  Flipping it changes a documented answer (`rekha_hint_glyph` hints where it now refuses), which
+  1.x forbids, so the decision is a 0.9.x one.
+- **Nothing else.** The pinned table below is unchanged by the freeze and none of it blocks
+  1.0.0: every row is additive.
 
 ---
 

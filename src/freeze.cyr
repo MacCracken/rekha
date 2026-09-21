@@ -1,0 +1,16 @@
+# freeze.cyr — the first module of every dist bundle, and nothing else (0.9.0).
+#
+# `cyrius distlib` concatenates the [lib] / [lib.woff] module lists into ONE file, and a Cyrius
+# file that says `private` is private-by-default: every `fn` and `var` in it is reachable only
+# from inside that file, and a consumer's call to one is a compile error — `'x' is private to
+# its file`. So this line, first in the bundle, is the API freeze: a consumer of dist/rekha.cyr or
+# dist/rekha-woff.cyr reaches exactly the items src/ marks `public fn` / `public var`, and the
+# compiler says no to everything else. Enum constants (RekhaErrCode) are always reachable.
+# ⛔ NOT included by src/lib.cyr, on purpose: `private` applies to the file it appears in, not to
+# the files that include it or that it sits beside, so the src chain the tests build stays open
+# to every internal (the test seams: rekha_hint_run, rekha_hint_load_simple, rekha_rd_u16, …).
+# ⚠ Consumers therefore need cyrius >= 6.6.6 — reserved words since 6.5.0, whole-file semantics
+# since 6.6.5 — which the one-leaf sidecar (src/lib.cyr) already required. docs/api/README.md
+# states the promise; scripts/api_surface.py pins the conventions around it, and CI compiles a
+# probe against each bundle that MUST fail on an internal name.
+private

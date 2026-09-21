@@ -1,4 +1,4 @@
-# @internal — gvar: TrueType outline variations (0.4.12).
+# gvar: TrueType outline variations (0.4.12).
 #
 # gvar.cyr — apply a variable font's glyph deltas to an outline glyf.cyr has just decoded, at the
 # axis settings src/var.cyr holds. 0.4.11 gave CFF2 outlines this; `gvar` is the same idea over a

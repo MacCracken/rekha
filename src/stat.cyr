@@ -1,4 +1,4 @@
-# @internal — STAT: the style attributes a family is ordered and named by (0.6.3).
+# STAT: the style attributes a family is ordered and named by (0.6.3).
 #
 # stat.cyr — `fvar` says a font has a `wght` axis running 100 to 900 and ships an instance at 700.
 # STAT says that 700 is called "Bold", that `wght` sorts before `wdth`, and that "Regular" is a
@@ -39,10 +39,11 @@
 # quietly clamped. Every BYTE read is inside the table; only the meaning is left alone.
 
 var REKHA_TAG_STAT = 0x53544154;   # 'STAT'
-# flags bit 0: this value applies to the older sibling of a family split for compatibility.
-var REKHA_STAT_OLDER_SIBLING = 1;
-# flags bit 1: the name is to be dropped when building a style string — "Regular" in "Bold".
-var REKHA_STAT_ELIDABLE = 2;
+# @public — the bits of rekha_stat_value_flags. Bit 0: this value applies to the older sibling of a
+# family split for compatibility. Bit 1: the name is to be dropped when building a style string —
+# "Regular" in "Bold".
+public var REKHA_STAT_OLDER_SIBLING = 1;
+public var REKHA_STAT_ELIDABLE = 2;
 
 fn rekha_stat_resolve(f): i64 {
     store64(f + 520, 0);
@@ -69,7 +70,7 @@ fn rekha_stat_resolve(f): i64 {
 }
 
 # @public — 1 when the font carries a STAT table rekha can read, else 0.
-fn rekha_stat_present(font): i64 {
+public fn rekha_stat_present(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 520) == 0) { return 0; }
     return 1;
@@ -77,7 +78,7 @@ fn rekha_stat_present(font): i64 {
 
 # @public — the name id to use when every axis value in a style string was elided, or 0. It is the
 # minorVersion 1 field, and a 1.0 table has none.
-fn rekha_stat_fallback_name_id(font): i64 {
+public fn rekha_stat_fallback_name_id(font): i64 {
     if (rekha_stat_present(font) == 0) { return 0; }
     var t = load64(font + 520);
     if (rekha_rd_u16(load64(font), t + 2) < 1) { return 0; }
@@ -86,7 +87,7 @@ fn rekha_stat_fallback_name_id(font): i64 {
 
 # @public — how many design axes STAT declares. ⚠ This is STAT's own list, which a static member of
 # a variable family also carries; it need not match `rekha_var_axis_count`.
-fn rekha_stat_axis_count(font): i64 {
+public fn rekha_stat_axis_count(font): i64 {
     if (rekha_stat_present(font) == 0) { return 0; }
     return rekha_rd_u16(load64(font), load64(font + 520) + 6);
 }
@@ -100,27 +101,29 @@ fn rekha_stat_axis_rec(font, i): i64 {
     return t + rekha_rd_u32(buf, t + 8) + i * rekha_rd_u16(buf, t + 4);
 }
 
-# @public — design axis `i`'s tag, its name id, and its sort position within a style string.
-fn rekha_stat_axis_tag(font, i): i64 {
+# @public — design axis `i`'s tag (0 past the count).
+public fn rekha_stat_axis_tag(font, i): i64 {
     var r = rekha_stat_axis_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u32(load64(font), r);
 }
 
-fn rekha_stat_axis_name_id(font, i): i64 {
+# @public — design axis `i`'s name id (0 past the count).
+public fn rekha_stat_axis_name_id(font, i): i64 {
     var r = rekha_stat_axis_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u16(load64(font), r + 4);
 }
 
-fn rekha_stat_axis_ordering(font, i): i64 {
+# @public — design axis `i`'s sort position within a style string (0 past the count).
+public fn rekha_stat_axis_ordering(font, i): i64 {
     var r = rekha_stat_axis_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u16(load64(font), r + 6);
 }
 
 # @public — how many axis value tables the font carries.
-fn rekha_stat_value_count(font): i64 {
+public fn rekha_stat_value_count(font): i64 {
     if (rekha_stat_present(font) == 0) { return 0; }
     return rekha_rd_u16(load64(font), load64(font + 520) + 12);
 }
@@ -160,21 +163,21 @@ fn rekha_stat_value_at(font, i): i64 {
 }
 
 # @public — axis value `i`'s format (1..4), or 0 when there is no readable entry there.
-fn rekha_stat_value_format(font, i): i64 {
+public fn rekha_stat_value_format(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     return rekha_rd_u16(load64(font), v);
 }
 
 # @public — axis value `i`'s flags, or 0. REKHA_STAT_ELIDABLE is the bit that matters.
-fn rekha_stat_value_flags(font, i): i64 {
+public fn rekha_stat_value_flags(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     return rekha_rd_u16(load64(font), v + 4);
 }
 
 # @public — axis value `i`'s name id, for `rekha_name_utf8`. 0 when there is no entry.
-fn rekha_stat_value_name_id(font, i): i64 {
+public fn rekha_stat_value_name_id(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     return rekha_rd_u16(load64(font), v + 6);
@@ -182,7 +185,7 @@ fn rekha_stat_value_name_id(font, i): i64 {
 
 # @public — how many (axis, value) pairs entry `i` carries: 1 for formats 1, 2 and 3, and format
 # 4's own axisCount. 0 when there is no entry.
-fn rekha_stat_value_pairs(font, i): i64 {
+public fn rekha_stat_value_pairs(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     if (rekha_rd_u16(load64(font), v) == 4) { return rekha_rd_u16(load64(font), v + 2); }
@@ -196,7 +199,7 @@ fn rekha_stat_fixed(font, at): i64 {
 }
 
 # @public — pair `k` of axis value `i`: which design axis it is about. -1 when out of range.
-fn rekha_stat_value_axis(font, i, k): i64 {
+public fn rekha_stat_value_axis(font, i, k): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0 - 1; }
     if (k < 0 || k >= rekha_stat_value_pairs(font, i)) { return 0 - 1; }
@@ -207,7 +210,7 @@ fn rekha_stat_value_axis(font, i, k): i64 {
 
 # @public — pair `k` of axis value `i`: the value on that axis, in 16.16 user units. For format 2
 # this is the NOMINAL value; its range is rekha_stat_value_min / _max.
-fn rekha_stat_value_value(font, i, k): i64 {
+public fn rekha_stat_value_value(font, i, k): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     if (k < 0 || k >= rekha_stat_value_pairs(font, i)) { return 0; }
@@ -217,14 +220,15 @@ fn rekha_stat_value_value(font, i, k): i64 {
 
 # @public — format 2's range, in 16.16 user units. Both 0 for any other format: a format 1 or 3
 # entry names a point, not a span.
-fn rekha_stat_value_min(font, i): i64 {
+public fn rekha_stat_value_min(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     if (rekha_rd_u16(load64(font), v) != 2) { return 0; }
     return rekha_stat_fixed(font, v + 12);
 }
 
-fn rekha_stat_value_max(font, i): i64 {
+# @public — the top of a format 2 range, 16.16 user units; 0 for any other format.
+public fn rekha_stat_value_max(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     if (rekha_rd_u16(load64(font), v) != 2) { return 0; }
@@ -233,7 +237,7 @@ fn rekha_stat_value_max(font, i): i64 {
 
 # @public — format 3's linked value: the place on the same axis this style's bold-or-equivalent
 # counterpart sits, in 16.16 user units. 0 for any other format.
-fn rekha_stat_value_linked(font, i): i64 {
+public fn rekha_stat_value_linked(font, i): i64 {
     var v = rekha_stat_value_at(font, i);
     if (v == 0) { return 0; }
     if (rekha_rd_u16(load64(font), v) != 3) { return 0; }

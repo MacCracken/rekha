@@ -1,4 +1,4 @@
-# @internal — glyf-table outline loader + the sadish path seam.
+# glyf-table outline loader + the sadish path seam.
 # glyf.cyr — read a TrueType glyph's outline (contours of on-curve /
 # off-curve points) out of the 'glyf' table and emit it as sadish path verbs
 # (moveto / lineto / quadto / close) appended to an SdPath.
@@ -50,7 +50,7 @@
 # on_curve): MEASURED 112 B for that 3-point glyph, and a composite costs its children + an
 # n-slot pointer array + one exact-size merged block — MEASURED 232 B for alloc_test's
 # one-component composite, which 0.3.10 paid 70,856 B for (fixed 4096-point merge buffers).
-# ⚠ `rekha_font_open`'s 176-byte RekhaFont lands in the hook too when one is set. A font outlives
+# ⚠ `rekha_font_open`'s REKHA_FONT_SIZE-byte RekhaFont lands in the hook too when one is set. A font outlives
 # every frame, so a consumer opens fonts OUTSIDE a scoped hook. Reading one costs nothing:
 # rekha_char_to_glyph / rekha_advance_width / rekha_units_per_em allocate 0 B (MEASURED).
 # ⛔ A pointer that outlives the hook's backing store is dangling. An outline or a path made under
@@ -65,14 +65,21 @@
 # LiberationSans 'A': every call returns either 0 or the whole 17-verb path — no fault, no truncation
 # (programs/hostile_test.cyr, the refusing-hook sweep).
 # ================================================================
-var REKHA_OUTLINE_SIZE = 48;
+# @public — the RekhaOutline record: 48 bytes, six i64 slots in this order — the contour count, the
+# point count, then three pointers (end_pts, xs, ys) and the on_curve byte array. Read it through
+# the six accessors; build one by hand (REKHA_OUTLINE_SIZE) only to feed rekha_outline_to_sdpath.
+public var REKHA_OUTLINE_SIZE = 48;
 
-fn rekha_outline_n_contours(o): i64 { return load64(o); }
-fn rekha_outline_n_points(o): i64   { return load64(o + 8); }
-fn rekha_outline_end_pts(o): i64    { return load64(o + 16); }
-fn rekha_outline_xs(o): i64         { return load64(o + 24); }
-fn rekha_outline_ys(o): i64         { return load64(o + 32); }
-fn rekha_outline_on_curve(o): i64   { return load64(o + 40); }
+# @public — the six readers of a RekhaOutline. `end_pts` is i64[n_contours], each the LAST point
+# index of its contour, strictly increasing and below n_points (rekha_load_glyph refuses otherwise);
+# `xs` / `ys` are i64[n_points] in design units — F26Dot6 for a hinted view; `on_curve` is one byte
+# a point: bit 0 on-curve, bit 1 a CUBIC control (CFF), and for a hinted view REKHA_TAG_*.
+public fn rekha_outline_n_contours(o): i64 { return load64(o); }
+public fn rekha_outline_n_points(o): i64   { return load64(o + 8); }
+public fn rekha_outline_end_pts(o): i64    { return load64(o + 16); }
+public fn rekha_outline_xs(o): i64         { return load64(o + 24); }
+public fn rekha_outline_ys(o): i64         { return load64(o + 32); }
+public fn rekha_outline_on_curve(o): i64   { return load64(o + 40); }
 
 # Zero an outline record in place, making it a valid empty outline. Returns `o`. A loader that
 # finds malformed data AFTER carving its block returns the block this way rather than allocating
@@ -598,7 +605,7 @@ fn rekha_load_glyph_d(font, gid, depth, ctx): i64 {
 
 # @public — load glyph `gid`'s outline (simple OR composite) into a
 # RekhaOutline. Empty for space / malformed / out-of-range / over a load cap; 0 only on OOM.
-fn rekha_load_glyph(font, gid): i64 {
+public fn rekha_load_glyph(font, gid): i64 {
     # ⭐ THE WORST AMBIGUITY IN THE LIBRARY, and 0.7.0's reason for existing. An EMPTY outline is
     # the correct answer for a space and the answer for every refusal there is, so a consumer had
     # no way to tell "this glyph is blank" from "rekha would not decode it". It still returns an
@@ -793,7 +800,7 @@ fn rekha_contour_size(oc, cstart, cend, vp, pp): i64 {
 # self-inconsistent outline cannot walk emit off its arrays. ⚠ A HAND-BUILT outline must
 # still really hold n_points entries in xs / ys / on_curve and n_contours in end_pts —
 # this seam cannot see an allocation's size.
-fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
+public fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
     if (outline == 0) { return sd_path_new_cap(0, 0); }
     var nc = rekha_outline_n_contours(outline);
     var npts = rekha_outline_n_points(outline);
@@ -846,7 +853,7 @@ fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
 # turned it into the same empty path a blank glyph gives. It does not any more: the 0 is checked,
 # the reason its callee recorded stands, and only a path allocation that fails after a good outline
 # sets one of its own.
-fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
+public fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
     var o = rekha_load_glyph(font, gid);
     var p = rekha_outline_to_sdpath(o, scale, ox, oy);
     # ⚠ Only when the callee did not already say something better: a refused GLYPH is a more useful

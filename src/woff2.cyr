@@ -1,4 +1,4 @@
-# @internal — WOFF2: unwrap a Web Open Font Format 2.0 container into the SFNT bytes rekha opens.
+# WOFF2: unwrap a Web Open Font Format 2.0 container into the SFNT bytes rekha opens.
 #
 # woff2.cyr — validate a WOFF2 file (W3C Recommendation, "WOFF File Format 2.0") and REBUILD the
 # SFNT it carries. WOFF 1.0 (src/woff.cyr) compresses each table on its own and hands back the same
@@ -1491,7 +1491,7 @@ fn rekha_w2_ctx(buf, len): i64 {
 
 # @public — the number of faces a WOFF2 carries: 1 for an ordinary font, and the collection's face
 # count for a 'ttcf'-flavoured one. 0 when (buf, len) is not a WOFF2 rekha accepts.
-fn rekha_woff2_face_count(buf, len): i64 {
+public fn rekha_woff2_face_count(buf, len): i64 {
     var ctx = rekha_w2_ctx(buf, len);
     if (ctx == 0) { return 0; }
     return load64(ctx + 24);
@@ -1501,7 +1501,7 @@ fn rekha_woff2_face_count(buf, len): i64 {
 # every directory entry's compressed-stream length. 0 when (buf, len) is not a WOFF2 rekha accepts.
 # ⚠ Spec 5 makes this an EQUALITY with what Brotli produces, so it is both the buffer to allocate
 # and the length the inflate must return.
-fn rekha_woff2_block_size(buf, len): i64 {
+public fn rekha_woff2_block_size(buf, len): i64 {
     var ctx = rekha_w2_ctx(buf, len);
     if (ctx == 0) { return 0; }
     return rekha_w2_block_size(load64(ctx + 16), load64(ctx));
@@ -1511,7 +1511,7 @@ fn rekha_woff2_block_size(buf, len): i64 {
 # which is rekha_woff2_block_size exactly, or 0. ⛔ The equality is the gate: a stream that expands
 # to more fails closed inside sankoch (ERR_OUTPUT_LIMIT) and one that expands to less fails here,
 # so the "no extraneous data between table entries" rule cannot be sidestepped in either direction.
-fn rekha_woff2_inflate(buf, len, td, cap): i64 {
+public fn rekha_woff2_inflate(buf, len, td, cap): i64 {
     var ctx = rekha_w2_ctx(buf, len);
     if (ctx == 0) { return 0; }
     var want = rekha_w2_block_size(load64(ctx + 16), load64(ctx));
@@ -1532,7 +1532,7 @@ fn rekha_woff2_inflate(buf, len, td, cap): i64 {
 # rekha_woff_sfnt_size, this CANNOT be answered from the container alone: a transformed glyf's
 # rebuilt size is a property of its point data, and the spec says the origLength beside it "should
 # be treated only as a reference". The measuring pass is the same code that writes.
-fn rekha_woff2_sfnt_size(buf, len, td, tdlen): i64 {
+public fn rekha_woff2_sfnt_size(buf, len, td, tdlen): i64 {
     var ctx = rekha_w2_ctx(buf, len);
     if (ctx == 0) { return 0; }
     if (rekha_w2_block_size(load64(ctx + 16), load64(ctx)) != tdlen) { return 0; }
@@ -1546,7 +1546,7 @@ fn rekha_woff2_sfnt_size(buf, len, td, tdlen): i64 {
 # invalid, `cap` is short, or a transform refuses. On 0 the contents of `dst` are unspecified.
 # ⭐ A 'ttcf' WOFF2 rebuilds to a real .ttc — a TTC header, one offset table per face and ONE copy of
 # each shared table — which rekha_font_open_index then opens face by face (0.4.8).
-fn rekha_woff2_decode(buf, len, td, tdlen, dst, cap): i64 {
+public fn rekha_woff2_decode(buf, len, td, tdlen, dst, cap): i64 {
     var ctx = rekha_w2_ctx(buf, len);
     if (ctx == 0) { return 0; }
     if (rekha_w2_block_size(load64(ctx + 16), load64(ctx)) != tdlen) { return 0; }
@@ -1568,7 +1568,7 @@ fn rekha_woff2_decode(buf, len, td, tdlen, dst, cap): i64 {
 # ⚠ TWO allocations that outlive the call, plus the RekhaFont: the inflated table-data block and the
 # rebuilt file. The block is scratch — nothing reads it once the rebuild is done — but rekha's seam
 # has no free, so it stays charged. Open a WOFF2 once, outside a per-frame hook.
-fn rekha_font_open_woff2_index(buf, len, index): i64 {
+public fn rekha_font_open_woff2_index(buf, len, index): i64 {
     if (index < 0) { return 0; }
     var tdlen = rekha_woff2_block_size(buf, len);
     if (tdlen <= 0) { return 0; }
@@ -1584,7 +1584,7 @@ fn rekha_font_open_woff2_index(buf, len, index): i64 {
 }
 
 # @public — open a WOFF2 font: face 0, which for an ordinary WOFF2 is the only one there is.
-fn rekha_font_open_woff2(buf, len): i64 {
+public fn rekha_font_open_woff2(buf, len): i64 {
     return rekha_font_open_woff2_index(buf, len, 0);
 }
 
@@ -1594,7 +1594,7 @@ fn rekha_font_open_woff2(buf, len): i64 {
 # ⚠ It lives here, not in src/woff.cyr where 0.4.1 put it, because the sniffing entry has to know
 # every container and woff.cyr does not know this one. A collection — a plain '.ttc' or a 'ttcf'
 # WOFF2 — gives face 0, the same as rekha_font_open does.
-fn rekha_font_open_any(buf, len): i64 {
+public fn rekha_font_open_any(buf, len): i64 {
     if (buf == 0) { return 0; }
     if (len >= 4) {
         var sig = rekha_rd_u32(buf, 0);

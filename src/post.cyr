@@ -1,4 +1,4 @@
-# @internal — `post`: where the underline goes, and how far the face leans (0.6.4).
+# `post`: where the underline goes, and how far the face leans (0.6.4).
 #
 # post.cyr — a small table with one job a renderer cannot do without: `underlinePosition` and
 # `underlineThickness` are the only place a font says where to draw a rule under its text. OS/2
@@ -43,7 +43,7 @@ fn rekha_post_resolve(f): i64 {
 # @public — the `post` version as its raw 16.16 Fixed (0x00010000 for 1.0, 0x00020000 for 2.0,
 # 0x00030000 for 3.0), or -1 when the font has no usable table. The probe to use before trusting a
 # 0 from anything below.
-fn rekha_post_version(font): i64 {
+public fn rekha_post_version(font): i64 {
     if (font == 0) { return 0 - 1; }
     var t = load64(font + 536);
     if (t == 0) { return 0 - 1; }
@@ -53,7 +53,7 @@ fn rekha_post_version(font): i64 {
 # @public — italicAngle, in 16.16 DEGREES counter-clockwise from vertical, so an oblique face is
 # NEGATIVE. 0 when the font does not say, which is also what an upright face says.
 # ⚠ No MVAR tag exists for it: an italic angle does not vary.
-fn rekha_italic_angle(font): i64 {
+public fn rekha_italic_angle(font): i64 {
     if (font == 0) { return 0; }
     var t = load64(font + 536);
     if (t == 0) { return 0; }
@@ -64,7 +64,7 @@ fn rekha_italic_angle(font): i64 {
 
 # @public — where the underline sits, in design units: the TOP of the rule, relative to the
 # baseline and so normally NEGATIVE. Varies through MVAR's `undo`.
-fn rekha_underline_position(font): i64 {
+public fn rekha_underline_position(font): i64 {
     if (font == 0) { return 0; }
     var t = load64(font + 536);
     if (t == 0) { return 0; }
@@ -72,7 +72,7 @@ fn rekha_underline_position(font): i64 {
 }
 
 # @public — how thick that rule is, in design units. Varies through MVAR's `unds`.
-fn rekha_underline_thickness(font): i64 {
+public fn rekha_underline_thickness(font): i64 {
     if (font == 0) { return 0; }
     var t = load64(font + 536);
     if (t == 0) { return 0; }
@@ -82,7 +82,7 @@ fn rekha_underline_thickness(font): i64 {
 # @public — 1 when every glyph has the same advance, 0 when not, -1 when the font does not say.
 # ⚠ The field is a u32 and the spec only requires it to be non-zero for monospaced, so any
 # non-zero value is 1 here rather than passed through.
-fn rekha_is_fixed_pitch(font): i64 {
+public fn rekha_is_fixed_pitch(font): i64 {
     if (font == 0) { return 0 - 1; }
     var t = load64(font + 536);
     if (t == 0) { return 0 - 1; }

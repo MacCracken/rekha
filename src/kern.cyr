@@ -1,4 +1,4 @@
-# @internal — `kern`: the legacy pair-kerning table (0.6.5).
+# `kern`: the legacy pair-kerning table (0.6.5).
 #
 # kern.cyr — rekha owns advance widths, so rekha is what decides inter-glyph spacing, and through
 # 0.6.4 every pair was placed at its raw advance. This is the first half of fixing that: the legacy
@@ -72,7 +72,7 @@ fn rekha_kern_resolve(f): i64 {
 
 # @public — 1 when the font carries a `kern` table rekha can walk, else 0. ⚠ 0 does NOT mean the
 # font has no kerning: a modern face keeps it in GPOS. `rekha_kern_source` is the question to ask.
-fn rekha_kern_present(font): i64 {
+public fn rekha_kern_present(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 552) == 0) { return 0; }
     return 1;
@@ -113,7 +113,7 @@ fn rekha_kern_f0(font, at, sube, l, r, out): i64 {
 # pair is not in it, or when every subtable that could have carried it is one rekha skips.
 # ⚠ `rekha_kern_pair` is the one to call: since 0.6.6 it prefers GPOS, which is where a modern
 # font keeps its kerning. This is the table alone, for a consumer that wants to see both.
-fn rekha_kern_table_pair(font, l, r): i64 {
+public fn rekha_kern_table_pair(font, l, r): i64 {
     if (rekha_kern_present(font) == 0) { return 0; }
     if (l < 0 || r < 0) { return 0; }
     if (l > 65535 || r > 65535) { return 0; }
@@ -190,7 +190,7 @@ fn rekha_kern_floordiv(num, den): i64 {
 # ⛔ NOT BOTH. A face carrying a GPOS `kern` feature AND a legacy table usually says the same thing
 # twice, for shapers that read only one; adding them would double every pair. GPOS wins, which is
 # what HarfBuzz does and what a font that ships both expects.
-fn rekha_kern_source(font): i64 {
+public fn rekha_kern_source(font): i64 {
     if (font == 0) { return 0; }
     if (rekha_gpos_kern_present(font) != 0) { return 2; }
     if (rekha_kern_present(font) != 0) { return 1; }
@@ -200,14 +200,14 @@ fn rekha_kern_source(font): i64 {
 # @public — THE kerning adjustment for (l, r), in design units, from wherever this font keeps it.
 # ⭐ Since 0.6.6 that is GPOS when the font has a `kern` feature there, and the legacy table
 # otherwise. `rekha_kern_source` says which answered.
-fn rekha_kern_pair(font, l, r): i64 {
+public fn rekha_kern_pair(font, l, r): i64 {
     if (rekha_gpos_kern_present(font) != 0) { return rekha_gpos_kern_pair(font, l, r); }
     return rekha_kern_table_pair(font, l, r);
 }
 
 # @public — the same adjustment in whole pixels at `px_size`, rounded HALF UP as every other
 # rounding in rekha is. ⚠ Half up, not half away from zero: -1.5 px comes back -1.
-fn rekha_kern_pair_px(font, l, r, px_size): i64 {
+public fn rekha_kern_pair_px(font, l, r, px_size): i64 {
     var upem = rekha_units_per_em(font);
     if (upem <= 0) { return 0; }
     var v = rekha_kern_pair(font, l, r);
@@ -217,7 +217,7 @@ fn rekha_kern_pair_px(font, l, r, px_size): i64 {
 
 # @public — the adjustment between two CHARACTERS, mapped through cmap. The convenience twin of
 # rekha_char_advance, and 0 when either codepoint is unmapped.
-fn rekha_char_kern(font, cp1, cp2): i64 {
+public fn rekha_char_kern(font, cp1, cp2): i64 {
     var a = rekha_char_to_glyph(font, cp1);
     if (a == 0) { return 0; }
     var b = rekha_char_to_glyph(font, cp2);

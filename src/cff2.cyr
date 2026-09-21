@@ -1,4 +1,4 @@
-# @internal — CFF2: the variable-font charstring table (0.4.9).
+# CFF2: the variable-font charstring table (0.4.9).
 #
 # cff2.cyr — resolve a 'CFF2' table at rekha_font_open and let cff.cyr's Type 2 interpreter decode
 # its charstrings, so a CFF2 face draws through rekha_load_glyph / rekha_glyph_to_sdpath /

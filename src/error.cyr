@@ -1,4 +1,4 @@
-# @public — the vocabulary rekha refuses in (0.7.0; a ninth code at 0.8.0).
+# error.cyr — the vocabulary rekha refuses in (0.7.0; a ninth code at 0.8.0).
 #
 # error.cyr — nine codes and their names. WHERE a code comes from is `rekha_font_error` in
 # src/sfnt.cyr, which reports why a font handle's last call refused, and the `_why` twins of the
@@ -59,7 +59,7 @@ enum RekhaErrCode {
 # @public — a short, fixed cstring for a code. Never null, and never allocated: every string here
 # is a literal in the bundle. An unknown code answers "unknown error" rather than refusing, because
 # a diagnostic that refuses is no diagnostic.
-fn rekha_err_name(code): i64 {
+public fn rekha_err_name(code): i64 {
     if (code == REKHA_OK)              { return "ok"; }
     if (code == REKHA_ERR_OOM)         { return "out of memory"; }
     if (code == REKHA_ERR_BAD_SFNT)    { return "bad SFNT header"; }

@@ -1437,6 +1437,18 @@ fn t_coll_refuse(): i64 {
     return 0;
 }
 
+# ── bundle internals: two checks that lived in programs/woff_dist_test.cyr through 0.8.2, where
+# they proved the WOFF2 module folded into the [lib.woff] bundle. The 0.9.0 private bundle refuses
+# both names to a consumer, so they moved here, to the src chain that still reaches them. ──
+fn t_internals(): i64 {
+    check(rekha_w2_known_tag(10), REKHA_TAG_GLYF2);                    # the known-tag table
+    var tri = alloc(32);
+    memset(tri, 0x7F, 4);
+    check(rekha_w2_triplet(tri, 0, 4, 127, tri + 16), 4);              # index 127 consumes four
+    check(rekha_w2_triplet(tri, 0, 3, 127, tri + 16), 0 - 1);          # and refuses on three
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     g_face_len = rekha_face_default_len();
@@ -1477,6 +1489,7 @@ fn main(): i64 {
     t_guard();
     t_coll();
     t_coll_refuse();
+    t_internals();
     if (g_fails == 0) {
         var ok = "woff2_test: PASS (";
         syscall(1, 1, ok, strlen(ok));

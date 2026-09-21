@@ -19,8 +19,12 @@ output = "build/rekha-smoke"
 # error.cyr is dep-free; sfnt.cyr uses it; glyf.cyr sits atop sfnt.cyr.
 # Don't reorder without re-running `cyrius distlib` and verifying the
 # concatenated bundle still compiles clean.
+# ⭐ src/freeze.cyr FIRST in both lists (0.9.0): its one code line, `private`, makes the whole
+# concatenated bundle private-by-default, so a consumer reaches exactly the `public fn` /
+# `public var` items. It is not in src/lib.cyr's include chain — the tests keep every internal.
 [lib]
 modules = [
+    "src/freeze.cyr",
     "src/error.cyr",
     "src/sfnt.cyr",
     "src/glyf.cyr",
@@ -52,6 +56,7 @@ modules = [
 # rekha's own tests include lib/sync.cyr and lib/sankoch.cyr from the toolchain pin.
 [lib.woff]
 modules = [
+    "src/freeze.cyr",
     "src/error.cyr",
     "src/sfnt.cyr",
     "src/glyf.cyr",

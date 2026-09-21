@@ -1,4 +1,4 @@
-# @internal — WOFF 1.0: unwrap a Web Open Font Format container into the SFNT bytes rekha opens.
+# WOFF 1.0: unwrap a Web Open Font Format container into the SFNT bytes rekha opens.
 #
 # woff.cyr — validate a WOFF 1.0 file (W3C Recommendation, 13 Dec 2012) and rebuild the SFNT it
 # carries: an offset table, a table directory in the WOFF's (tag-sorted) order, and every table's
@@ -66,7 +66,7 @@ fn rekha_pad4(n): i64 {
 # @public — the byte size of the SFNT a WOFF 1.0 container at (buf, len) rebuilds to
 # (= its validated totalSfntSize), or 0 when (buf, len) is not a valid WOFF 1.0 file under the rules
 # above. Reads only the header and directory; inflates nothing; allocates 0 B.
-fn rekha_woff_sfnt_size(buf, len): i64 {
+public fn rekha_woff_sfnt_size(buf, len): i64 {
     if (buf == 0) { return 0; }
     if (len < REKHA_WOFF_HDR_LEN) { return 0; }
     if (rekha_rd_u32(buf, 0) != REKHA_WOFF_SIG) { return 0; }
@@ -123,7 +123,7 @@ fn rekha_woff_sfnt_size(buf, len): i64 {
 # returns 0), `cap` is smaller than the SFNT, or a table does not inflate to exactly its origLength.
 # On 0 the contents of `dst` are unspecified. Allocates 0 B on rekha's seam; sankoch's inflate takes
 # MEASURED 448 B of global heap per call (above).
-fn rekha_woff_decode(buf, len, dst, cap): i64 {
+public fn rekha_woff_decode(buf, len, dst, cap): i64 {
     var size = rekha_woff_sfnt_size(buf, len);
     if (size == 0) { return 0; }
     if (dst == 0) { return 0; }
@@ -180,7 +180,7 @@ fn rekha_woff_decode(buf, len, dst, cap): i64 {
 # inflate, an allocation failure, or an SFNT rekha_font_open refuses (e.g. an 'OTTO' flavor).
 # ⚠ The rebuilt buffer lives as long as the allocator it came from — open fonts outside a scoped
 # per-frame hook, as with rekha_font_open.
-fn rekha_font_open_woff(buf, len): i64 {
+public fn rekha_font_open_woff(buf, len): i64 {
     var size = rekha_woff_sfnt_size(buf, len);
     if (size == 0) { return 0; }
     var dst = sd_alloc(size);

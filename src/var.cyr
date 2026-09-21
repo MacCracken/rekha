@@ -1,4 +1,4 @@
-# @internal — OpenType font variations: axes, normalization, and the region scalars (0.4.11).
+# OpenType font variations: axes, normalization, and the region scalars (0.4.11).
 #
 # var.cyr — read `fvar` and `avar`, turn a user axis setting into a NORMALIZED coordinate, and turn
 # those coordinates into one scalar per region of a variation store. That scalar is the whole of
@@ -67,7 +67,7 @@ fn rekha_fx_div(a, b): i64 {
 # ================================================================
 
 # @public — how many variation axes the font declares, or 0 when it has no usable `fvar`.
-fn rekha_var_axis_count(font): i64 {
+public fn rekha_var_axis_count(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 280);
 }
@@ -81,14 +81,15 @@ fn rekha_var_axis_rec(font, i): i64 {
 }
 
 # @public — axis `i`'s four-byte tag ('wght', 'wdth', …), or 0.
-fn rekha_var_axis_tag(font, i): i64 {
+public fn rekha_var_axis_tag(font, i): i64 {
     var r = rekha_var_axis_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u32(load64(font), r);
 }
 
-# @public — axis `i`'s minimum / default / maximum, in 16.16 user units. 0 for a bad index.
-# ⚠ fvar stores these as signed Fixed, so they are sign-extended from the u32 the reader returns.
+# Axis `i`'s record field at `off` (4 / 8 / 12 = min / default / max), in 16.16 user units. 0 for
+# a bad index. ⚠ fvar stores these as signed Fixed, so they are sign-extended from the u32 the
+# reader returns.
 fn rekha_var_axis_at(font, i, off): i64 {
     var r = rekha_var_axis_rec(font, i);
     if (r == 0) { return 0; }
@@ -100,15 +101,16 @@ fn rekha_var_axis_at(font, i, off): i64 {
 # @public — the `name` id of axis `i`'s label, or 0 when the font has no such axis. Feed it to
 # `rekha_name_utf8` for the text: an axis has been enumerable since 0.4.11 and unlabelable until
 # 0.6.2, because the record's axisNameID was parsed past and never resolved.
-fn rekha_var_axis_name_id(font, i): i64 {
+public fn rekha_var_axis_name_id(font, i): i64 {
     var r = rekha_var_axis_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u16(load64(font), r + 18);
 }
 
-fn rekha_var_axis_min(font, i): i64     { return rekha_var_axis_at(font, i, 4); }
-fn rekha_var_axis_default(font, i): i64 { return rekha_var_axis_at(font, i, 8); }
-fn rekha_var_axis_max(font, i): i64     { return rekha_var_axis_at(font, i, 12); }
+# @public — axis `i`'s minimum / default / maximum, in 16.16 user units. 0 for a bad index.
+public fn rekha_var_axis_min(font, i): i64     { return rekha_var_axis_at(font, i, 4); }
+public fn rekha_var_axis_default(font, i): i64 { return rekha_var_axis_at(font, i, 8); }
+public fn rekha_var_axis_max(font, i): i64     { return rekha_var_axis_at(font, i, 12); }
 
 # Normalize a user value onto [-1, 1] (OpenType's rule): clamp to the axis range, then scale the
 # distance from the default by the half-range it falls in.
@@ -258,8 +260,6 @@ fn rekha_var_build_scalars(font, vstore): i64 {
 # The public axis API
 # ================================================================
 
-# @public — the normalized coordinate axis `i` currently sits at, in 16.16. 0 (the default location)
-# until rekha_var_set_axis moves it.
 # ================================================================
 # Named instances — the styles a variable font ships with
 # ================================================================
@@ -272,7 +272,7 @@ fn rekha_var_build_scalars(font, vstore): i64 {
 
 # @public — how many named instances the font ships. 0 when there are none or the array is one
 # rekha will not walk.
-fn rekha_var_instance_count(font): i64 {
+public fn rekha_var_instance_count(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 504);
 }
@@ -287,7 +287,7 @@ fn rekha_var_inst_rec(font, i): i64 {
 
 # @public — instance `i`'s subfamily name id, for `rekha_name_utf8`. 0 when there is no such
 # instance.
-fn rekha_var_instance_name_id(font, i): i64 {
+public fn rekha_var_instance_name_id(font, i): i64 {
     var r = rekha_var_inst_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u16(load64(font), r);
@@ -296,7 +296,7 @@ fn rekha_var_instance_name_id(font, i): i64 {
 # @public — instance `i`'s PostScript name id, or 0 when the record does not carry one. ⚠ The
 # field is OPTIONAL and its presence is told by instanceSize alone, which is why the resolver
 # refuses any size but the two the spec allows.
-fn rekha_var_instance_ps_name_id(font, i): i64 {
+public fn rekha_var_instance_ps_name_id(font, i): i64 {
     var r = rekha_var_inst_rec(font, i);
     if (r == 0) { return 0; }
     var n = load64(font + 280);
@@ -305,7 +305,7 @@ fn rekha_var_instance_ps_name_id(font, i): i64 {
 }
 
 # @public — instance `i`'s flags word (every bit reserved as of OpenType 1.9), or 0.
-fn rekha_var_instance_flags(font, i): i64 {
+public fn rekha_var_instance_flags(font, i): i64 {
     var r = rekha_var_inst_rec(font, i);
     if (r == 0) { return 0; }
     return rekha_rd_u16(load64(font), r + 2);
@@ -313,7 +313,7 @@ fn rekha_var_instance_flags(font, i): i64 {
 
 # @public — instance `i`'s coordinate on axis `a`, in 16.16 USER units. 0 when either index is out
 # of range. ⚠ 0 is a real coordinate on most axes, so check the counts first.
-fn rekha_var_instance_coord(font, i, a): i64 {
+public fn rekha_var_instance_coord(font, i, a): i64 {
     var r = rekha_var_inst_rec(font, i);
     if (r == 0) { return 0; }
     if (a < 0 || a >= load64(font + 280)) { return 0; }
@@ -326,7 +326,7 @@ fn rekha_var_instance_coord(font, i, a): i64 {
 # style. Returns 1, or 0 when there is no such instance. ⛔ It sets EVERY axis, including the ones
 # the instance leaves at their defaults: a named instance is a whole location, and applying half of
 # one over a previous setting would draw a style the font does not ship.
-fn rekha_var_set_instance(font, i): i64 {
+public fn rekha_var_set_instance(font, i): i64 {
     var r = rekha_var_inst_rec(font, i);
     if (r == 0) { return 0; }
     var n = load64(font + 280);
@@ -338,7 +338,9 @@ fn rekha_var_set_instance(font, i): i64 {
     return 1;
 }
 
-fn rekha_var_coord(font, i): i64 {
+# @public — the normalized coordinate axis `i` currently sits at, in 16.16 (-1.0 .. 1.0). 0 (the
+# default location) until rekha_var_set_axis or rekha_var_set_instance moves it.
+public fn rekha_var_coord(font, i): i64 {
     if (font == 0) { return 0; }
     if (i < 0 || i >= load64(font + 280)) { return 0; }
     var c = load64(font + 312);
@@ -357,7 +359,7 @@ fn rekha_var_coord(font, i): i64 {
 # rekha_hint_axes_changed, so the next rekha_hint_ctx — at the same ppem or another — re-runs
 # `prep` for the new instance. A FORWARD call into src/hint.cyr, included after this module:
 # its arity (one argument) is checked by hand, since the compiler cannot.
-fn rekha_var_set_axis(font, i, value): i64 {
+public fn rekha_var_set_axis(font, i, value): i64 {
     if (font == 0) { return 0; }
     var n = load64(font + 280);
     if (n < 1) { return 0; }
@@ -399,7 +401,7 @@ fn rekha_var_live(font): i64 {
 
 # @public — put every axis back at its default, which is the instance rekha decodes without this
 # API at all. 1 when the font has axes. The hinting context is told, as rekha_var_set_axis tells it.
-fn rekha_var_reset(font): i64 {
+public fn rekha_var_reset(font): i64 {
     if (font == 0) { return 0; }
     if (load64(font + 280) < 1) { return 0; }
     var c = load64(font + 312);

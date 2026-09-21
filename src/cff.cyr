@@ -1,4 +1,4 @@
-# @internal — CFF: OpenType 'OTTO' outlines (the 'CFF ' table, Type 2 charstrings).
+# CFF: OpenType 'OTTO' outlines (the 'CFF ' table, Type 2 charstrings).
 #
 # cff.cyr — resolve a CFF table once at rekha_font_open and decode a glyph's Type 2 charstring into
 # the SAME RekhaOutline glyf.cyr produces, so rekha_load_glyph / rekha_glyph_to_sdpath /

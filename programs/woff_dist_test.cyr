@@ -47,6 +47,26 @@ fn check(got, want): i64 {
 
 var g_arena = 0;
 
+# ── a consumer's own byte helpers. ⛔ Since 0.9.0 the bundle is PRIVATE: rekha_rd_u16 / rekha_wr_u32 /
+# rekha_pad4 and the WOFF header constants are internals a consumer cannot name (the compile error
+# is `'rekha_rd_u16' is private to its file`), so this test, which IS a consumer's include chain,
+# carries its own — 20 lines, and the proof that the surface suffices to build a WOFF by hand. ──
+var WD_HDR_LEN = 44;      # the WOFF 1.0 header
+var WD_DIR_LEN = 20;      # one table directory entry
+var WD_SIG = 0x774F4646;  # 'wOFF'
+
+fn wd_rd_u16(buf, off): i64 { return (load8(buf + off) << 8) | load8(buf + off + 1); }
+fn wd_rd_u32(buf, off): i64 { return (wd_rd_u16(buf, off) << 16) | wd_rd_u16(buf, off + 2); }
+fn wd_wr_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255); store8(buf + off + 1, v & 255);
+    return 0;
+}
+fn wd_wr_u32(buf, off, v): i64 {
+    wd_wr_u16(buf, off, (v >> 16) & 65535); wd_wr_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+fn wd_pad4(n): i64 { return (n + 3) & (0 - 4); }
+
 fn hook_alloc(n): i64 {
     return arena_alloc(g_arena, n);
 }
@@ -62,34 +82,34 @@ fn main(): i64 {
     var cap = 1048576;
     var w = alloc(cap);
     memset(w, 0, cap);
-    var nt = rekha_rd_u16(face, 4);
-    var at = REKHA_WOFF_HDR_LEN + nt * REKHA_WOFF_DIR_LEN;
+    var nt = wd_rd_u16(face, 4);
+    var at = WD_HDR_LEN + nt * WD_DIR_LEN;
     var total = 12 + nt * 16;
     var i = 0;
     while (i < nt) {
         var d = 12 + i * 16;
-        var off = rekha_rd_u32(face, d + 8);
-        var olen = rekha_rd_u32(face, d + 12);
-        var e = REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN;
+        var off = wd_rd_u32(face, d + 8);
+        var olen = wd_rd_u32(face, d + 12);
+        var e = WD_HDR_LEN + i * WD_DIR_LEN;
         var clen = zlib_compress(face + off, olen, w + at, cap - at);
         if (clen <= 0 || clen >= olen) {
             memcpy(w + at, face + off, olen);
             clen = olen;
         }
-        rekha_wr_u32(w, e, rekha_rd_u32(face, d));
-        rekha_wr_u32(w, e + 4, at);
-        rekha_wr_u32(w, e + 8, clen);
-        rekha_wr_u32(w, e + 12, olen);
-        rekha_wr_u32(w, e + 16, rekha_rd_u32(face, d + 4));
-        at = at + rekha_pad4(clen);
-        total = total + rekha_pad4(olen);
+        wd_wr_u32(w, e, wd_rd_u32(face, d));
+        wd_wr_u32(w, e + 4, at);
+        wd_wr_u32(w, e + 8, clen);
+        wd_wr_u32(w, e + 12, olen);
+        wd_wr_u32(w, e + 16, wd_rd_u32(face, d + 4));
+        at = at + wd_pad4(clen);
+        total = total + wd_pad4(olen);
         i = i + 1;
     }
-    rekha_wr_u32(w, 0, REKHA_WOFF_SIG);
-    rekha_wr_u32(w, 4, rekha_rd_u32(face, 0));
-    rekha_wr_u32(w, 8, at);
-    rekha_wr_u16(w, 12, nt);
-    rekha_wr_u32(w, 16, total);
+    wd_wr_u32(w, 0, WD_SIG);
+    wd_wr_u32(w, 4, wd_rd_u32(face, 0));
+    wd_wr_u32(w, 8, at);
+    wd_wr_u16(w, 12, nt);
+    wd_wr_u32(w, 16, total);
 
     check(rekha_woff_sfnt_size(w, at), total);                        # 2
     var f = rekha_font_open_any(w, at);
@@ -120,18 +140,16 @@ fn main(): i64 {
     # ⭐ WHAT THIS CATCHES. `distlib --check` proves the bundle matches src/; it cannot prove the
     # [lib.woff] MODULE LIST names woff2.cyr at all. Drop that line from cyrius.cyml and the bundle
     # is still "current" and every other suite still passes, because they include src/ directly.
-    # These four calls only link if woff2.cyr folded in, and only answer if it folded in ORDER (it
-    # calls woff.cyr's rekha_wr_u32 / rekha_pad4).
+    # These calls only link if woff2.cyr folded in, and only answer if it folded in ORDER (it calls
+    # woff.cyr's rekha_wr_u32 / rekha_pad4). ⚠ Through 0.8.2 two more checks here reached the
+    # internals rekha_w2_known_tag / rekha_w2_triplet; the private bundle (0.9.0) refuses them to
+    # a consumer, so they moved to programs/woff2_test.cyr (group "bundle internals").
     # ⚠ The WOFF2 ROUND TRIP lives in programs/woff2_test.cyr, which needs a WOFF2 encoder; this is
     # a presence-and-refusal check on the shipped bundle, not a second copy of it.
     check(rekha_woff2_block_size(w, at), 0);                           # 12 — a WOFF 1.0 is not a WOFF2
     check(rekha_font_open_woff2(w, at), 0);                            # 13
-    check(rekha_w2_known_tag(10), REKHA_TAG_GLYF2);                    # 14 — the known-tag table folded in
-    var tri = alloc(32);
-    memset(tri, 0x7F, 4);
-    check(rekha_w2_triplet(tri, 0, 4, 127, tri + 16), 4);              # 15 — index 127 consumes four
-    check(rekha_w2_triplet(tri, 0, 3, 127, tri + 16), 0 - 1);          # 16 — and refuses on three
-    check(rekha_font_open_any(face, n) != 0, 1);                       # 17 — the dispatcher moved here
+    check(rekha_woff2_face_count(w, at), 0);                           # 14 — nor a WOFF2 collection
+    check(rekha_font_open_any(face, n) != 0, 1);                       # 15 — the dispatcher moved here
 
     if (g_fails == 0) {
         var ok = "woff_dist_test: PASS (bundle compiles, opens a WOFF, WOFF2 folded in, SFNT + font on the seam)\n";
