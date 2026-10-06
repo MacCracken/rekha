@@ -361,3 +361,28 @@ is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius rel
   corpora get) — not execution coverage, which is cyrius P5-B (v6.7.x).
   rekha filed P5; its CI comment ("`cyrius coverage` is NOT a gate here … blind to programs/") can be
   revised once it pins ≥ 6.6.17.
+
+## Recorded by cyrius 6.6.19 (2026-10-06) — for the next cyrius pin move
+
+⛔ **Needs cyrius >= 6.6.19 — do not bump the pin until 6.6.19 is tagged and out.** Docs-only note from the cyrius
+6.6.19 lanes; each item is this repo's to adopt when it pins ≥ 6.6.19. Nothing here gates a cyrius release.
+
+- **`scripts/face2cyr.py` and the checked-in 1.65 MB `fonts/face_data.cyr` can retire; `[lib.face]` produces
+  `dist/rekha-face.cyr`** (cyrius P2, shipped in 6.6.19).
+  `[embed] NAME = "path"` in cyrius.cyml gives every compile `NAME()` (the file's bytes, NUL-terminated) and
+  `NAME_len()`, read from the file at build time — no generated `.cyr`, nothing to drift. Explicit entries only
+  (the `{dir, glob}` set form is refused by name). All embeds share cycc's 2 MiB string pool with the program's
+  own literals, and every binary of the project (test binaries too) carries every declared embed. Reference: the
+  cyrius guide's *Embedding data files: [embed]*, CHANGELOG [6.6.19] *Embed — P2*.
+  - Declare `[embed] REKHA_FACE = "fonts/<face>.ttf"` (410,820 B — fits the pool) and a profile
+    `[lib.face] embed = ["REKHA_FACE"]`: `cyrius distlib face` writes `dist/rekha-face.cyr`, and
+    `cyrius distlib --check` goes STALE when the .ttf changes. An embed-only profile (no `modules`) is legal; if
+    you keep accessor fns (chunked access, the FNV check), list their module under `[lib.face] modules` too and
+    they can call `REKHA_FACE()` / `REKHA_FACE_len()`.
+  - The face stays OUT of `dist/rekha.cyr`: a bundle carries only the embeds its `[lib] embed` / `[lib.P] embed`
+    names, and the base names none. ⚠ A plain `[embed]` entry IS in every compile of rekha's own project (each
+    test binary carries the 410 KB); if that cost matters, keep the face out of `[embed]` for the dev build and
+    produce the face bundle from a sub-project.
+  - Downstream: agnos switches its `modules` path from `fonts/face_data.cyr` to the face bundle.
+  - Stays yours: the pinned-FNV verify (no hash accessor is generated — a stale constant now fails loudly at run
+    time).
