@@ -386,3 +386,17 @@ is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius rel
   - Downstream: agnos switches its `modules` path from `fonts/face_data.cyr` to the face bundle.
   - Stays yours: the pinned-FNV verify (no hash accessor is generated — a stale constant now fails loudly at run
     time).
+
+## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
+
+cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
+applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
+6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
+
+- **(cyrius ≥ 6.6.18, P4)** a `dist/<pkg>.deps` sidecar names exactly what the compile-verify proves and every
+  bundle carries a compile-verified requires block, so `include "dist/<pkg>.cyr"` alone compiles —
+  `programs/prelude.cyr` and the CI sidecar pin can go.
+- **(cyrius ≥ 6.6.18, P6)** the *Blocked on a sibling* row (`fuzz --poison` should follow a custom allocator seam)
+  is unblocked: `cyrius fuzz --poison` reaches `alloc()`, arenas, `fl_alloc` and any `_a` API through
+  `poison_allocator()` (`lib/poison.cyr`, with `poison_alloc`), with leading and trailing redzones and an A/B
+  differential (`--poison=ab`); an overwrite stops the harness with exit 86. Route `sd_alloc` through it to adopt.
