@@ -5,7 +5,7 @@ description = "rekha (रेखा — line/outline) — pure-Cyrius vector/outl
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/rekha"
 language = "cyrius"
-cyrius = "6.6.6"
+cyrius = "6.6.20"
 
 # rekha is a library — no CLI binary. `cyrius build` targets a smoke
 # program that links the full include chain to prove lib.cyr parses clean.
@@ -79,40 +79,32 @@ modules = [
 ]
 
 [deps]
-# ⛔ THIS ARRAY IS A TAX ON EVERY CONSUMER — keep it at what `src/` CALLS.
-# `cyrius distlib` builds dist/rekha.deps from the include scan of src/lib.cyr
-# UNIONED with this array (_distlib_union_declared_stdlib), then compile-
-# verifies. A leaf named in either place is one a consumer of dist/rekha.cyr
-# must vendor, used or not. Through 0.4.3 this named nine and the umbrella
-# included nine; the bundle's whole stdlib appetite is `strlen` + `memcpy`,
-# so consumers were vendoring eight leaves of nothing (0.4.4).
+# What rekha's OWN builds need from the stdlib — `memcpy`, for the two WOFF modules — and,
+# since cyrius 6.6.18, nothing a consumer pays for.
+# ⭐ THE PUBLISHED SIDECAR IS EMPTY AS OF 1.0.0 (ADR 0010). From 6.6.18 `cyrius distlib` writes a
+# bundle's `.deps` from its compile-verify fixpoint ALONE — six targets, the bundle compiled with
+# exactly the leaves under test — and no longer unions in this array or the include scan of
+# src/lib.cyr (rekha's own filing, cyrius proposal 2026-09-16, shipped as option 2). The base
+# modules have called nothing in `lib/string.cyr` since 0.5.0 took `strlen` out with
+# `rekha_err_print_name`, so the fixpoint proves NO leaf and dist/rekha.deps is not written at all;
+# dist/rekha-woff.deps is `string` (woff.cyr / woff2.cyr call memcpy) + `sankoch`, and the WOFF
+# bundle opens with those two as a compile-verified requires block.
+# History, kept because CI's leaf pin cites it: through 0.4.3 this array and the umbrella named
+# nine leaves and the sidecar said nine; 0.4.4 cut it to `string` + `alloc`, 0.4.5 to `string`
+# (cyrius 6.6.6 made lib/string.cyr include alloc itself), and from 0.5.0 to 0.9.0 that `string`
+# was the union's doing — a leaf every consumer vendored for nothing.
 #
-# The published sidecar is ONE leaf as of 0.4.5 — `string`. It read `string` +
-# `alloc` through 0.4.4 because cyrius 6.6.4's own `lib/string.cyr` called
-# `alloc()` (strdup/strndup) while declaring no include for it, so distlib's
-# compile-verify had to re-add the leaf. 6.6.6 makes that file self-sufficient,
-# so alloc arrives TRANSITIVELY and stops being a name the consumer resolves.
-# ⛔ That ties the sidecar to the toolchain: below 6.6.6, vendoring only `string`
-# earns `warning: undefined function 'alloc'` and a trap at the first strdup.
+# rekha's own harness wants eight more (fmt_int_fd, arena_*, str_same, assert_*, bench_*) —
+# declared in programs/prelude.cyr. An include resolves from vendored lib/ first and from the
+# pinned toolchain snapshot otherwise, the path programs/woff_test.cyr has always used for
+# sync + sankoch (lib/ has never held either).
 #
-# rekha's own harness DOES want the other eight (fmt_int_fd, arena_*,
-# str_same, assert_*, bench_*) — declared in programs/prelude.cyr, one hop
-# outside the scan. Dropping them here costs the harness nothing: an include
-# resolves from vendored lib/ first and from the pinned toolchain snapshot
-# otherwise, which is the same path programs/woff_test.cyr has always used
-# for sync + sankoch (lib/ has never held either). Measured in 0.4.4 against
-# a sadish sidecar trimmed to string+alloc: lib/ falls to 8 files and all 24
-# suites still build and pass.
-#
-# sankoch is deliberately NOT here either: declaring it would union it into
-# dist/rekha.deps and make every consumer of the base bundle pull it. WOFF 1.0
-# (src/woff.cyr, [lib.woff]) resolves `sync` + `sankoch` from the toolchain pin
-# in its own test. WOFF2's Brotli decoder, which rekha filed for, SHIPPED in sankoch 2.8.0 — the
-# release the 6.6.6 stdlib snapshot carries: `brotli_decompress` / `brotli_decompress_capped`, and
-# a `[lib.woff]` profile that is `[lib.zlib]` PLUS Brotli so one bundle covers WOFF 1.0 and WOFF2
-# (sankoch ADR 0001-brotli-decoder-placement.md; rekha's proposal is archived). src/woff2.cyr has
-# consumed it since 0.4.6 — through `[lib.woff]`, never through this array, which is only what a
-# consumer of `dist/rekha.cyr` must vendor.
+# sankoch is deliberately NOT here: rekha's base build never calls it. WOFF 1.0 and WOFF2
+# (src/woff.cyr, src/woff2.cyr, [lib.woff]) resolve `sync` + `sankoch` from the toolchain pin in
+# their own tests. The 6.6.20 snapshot carries sankoch 2.8.1 — a toolchain release with NO source
+# change from 2.8.0, whose `brotli_decompress_capped` and `[lib.woff]` profile (the zlib modules
+# PLUS Brotli, sankoch ADR 0001-brotli-decoder-placement.md) src/woff2.cyr has consumed since 0.4.6.
+# The published floor for dist/rekha-woff.cyr stays sankoch >= 2.8.0.
 stdlib = ["string"]
 
 # sadish — the rasterize target. rekha emits glyph-outline PATHS

@@ -1,8 +1,9 @@
 # rekha — the public API
 
-> **Frozen as of 0.9.0** (2026-09-21). Every name on this surface keeps its signature and its
-> documented answer through 1.x. Additions are additive; a removal, a rename or a change to a
-> documented answer is a major version.
+> **Frozen as of 0.9.0** (2026-09-21); **promised for the 1.x line at 1.0.0** (2026-10-13), with
+> `surface.txt` byte-identical between the two. Every name on this surface keeps its signature
+> and its documented answer through 1.x. Additions are additive; a removal, a rename or a change
+> to a documented answer is a major version.
 
 This is the reference for what a consumer of `dist/rekha.cyr` (or `dist/rekha-woff.cyr`, or the
 data module `fonts/face_data.cyr`) may call: **178 functions and 72 constants** in the bundle, 10
@@ -18,7 +19,9 @@ The bundle begins with a `private` declaration ([`src/freeze.cyr`](../../src/fre
 every function and constant not marked `public` in `src/` is unreachable from a consumer's code —
 the compile error is `'rekha_rd_u16' is private to its file`. Nothing has to be remembered:
 if it links, it is on this surface. That needs **cyrius 6.6.6 or later** (the visibility keywords
-are 6.5.0, their whole-file semantics 6.6.5), which the one-leaf sidecar already required.
+are 6.5.0, their whole-file semantics 6.6.5) — measured at 1.0.0 against a 6.6.6 consumer. The
+base bundle needs no stdlib leaf; the WOFF bundle opens with its two (`string`, `sankoch`)
+([ADR 0010](../adr/0010-the-zero-leaf-sidecar.md)).
 Enum constants (`REKHA_OK` …) are always reachable, by the language.
 
 | You are … | Read … |
@@ -111,3 +114,8 @@ sets, and what it allocates; an HTML comment carries the `src/` line the entry w
   FreeType is a bug, fixed in a patch release and recorded with the measurement.
 - **Consumers below cyrius 6.6.6** cannot compile the bundle (`private` / `public` are reserved
   words from 6.5.0). The sadish floor is 0.11.2.
+- **What a 1.x release may still change**: the stdlib leaves a bundle needs (pinned in CI, and a
+  change is a CHANGELOG line), the toolchain rekha itself builds with, and anything not on this
+  surface — internals, test seams, comments. Refuse-don't-guess holds for the line
+  ([ADR 0002](../adr/0002-refuse-dont-guess.md)): a lenient hinting mode could arrive only as a
+  new, opt-in call.

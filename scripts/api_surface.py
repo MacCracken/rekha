@@ -16,8 +16,9 @@ conventions AROUND that declaration, none of which the compiler checks:
      lines between them shares one block), and every `# @public` block governs a public item;
   3. src/freeze.cyr holds one code line, `private`; it is FIRST in both module lists of
      cyrius.cyml; src/lib.cyr does not include it; no other src module says `private`;
-  4. the dist bundles begin with `private` and carry exactly the src surface (`dist/rekha.cyr`
-     without the woff modules, `dist/rekha-woff.cyr` with them);
+  4. the dist bundles begin with `private` — after the requires block cyrius >= 6.6.18 writes,
+     which must be exactly the sidecar's leaves — and carry exactly the src surface
+     (`dist/rekha.cyr` without the woff modules, `dist/rekha-woff.cyr` with them);
   5. docs/api/*.md documents every surface name exactly once — a fn as a `### `name(` heading,
      a constant or enum member as a `### `NAME`` heading or the first cell of a table row — and
      documents nothing that is not on the surface;
@@ -281,9 +282,27 @@ def check_dist(surface, woff_only, problems):
             problems.append("%s is missing" % rel)
             continue
         lines = open(path, encoding="utf-8").read().split("\n")
-        first = next((l for l in lines if l != "" and not l.startswith("#")), None)
+        code = [l for l in lines if l != "" and not l.startswith("#")]
+        # cyrius >= 6.6.18 opens a bundle with its compile-verified requires block: one
+        # `include "lib/<leaf>.cyr"` per leaf of dist/<bundle>.deps (no sidecar, no block). Those
+        # lines bring in OTHER files, which `private` — a property of the file it is in — does not
+        # touch, so the rule is: exactly the sidecar's leaves, in its order, then `private`.
+        deps = path[: -len(".cyr")] + ".deps"
+        leaves = []
+        if os.path.exists(deps):
+            leaves = [l.strip() for l in open(deps, encoding="utf-8")
+                      if l.strip() and not l.startswith("#")]
+        want_req = ['include "lib/%s.cyr"' % leaf for leaf in leaves]
+        got_req = []
+        while code and code[0].startswith("include "):
+            got_req.append(code.pop(0))
+        if got_req != want_req:
+            problems.append("%s: requires block %r is not the sidecar's leaves %r"
+                            % (rel, got_req, want_req))
+        first = code[0] if code else None
         if first != "private":
-            problems.append("%s: first code line must be `private` (is %r)" % (rel, first))
+            problems.append("%s: first code line after the requires block must be `private` (is %r)"
+                            % (rel, first))
         want = set(it.bare() for it in surface if it.module != "face_data" and it.module not in exclude)
         items, _ = scan(path, [], want_governance=False)
         got = set(it.bare() for it in items if it.public and it.kind != "enum")

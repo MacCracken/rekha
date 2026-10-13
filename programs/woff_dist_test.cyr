@@ -9,10 +9,11 @@
 # zlib_compress and opens it through the bundle's public API, and measures what that open
 # allocates.
 #
-# Since 0.4.4 the leaf list below is dist/rekha-woff.deps, by hand, instead of all nine leaves,
-# so the file documents the chain a WOFF consumer actually compiles. 0.4.5 dropped
-# `include "lib/alloc.cyr"` with the 6.6.6 pin — that toolchain's lib/string.cyr includes alloc
-# itself, so it left the sidecar. It does NOT enforce it:
+# The leaf list below is dist/rekha-woff.deps, by hand — `string` + `sankoch` — so the file
+# documents the chain a WOFF consumer actually compiles. Since cyrius 6.6.18 the bundle also
+# opens with those two as its own compile-verified requires block, so a consumer that includes
+# only sadish and the bundle compiles too (measured at 1.0.0 on a cyrius 6.6.6 consumer); the
+# lines stay here as the documentation. It does NOT enforce it:
 # cyrius auto-prepends every resolved leaf inside rekha's tree, so the suite builds whichever
 # lines are here. Sufficiency is distlib's compile-verify pass (`--check`, gated in CI).
 #

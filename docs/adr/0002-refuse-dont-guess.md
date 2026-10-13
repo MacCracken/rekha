@@ -2,6 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-09-21 (the policy is 0.3.x; measured at 0.8.2; recorded at 0.9.0)
+**Confirmed**: 2026-10-13, for 1.0.0 — the decision the roadmap required before the major line.
 
 ## Context
 
@@ -33,6 +34,10 @@ and unhinted, never left partially hinted (`src/hint.cyr:25-27`, `rekha_hint_gly
   through `rekha_hint_error` (CHANGELOG 0.8.2). The roadmap's "revisit if a real face trips it"
   trigger fired at 0.8.2 and the policy was kept; the alternative — FreeType's default-mode
   fallbacks in the glyph range only — is named in the roadmap for a consumer to ask for.
+- **Carried into 1.x (decided at 1.0.0)** — `rekha_hint_glyph` keeps refusing; changing that
+  answer is a 2.0 change under the stability promise (`docs/api/README.md`). FreeType's
+  default-mode fallbacks remain available to 1.x **only as an opt-in** — a new public call
+  switching a context into that mode is additive, and the default answer does not move.
 - **Neutral** — what is *skipped* rather than refused is the spec's own tolerance: an unknown
   GPOS lookup type, an MVAR tag with no reader, a broken `cmap` record ranked out.
 

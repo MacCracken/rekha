@@ -1,14 +1,17 @@
 # Contributing to rekha
 
 rekha is the AGNOS scalable-typography library: pure Cyrius, TrueType / OpenType in, sadish
-paths out. Its API is **frozen** since 0.9.0 ([`docs/api/`](docs/api/README.md)); read the
-promise before touching anything a consumer can call.
+paths out. Its API is **frozen** since 0.9.0 and promised for 1.x since 1.0.0
+([`docs/api/`](docs/api/README.md)); read the promise before touching anything a consumer can
+call. In 1.x a change to the surface is an ADDITION, never anything else.
 
 ## Toolchain
 
-- cyrius **6.6.6**, pinned in `cyrius.cyml` (`[package] cyrius`) — the version the sidecar and
-  the visibility keywords depend on ([ADR 0003](docs/adr/0003-the-one-leaf-sidecar.md),
-  [ADR 0009](docs/adr/0009-the-freeze.md)). `cyrius --version` first.
+- cyrius **6.6.20**, pinned in `cyrius.cyml` (`[package] cyrius`); consumers need 6.6.6+ for the
+  visibility keywords ([ADR 0009](docs/adr/0009-the-freeze.md)), and the sidecars are what
+  6.6.18's compile-verify proves ([ADR 0010](docs/adr/0010-the-zero-leaf-sidecar.md)).
+  `cyrius --version` first. A pin move updates `scripts/ci-install-cyrius.sh`'s hashes in the
+  same commit.
 - sadish at the tag `[deps.sadish]` pins (0.11.2); `cyrius deps` vendors it into `lib/`.
 - python3 for the scripts under `scripts/` (no third-party modules); the hinting oracles need
   the host's `libfreetype` **2.14.x** — CI's is 2.13.2, so those never run in CI.
@@ -36,14 +39,15 @@ after building, and regenerate the lock only through `rm -rf lib && cyrius deps`
    "out of scope", …) fail unless the line carries a tracking pointer (`docs/…`, `CHANGELOG`,
    the roadmap, a `vX.Y`).
 3. Formatting: `cyrius fmt <file>` **in place**, then `git diff --exit-code`. ⛔ `cyrius fmt
-   --check` is a false negative on 6.6.6; do not gate on its exit code.
+   --check` was a false negative on 6.6.6; do not gate on its exit code.
 4. `cyrius vet programs/smoke.cyr`.
 5. `cyrius distlib --check` — `dist/` matches `src/`; regenerate with `cyrius distlib --all`
    (a bare `distlib` leaves the WOFF profile stale) and commit `dist/`.
 6. **The freeze**: `python3 scripts/api_surface.py --check`, then a probe that includes each
    bundle and names three internals must fail to build with `is private to its file`.
-7. The published sidecars are pinned: `dist/rekha.deps` is `string`, `dist/rekha-woff.deps` is
-   `string` + `sankoch`. Growing either is a release decision with a CHANGELOG line.
+7. The published sidecars are pinned: there is no `dist/rekha.deps` (the base bundle needs no
+   leaf), and `dist/rekha-woff.deps` is `string` + `sankoch`. Growing either is a release
+   decision with a CHANGELOG line.
 8. The generated modules match a fresh regeneration: `fonts/face_data.cyr`
    (`scripts/face2cyr.py`), the vector modules under `programs/`.
 9. Build and run every suite, both DCE modes; ELF checks; cross-target link checks
@@ -61,7 +65,8 @@ after building, and regenerate the lock only through `rm -rf lib && cyrius deps`
 - **Allocate through the seam only** — `sd_alloc`, never the stdlib — and check every status
   ([ADR 0001](docs/adr/0001-the-sadish-seam-and-sd-alloc.md)). Readers allocate 0 B.
 - **No syscall in library code**, no stdlib include outside `src/lib.cyr`
-  ([ADR 0003](docs/adr/0003-the-one-leaf-sidecar.md)).
+  ([ADR 0003](docs/adr/0003-the-one-leaf-sidecar.md)), and no stdlib call in a base module —
+  the first one would give `dist/rekha.cyr` a sidecar again ([ADR 0010](docs/adr/0010-the-zero-leaf-sidecar.md)).
 - **Never paste FreeType's text.** Cite `ref2143/<file>:<line>` in a comment; write the rule in
   your own words. The reference sources are fetched per session, never committed.
 - **Cyrius as rekha writes it**: `0 - x`, never `-x`; `>>` is logical, use `sd_asr` on anything

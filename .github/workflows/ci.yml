@@ -92,6 +92,9 @@ jobs:
         # so only tracked source can dirty the tree here.
         # ⚠ rekha's own files do NOT drift — measured, 0 of 33 in src/ + programs/ under the 6.6.6
         # formatter, and `--check` agrees on all 33. This is the gate being repaired, not the tree.
+        # Re-measured at the 6.6.20 pin (1.0.0): `--check` exits 1 on a deliberately mis-indented
+        # copy of src/error.cyr and agrees with sadish's file, so the false negative does not
+        # reproduce there. The in-place form stays: it cannot silently agree, on any toolchain.
         run: |
           for f in src/*.cyr programs/*.cyr; do
             [ -e "$f" ] || continue
@@ -163,34 +166,32 @@ jobs:
               echo "$bundle: the public probe builds"
             fi
           }
-          probe dist/rekha.cyr lib/string.cyr lib/sadish.cyr
+          # The consumer's chain: dist/rekha.deps is empty (1.0.0), so the base bundle takes sadish
+          # alone; the WOFF bundle's requires block brings string + sankoch, sync is sankoch's.
+          probe dist/rekha.cyr lib/sadish.cyr
           probe dist/rekha-woff.cyr lib/string.cyr lib/sadish.cyr lib/sync.cyr lib/sankoch.cyr
           git checkout -- cyrius.lock
           exit $fail
 
       - name: Pin the published leaf requirements (dist/*.deps)
         # `--check` above only proves the sidecar matches src/ — it passes just as happily on a
-        # sidecar that has GROWN. Every leaf named in dist/rekha.deps is one each consumer must
-        # vendor, and the way it grows is quiet: one `include "lib/fmt.cyr"` added to src/lib.cyr
-        # for convenience (distlib scans that exact file and unions `[deps] stdlib`), or a leaf
-        # added back to that array. rekha 0.4.3 shipped nine leaves for a bundle whose entire
-        # stdlib appetite is strlen + memcpy; 0.4.4 cut it to two and 0.4.5 to ONE.
-        # ⚠ `alloc` LEFT this list in 0.4.5 and the BUNDLE did not change — the toolchain did.
-        # Through 6.6.4 `lib/string.cyr` called alloc() (strdup/strndup) and declared no include for
-        # it, so distlib's compile-verify had to re-add the leaf; 6.6.6 makes that file self-sufficient
-        # (`include "lib/alloc.cyr"`, cyrius CHANGELOG [6.6.6]), so alloc now arrives TRANSITIVELY
-        # with string and is no longer a leaf the consumer has to name. It is still linked, and
-        # nothing about what the bundle CALLS moved.
-        # ⛔ This makes the sidecar toolchain-dependent: a consumer BELOW 6.6.6 that vendors only
-        # `string` gets `warning: undefined function 'alloc'`, and a strdup/strndup call traps (SIGILL).
-        # Consumers of dist/rekha.cyr 0.4.5 and up must be on 6.6.6 or later — rekha's own pin.
+        # sidecar that has GROWN. Every leaf named in a dist/*.deps is one each consumer must
+        # vendor. rekha 0.4.3 shipped nine leaves for a bundle whose entire stdlib appetite was
+        # strlen + memcpy; 0.4.4 cut it to two, 0.4.5 to ONE (`string`).
+        # ⭐ 1.0.0: the base sidecar is EMPTY and `distlib` does not write dist/rekha.deps at all.
+        # From cyrius 6.6.18 a sidecar is the compile-verify fixpoint ALONE (six targets) — no
+        # longer the include scan of src/lib.cyr unioned with `[deps] stdlib` — and the base modules
+        # have called nothing in the stdlib since 0.5.0 removed the last strlen, so from 0.5.0 to
+        # 0.9.0 `string` was the union's doing (ADR 0010). The WOFF modules call memcpy, so
+        # dist/rekha-woff.deps is `string` + `sankoch`, also the bundle's own requires block.
         # CHANGING THIS LIST IS A DELIBERATE ACT — a consumer-visible change that belongs in its
         # own release with a CHANGELOG line, not a drive-by. Update it here when you mean it.
         run: |
-          expect_base="string"
+          expect_base=""
           expect_woff="string sankoch"
-          got_base="$(grep -v '^#' dist/rekha.deps | tr -s '\n' ' ' | sed 's/ *$//')"
-          got_woff="$(grep -v '^#' dist/rekha-woff.deps | tr -s '\n' ' ' | sed 's/ *$//')"
+          leaves() { [ -e "$1" ] || return 0; grep -v '^#' "$1" | tr -s '\n' ' ' | sed 's/ *$//'; }
+          got_base="$(leaves dist/rekha.deps)"
+          got_woff="$(leaves dist/rekha-woff.deps)"
           rc=0
           if [ "$got_base" != "$expect_base" ]; then
             echo "ERROR: dist/rekha.deps changed: expected [$expect_base], got [$got_base]"
@@ -201,7 +202,7 @@ jobs:
             rc=1
           fi
           if [ "$rc" -ne 0 ]; then
-            echo "A consumer of dist/rekha.cyr must vendor every leaf listed there."
+            echo "A consumer of a bundle must vendor every leaf listed in its sidecar."
             echo "If the change is intended, update the expected list in this step and say so in CHANGELOG.md."
             exit 1
           fi
@@ -285,8 +286,7 @@ jobs:
         # note in cyrius.cyml. So every build log is grepped for `warning`, `undefined function` and
         # `refusing to emit`, under BOTH CYRIUS_DCE=0 and 1, and every binary, smoke included,
         # must run to rc 0. The log goes to a file so the grep cannot mask the build rc.
-        # ⚠ `cyrius coverage` is NOT a gate here: it builds its corpus from tests/**/*.tcyr only
-        # and is blind to programs/, so it reports ~0% for a fully exercised API. The gates are
+        # ⚠ `cyrius coverage` is NOT a gate here — see the visibility step below. The gates are
         # these RUN suites and the hostile corpus.
         run: |
           mkdir -p build
@@ -348,6 +348,16 @@ jobs:
             echo "  ok: $(wc -c < "build/smoke-$tgt") bytes"
           done
           [ $fail -eq 0 ] || { echo "cross-target link-check failed"; exit 1; }
+
+      - name: Coverage (references — visibility only, never gates)
+        # cyrius 6.6.17 (rekha's filing, P5-A) lets `coverage` take the RUN programs as its corpus;
+        # before it, the corpus was tests/**/*.tcyr only and rekha read ~0%. This is TEXT coverage:
+        # a function counts if a corpus file names it, so an internal reached only through another
+        # function does not. Measured at 1.0.0: 202 of 465 functions, and 176 of the 178 public
+        # ones (rekha_hint_error_clear and rekha_hvar_lsb_delta run only inside other public calls).
+        continue-on-error: true
+        timeout-minutes: 5
+        run: cyrius coverage --programs 'programs/*_test.cyr'
 
       - name: Bench (hot path — visibility only, never gates)
         # Shared runners are noisy: numbers are printed, never thresholded. Allocation cost is

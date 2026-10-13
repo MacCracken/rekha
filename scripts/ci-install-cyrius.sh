@@ -44,13 +44,19 @@ esac
 tarball="cyrius-${version}-${arch}-${os}.tar.gz"
 
 # ── Committed hashes ────────────────────────────────────────────────────────────────────────────
+# 6.6.20, measured 2026-10-13 (rekha 1.0.0), the same three ways as 6.6.6 below:
+#   install.sh  = raw.githubusercontent.com/MacCracken/cyrius/6.6.20/scripts/install.sh, byte-equal
+#                 to `git show 6.6.20:scripts/install.sh` in a local cyrius clone.
+#   tarballs    = releases/download/6.6.20/<tarball>; each equals its published .sha256 sidecar and
+#                 its line in SHA256SUMS, whose Ed25519 signature `cyrsign verify` accepted against
+#                 keys/cyrius-release.ed25519.pub at the 6.6.20 tag (adbde6b1…4008, unchanged).
 # 6.6.6, measured 2026-09-20 (rekha 0.4.5):
 #   install.sh  = raw.githubusercontent.com/MacCracken/cyrius/6.6.6/scripts/install.sh, byte-equal
 #                 to `git show 6.6.6:scripts/install.sh` in a local cyrius clone.
 #   tarball     = releases/download/6.6.6/<tarball>; equals the published .sha256 sidecar and its
 #                 line in SHA256SUMS, whose Ed25519 signature `cyrsign verify` accepted against
 #                 keys/cyrius-release.ed25519.pub (adbde6b1…4008).
-# 6.6.4 entries are kept so a bisect or a revert to the previous pin still installs.
+# The 6.6.6 and 6.6.4 entries are kept so a bisect or a revert to an earlier pin still installs.
 # ⛔ CVE-44 (fixed in 6.6.6's own installer): through 6.6.5 install.sh staged the tarball and its
 # signature inputs at FIXED /tmp names, so a local user could swap them between download and verify.
 # This script's CYRIUS_INSTALL_TARBALL path never depended on that staging — it hands install.sh a
@@ -58,6 +64,7 @@ tarball="cyrius-${version}-${arch}-${os}.tar.gz"
 # not to pin below 6.6.6.
 installer_sha256() {
     case "$1" in
+        6.6.20) echo 099f628e898f8bde1c0fde4660b7fcaf54fbd5e5f501a2750b95e397b4211b61 ;;
         6.6.6) echo a468278154c7a77ef17d74277a6ec3402b4213373b383de89ee4803d144cb75a ;;
         6.6.4) echo 4deede3d13651f1d71bd9f0ccd21f4fd71ec1cd99276b3cb22aa5c9acbc9761a ;;
         *) return 1 ;;
@@ -65,6 +72,8 @@ installer_sha256() {
 }
 tarball_sha256() {
     case "$1" in
+        cyrius-6.6.20-x86_64-linux.tar.gz) echo 38814a816a596d7b113fa53fde3c6fd439ce424fbd9139e6128bb9a1d04d265e ;;
+        cyrius-6.6.20-aarch64-linux.tar.gz) echo 2216cb1fb26ca9c49c3db12cc545e18b6cf9e0dacd4b3fe2451b622bdab8d46b ;;
         cyrius-6.6.6-x86_64-linux.tar.gz) echo 1866a671924b29b90e3e13333cf613cff55a107390ff5686699e1dc63e593e36 ;;
         cyrius-6.6.6-aarch64-linux.tar.gz) echo f00e13294f0a65d3d32db6bfa210543696dc4c3b466f124aa7866f25d965beec ;;
         cyrius-6.6.4-x86_64-linux.tar.gz) echo c2a540c9adc3c1d6a6096a7ee869b9268ce99a5108ddd644e0be8b1d2d292fab ;;

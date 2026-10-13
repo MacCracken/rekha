@@ -14,23 +14,18 @@
 # in individual src/*.cyr files.
 
 # ================================================================
-# Standard library — ONLY what the BUNDLED modules call.
-# ⛔ EVERY INCLUDE HERE IS A TAX ON EVERY CONSUMER. `cyrius distlib` scans
-# this exact file (_distlib_scan_umbrella hardcodes "src/lib.cyr") and unions
-# the result with `[deps] stdlib` to produce dist/rekha.deps — the leaves a
-# consumer of dist/rekha.cyr must vendor. src/ calls `strlen` and `memcpy`
-# and nothing else from the stdlib, so `string` is the whole list — and as of
-# 0.4.5 the published sidecar says exactly that, one leaf. (It read `string` +
-# `alloc` through 0.4.4 because cyrius 6.6.4's lib/string.cyr called `alloc`
-# and declared no include for it, so distlib's compile-verify re-added the
-# leaf. 6.6.6 makes that file self-sufficient; alloc is still linked, it just
-# arrives with `string` instead of being named. ⛔ A consumer below 6.6.6 that
-# vendors only `string` gets `warning: undefined function 'alloc'`.)
+# Standard library — ONLY what rekha's own modules call.
+# The base modules call NOTHING here since 0.5.0 (the last `strlen` left with
+# rekha_err_print_name); `memcpy` is the WOFF modules' (src/woff.cyr,
+# src/woff2.cyr), which follow this chain in their tests. Since cyrius 6.6.18
+# this include no longer reaches a consumer: distlib writes each `.deps`
+# sidecar from its compile-verify fixpoint alone, so dist/rekha.deps is not
+# written at all (1.0.0, ADR 0010) and dist/rekha-woff.deps names `string` +
+# `sankoch` because the WOFF modules need them, not because this line says so.
 #
 # rekha's own harness wants fmt/alloc/vec/str/io/syscalls/assert/bench —
-# those are in programs/prelude.cyr, one hop outside the scan. Adding one
-# back HERE silently re-taxes every consumer; .github/workflows/ci.yml
-# pins the expected sidecar so that cannot land unnoticed.
+# those are in programs/prelude.cyr. .github/workflows/ci.yml pins both
+# published sidecars, so a leaf a bundle starts to need cannot land unnoticed.
 # ================================================================
 include "lib/string.cyr"
 

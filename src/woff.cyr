@@ -8,8 +8,8 @@
 # in `[lib].modules`: `dist/rekha.cyr` never requires sankoch. A WOFF consumer takes
 # `dist/rekha-woff.cyr` (`[lib.woff]` — rekha's modules plus this one) and brings sankoch itself —
 # the stdlib `sankoch` leaf (which needs `sync` in scope), or a per-codec profile bundle — those
-# LINK as of sankoch 2.8.0, the release this pin's stdlib snapshot carries, and rekha's filing
-# against them is archived. In-tree it follows `src/lib.cyr`, `lib/sync.cyr` and `lib/sankoch.cyr`.
+# LINK as of sankoch 2.8.0 (the 6.6.20 snapshot carries 2.8.1, the same source), and rekha's
+# filing against them is archived. In-tree it follows `src/lib.cyr`, `lib/sync.cyr` and `lib/sankoch.cyr`.
 #
 # WOFFHeader (44 bytes, big-endian):
 #   +0 signature u32 'wOFF' · +4 flavor u32 (the SFNT's sfntVersion) · +8 length u32 (whole file)

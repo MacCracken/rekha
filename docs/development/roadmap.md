@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-09-21, at **0.9.0**.
+> **Last updated:** 2026-10-13, at **1.0.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -9,31 +9,22 @@
 >
 > Every item below carries a `path:line` or a grep, because an item nobody can check is a wish.
 
-## What 1.0.0 means here
+## What 1.x means here
 
 rekha's promise is **"what the glyph is"**: font bytes in, outlines and the numbers that place them
-out, for `sadish` to fill. 1.0.0 is that promise **complete, correct and frozen** — not a wider
-surface, but no remaining place where a consumer has to reach around rekha to a byte rekha already
-holds, and no published name that does nothing.
+out, for `sadish` to fill. **1.0.0 shipped it complete, correct and frozen** (CHANGELOG 1.0.0): the
+surface frozen at 0.9.0 was consumed — crab and dhancha build against the `private` 0.9.0 bundle,
+and crab's QEMU face test loaded `/fonts/default.ttf` through it — and held across a release that
+changed nothing on it (`git diff 0.9.0 -- docs/api/surface.txt` is empty over a cyrius 6.6.6 →
+6.6.20 move); refuse-don't-guess was confirmed for the line (ADR 0002).
 
-⭐ **0.5.x, 0.6.x, 0.7.x, 0.8.x and 0.9.0 are all closed.** 0.5.x was the conformance milestone that opened
-this file; 0.6.x was "the tables rekha transports and never reads", and there are none left —
-rekha resolves **twenty-one**, and **all 28 of MVAR's tags** land on the field the spec names;
-0.7.x gave the published error vocabulary a producer, and the ambiguity turned out to sit one level
-below where it was being looked for — in `rekha_glyf_span`, whose 0 meant both "this glyph is a
-space" and "loca is lying"; 0.8.x is TrueType hinting, measured against FreeType itself. See
-CHANGELOG 0.5.0 through 0.8.2; 0.9.0 is the freeze — `public fn` / `public var` in `src/`, a
-`private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs,
-`SECURITY.md` and `CONTRIBUTING.md` (CHANGELOG 0.9.0, ADR 0009). What remains is **1.0.0**.
+**Through 1.x every change to the surface is an ADDITION** — a new call, a new constant, a new
+reader — and no documented answer moves (`docs/api/README.md`, *Stability promise*). So nothing
+below is scheduled into a numbered milestone: each item is additive, and any of them becomes the
+next minor release when a consumer asks for it or the evidence for it changes.
 
-| milestone | what it closes |
-|---|---|
-| **0.8.x — hinting** | **Closed at 0.8.2.** The last *rendering* gap: a hinted outline, bit-exact with FreeType 2.14.3 on every face measured. The divergences are pinned below. |
-| **0.9.0 — the freeze** | **Closed at 0.9.0.** 178 public functions and 72 constants declared with the keyword, documented in `docs/api/`, and unreachable otherwise: `dist/rekha.cyr` begins with `private`. |
-| **1.0.0** | **Next.** Lock it in — see below. |
-
-Everything else is **pinned** (real, evidenced, unscheduled), **blocked on a sibling**, or an
-explicit **non-goal**.
+Everything below is **pinned** (real, evidenced, unscheduled), **toolchain follow-up** (unblocked
+by the 6.6.20 pin), **blocked on a sibling**, or an explicit **non-goal**.
 
 ---
 
@@ -58,7 +49,7 @@ and 50 more at 9 / 11 / 13 / 20 ppem, 2,812,516 loads — 0 differ** (`scripts/h
 `REKHA_ERR_UNSUPPORTED` (`grep -c UNSUPPORTED src/hint.cyr` → the header's one mention). What is
 left of hinting is the pinned table below — each row a stated divergence with its site.
 
-### Pinned by 0.8.x, and not blocking 1.0.0
+### Pinned by 0.8.x, and carried into 1.x
 
 Each is a stated divergence from FreeType 2.14.3, said at its site and in CHANGELOG 0.8.1 / 0.8.2.
 The first row's "revisit" trigger has fired and the decision is recorded there.
@@ -72,8 +63,10 @@ The first row's "revisit" trigger has fired and the decision is recorded there.
   13 / 20 ppem are glyphs FreeType's default mode hints and its pedantic mode fails — all `RCVT`
   past the table but five (`IP point` on LiberationMono's '♫', `stack underflow` on DejaVuSansM
   Bold's 'Д'); **AdwaitaMono-Regular refuses 2,624 of 8,818 glyphs at 9 of 25 ppems**, all
-  non-ASCII; no ASCII glyph on any face. **Decision, kept for 0.8.2**: refuse-don't-guess stands,
-  because the refused glyph is drawn unhinted and never wrong. **The alternative, named**: mirror
+  non-ASCII; no ASCII glyph on any face. **Decision, kept for 0.8.2 and confirmed for 1.x at
+  1.0.0** (ADR 0002): refuse-don't-guess stands, because the refused glyph is drawn unhinted and
+  never wrong — and in 1.x the alternative can arrive only as an opt-in call, never by changing
+  what `rekha_hint_glyph` answers. **The alternative, named**: mirror
   FreeType's default-mode fallbacks in the GLYPH RANGE only (`HC_RANGE` 4) — `RCVT` past the table
   reads 0 (ref2143/ttinterp.c:2861-2868), a short stack reads zeros, a bad point is skipped — so a
   refused glyph hints as FreeType hints it. A consumer who wants AdwaitaMono's arrows fitted at
@@ -175,35 +168,10 @@ one has ever been named or scheduled.
 
 ---
 
-## 1.0.0 — lock it in
-
-The freeze shipped at 0.9.0 (CHANGELOG 0.9.0; `docs/adr/0009-the-freeze.md`). 1.0.0 is the same
-surface, promised for a major line, once the freeze has been *consumed*: the surface is only
-proven frozen by a release that changes nothing on it.
-
-- **A consumer on 0.9.x.** crab and dhancha pin tag 0.3.10 (`crab/cyrius.cyml`,
-  `dhancha/cyrius.cyml`, the `[deps.rekha]` blocks), nine minor lines behind, and agnos takes
-  `fonts/face_data.cyr` by path. A consumer that vendors `dist/rekha.cyr` at a 0.9.x tag and
-  builds against the private bundle on cyrius 6.6.6 is the evidence the promise can be kept —
-  the compile error a consumer's internal reach produces is the test. Until one has, 1.0.0 is a
-  promise about a boundary nobody has leaned on.
-- **One release with no surface change.** `docs/api/surface.txt` identical between 0.9.0 and
-  the release before 1.0.0 (`git diff <tag>..HEAD -- docs/api/surface.txt` empty), with any
-  fixes recorded as measurements, is the proof the freeze holds under maintenance.
-- **The refuse-don't-guess decision stands or is flipped before, not after.** The 0.8.2 trigger
-  fired (AdwaitaMono, 2,624 of 8,818 glyphs at 9 of 25 ppems); the alternative — FreeType's
-  default-mode fallbacks in the glyph range only — is named in the pinned table and in ADR 0002.
-  Flipping it changes a documented answer (`rekha_hint_glyph` hints where it now refuses), which
-  1.x forbids, so the decision is a 0.9.x one.
-- **Nothing else.** The pinned table below is unchanged by the freeze and none of it blocks
-  1.0.0: every row is additive.
-
----
-
 ## Pinned — real, evidenced, unscheduled
 
-Each is genuine deferred work with a pointer. None blocks 1.0.0 on its own; any of them could join
-a milestone when a consumer asks.
+Each is genuine deferred work with a pointer, and each is additive — a new call or a new reader
+beside the frozen ones. Any of them could be the next minor release when a consumer asks.
 
 | item | evidence | note |
 |---|---|---|
@@ -215,7 +183,6 @@ a milestone when a consumer asks.
 | **Load caps are compile-time and silent** | `src/glyf.cyr:118-122` | 4,096 points / 128 contours / depth 5 / 64 loads / 16,384 points. A trip yields an EMPTY glyph with no way for the consumer to raise the ceiling or learn it was hit — which is `RekhaErr` again. |
 | **WOFF / WOFF2 metadata and private blocks discarded** | `src/woff.cyr:36`; `src/woff2.cyr:46` | Bounds-checked, then dropped. Consistent with rekha's scope, but a named W3C container feature no accessor reaches. |
 | **WOFF2 collections re-inflate per face** | `src/woff2.cyr:1565` (the warning is at the call site) | Opening every face of an *n*-face collection rebuilds the file *n* times, and `sd_alloc` has no free. The two-step escape hatch is public and documented; a cached handle would remove the trap. |
-| **`rekha_advance_width` and friends are horizontal-only by name** | `src/sfnt.cyr:422+` | Relevant only if the vertical-metrics item lands: the API shape would need a vertical twin. |
 | **`gvar` phantom-point advances are decoded and discarded by the O(1) reader** | `src/gvar.cyr:23-31`; `rekha_gvar_apply_n` (`:275`) lands them for the hinted loader, on a face without HVAR / VVAR only, FreeType's rule | A TrueType variable font with `gvar` and no HVAR varies its advances through the four phantom points per glyph. The hinted path carries them since 0.8.2 (`rekha_hint_advance_px`); honouring them in `rekha_advance_width` puts a full glyph decode behind an advance query measured at 47 ns, so the honest shape is a separate resolver, not a change to the O(1) reader. No hinted `gvar` face on the host measures it. |
 | **HVAR's rsb map is read past; its lsb map reaches one reader of two** | `src/hvar.cyr:37-39`, `rekha_hvar_lsb_delta` (`:261-271`); `rekha_left_side_bearing` (`src/sfnt.cyr:677-703`) applies it, the hinted pp1 (`rekha_hint_hmetrics`, `src/hint.cyr:3601-3614`) does not | 0.8.2 added the lsb accessor and its delta. FreeType's TrueType driver never adjusts the lsb (ref2143/ttdriver.c:559), so the hinted outline's origin follows FreeType and the metric reader follows `rekha_advance_width`'s frozen semantics — on a variation instance with an lsb map the two differ by the delta (the 0.8.x pin above). No right-side-bearing accessor exists for the rsb map. |
 | **A vertical origin is not derived when a font states none** | `src/vert.cyr`, the header note | With no `VORG`, the convention is to derive one from the bounding box and the top side bearing. rekha answers 0 and says so through `rekha_vorg_present`, because a derived origin is a plausible wrong height for every glyph in a run. Wants a bbox accessor and a consumer that needs it. |
@@ -271,8 +238,16 @@ quietly become permanent.
   network — get per-rule refusals and a guard differential, but never a mutation sweep, and they
   reach a much deeper decode path (substream walks, triplet decoding, `loca` rebuild, checksum
   recomputation).
-- ⚠ **No coverage number exists at all** — see *Blocked on a sibling*.
-- ⚠ **WOFF2 CI sees only STORED Brotli blocks** — see *Blocked on a sibling*.
+- ⚠ **The coverage number is TEXT coverage.** cyrius 6.6.17 (rekha's filing) takes the RUN programs
+  as a corpus, and CI prints it as a visibility step: **202 of 465 functions** referenced by name,
+  and **176 of the 178 public ones** — `rekha_hint_error_clear` and `rekha_hvar_lsb_delta` run only
+  inside other public calls (`src/hint.cyr:876` and six more; `src/sfnt.cyr:712`), never by a
+  suite directly. An internal reached only through another function does not count, so it is a
+  floor, not a gate. EXECUTION coverage is cyrius 6.7.10 (P5-B) and needs a 6.7.x pin.
+- ⚠ **WOFF2 CI sees only STORED Brotli blocks** — see *Blocked on a sibling*; the issue file names
+  the alternative that would not wait (a committed reference-encoder fixture) as the
+  maintainer's call.
+- ⚠ **No harness runs under `poison_alloc` yet** — see *Toolchain follow-ups*.
 
 ---
 
@@ -282,13 +257,14 @@ The rule: a missing sibling capability gets a filed proposal plus a line here. N
 
 | waiting on | filing | status |
 |---|---|---|
-| **sankoch 2.8.1** — the Brotli **encoder**, so CI can build a genuinely compressed WOFF2 instead of a hand-emitted stored one | [`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md) | 🟡 open — sankoch is at **2.8.0**; its roadmap has the encoder next |
-| **cyrius** — a declarative channel for test-only stdlib leaves, so `dist/*.deps` stops depending on which file an `include` sits in | `cyrius/docs/development/proposals/2026-09-16-declare-test-only-stdlib-leaves-instead-of-hiding-them-from-the-umbrella-scan.md` | 🟡 open — did not ship in 6.6.6; the standing workaround is the hand-pinned expected-leaf list in CI |
-| **cyrius** — `coverage` should accept RUN programs as a corpus; it reads `tests/**/*.tcyr` only and reports ~0% for a fully exercised API | `cyrius/docs/development/proposals/2026-09-20-coverage-should-accept-run-programs-as-a-corpus.md` | 🟡 open — **filed 2026-09-20**, in this cleanup; the gap had lived only in a CI comment |
-| **cyrius** — `fuzz --poison` should follow a custom allocator seam; its redzones live in the freelist allocator and rekha draws from `sd_alloc`, so it cannot instrument rekha at all | `cyrius/docs/development/proposals/2026-09-20-fuzz-poison-should-follow-a-custom-allocator-seam.md` | 🟡 open — **filed 2026-09-20**, in this cleanup; `programs/hostile_test.cyr` is rekha's ~2,100-line substitute |
+| **sankoch 2.8.4** — the Brotli **encoder** (renumbered from 2.8.1, which shipped as a toolchain release with no source change), and a **cyrius pin whose stdlib folds it**, so CI can build a genuinely compressed WOFF2 instead of a hand-emitted stored one | [`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md) | 🟡 open — reviewed at 1.0.0; sankoch is at **2.8.3**, the 6.6.20 stdlib carries **2.8.1**, and 2.8.3 reached the stdlib only through cyrius 6.7.6's refold |
 
 ⭐ **Closed, for the record:** both earlier rekha filings against sankoch shipped in **2.8.0** — the
-WOFF2 Brotli decoder, and the profile bundles that could not link. Both are archived upstream.
+WOFF2 Brotli decoder, and the profile bundles that could not link. All three rekha filings against
+cyrius shipped and are archived upstream: the test-only-leaf channel as **6.6.18 option 2** (the
+sidecar is the compile-verify fixpoint alone — adopted at 1.0.0, ADR 0010), RUN programs as a
+coverage corpus in **6.6.17** (adopted at 1.0.0 as a CI visibility step), and `fuzz --poison`
+following a custom allocator seam in **6.6.18** (unblocked; see *Toolchain follow-ups*).
 
 ---
 
@@ -334,12 +310,13 @@ Additive, understood, and waiting on a consumer to ask.
 - A consumer hits one of the pinned items in a real font and can show it.
 - A consumer asks for FreeType's default-mode fallbacks in the glyph range — a control value past
   the `cvt ` read as 0, a short stack read as zeros, a bad point skipped — because a glyph rekha
-  draws unhinted (AdwaitaMono's arrows at 9 ppem) has to be fitted the way FreeType fits it.
+  draws unhinted (AdwaitaMono's arrows at 9 ppem) has to be fitted the way FreeType fits it. In
+  1.x that is a NEW opt-in call on the hinting context; `rekha_hint_glyph`'s default stays.
 - A hinted `hdmx` face or a hinted `gvar` face turns up in the wild: neither exists on the host, so
   the two pins on them were stated from the sources and a synthetic font, never measured on a
   real one.
 - A CVE or an audit finding lands against a format rekha parses.
-- sankoch ships **2.8.1**, or cyrius answers either open proposal.
+- sankoch ships **2.8.4** and a cyrius pin folds it into the stdlib rekha's tests include.
 - `sadish` grows paint capability that makes `COLR` v1 tractable.
 - A shaping library appears in the stack and needs something from rekha that is not here.
 
@@ -350,53 +327,36 @@ Additive, understood, and waiting on a consumer to ask.
 - **Open filings** → [`issues/`](issues/)
 - **The dependency floors and why** → [`../../README.md`](../../README.md), *Dependencies*
 
-## Recorded by cyrius 6.6.17 (2026-10-05) — for the next cyrius pin move
+## Toolchain follow-ups — unblocked by the cyrius 6.6.20 pin (1.0.0)
 
-⛔ **Nothing to do until cyrius 6.6.17 is tagged and out.** Docs-only note from the cyrius 6.6.17 lanes; each item
-is this repo's to adopt when it pins ≥ 6.6.17. Nothing here gates a cyrius release.
+The notes cyrius recorded here for "the next pin move" (6.6.17, 6.6.19, and the 2026-10-08 move from
+cyrius's roadmap) apply now. What 1.0.0 took and what it left:
 
-- **`cyrius coverage` can count the RUN programs from 6.6.17** (cyrius m7, P5-A): `[coverage] programs =
-  ["programs/*_test.cyr"]` in cyrius.cyml (or `cyrius coverage --programs <glob>`) adds them to the corpus,
-  and `--per-entry` names which program references which public fn. ⚠ TEXT coverage (references, as `.tcyr`
-  corpora get) — not execution coverage, which is cyrius P5-B (v6.7.x).
-  rekha filed P5; its CI comment ("`cyrius coverage` is NOT a gate here … blind to programs/") can be
-  revised once it pins ≥ 6.6.17.
-
-## Recorded by cyrius 6.6.19 (2026-10-06) — for the next cyrius pin move
-
-⛔ **Needs cyrius >= 6.6.19 — do not bump the pin until 6.6.19 is tagged and out.** Docs-only note from the cyrius
-6.6.19 lanes; each item is this repo's to adopt when it pins ≥ 6.6.19. Nothing here gates a cyrius release.
-
-- **`scripts/face2cyr.py` and the checked-in 1.65 MB `fonts/face_data.cyr` can retire; `[lib.face]` produces
-  `dist/rekha-face.cyr`** (cyrius P2, shipped in 6.6.19).
-  `[embed] NAME = "path"` in cyrius.cyml gives every compile `NAME()` (the file's bytes, NUL-terminated) and
-  `NAME_len()`, read from the file at build time — no generated `.cyr`, nothing to drift. Explicit entries only
-  (the `{dir, glob}` set form is refused by name). All embeds share cycc's 2 MiB string pool with the program's
-  own literals, and every binary of the project (test binaries too) carries every declared embed. Reference: the
-  cyrius guide's *Embedding data files: [embed]*, CHANGELOG [6.6.19] *Embed — P2*.
-  - Declare `[embed] REKHA_FACE = "fonts/<face>.ttf"` (410,820 B — fits the pool) and a profile
-    `[lib.face] embed = ["REKHA_FACE"]`: `cyrius distlib face` writes `dist/rekha-face.cyr`, and
-    `cyrius distlib --check` goes STALE when the .ttf changes. An embed-only profile (no `modules`) is legal; if
-    you keep accessor fns (chunked access, the FNV check), list their module under `[lib.face] modules` too and
-    they can call `REKHA_FACE()` / `REKHA_FACE_len()`.
-  - The face stays OUT of `dist/rekha.cyr`: a bundle carries only the embeds its `[lib] embed` / `[lib.P] embed`
-    names, and the base names none. ⚠ A plain `[embed]` entry IS in every compile of rekha's own project (each
-    test binary carries the 410 KB); if that cost matters, keep the face out of `[embed]` for the dev build and
-    produce the face bundle from a sub-project.
-  - Downstream: agnos switches its `modules` path from `fonts/face_data.cyr` to the face bundle.
-  - Stays yours: the pinned-FNV verify (no hash accessor is generated — a stale constant now fails loudly at run
-    time).
-
-## Moved from cyrius's roadmap (2026-10-08) — for the next cyrius pin move
-
-cyrius no longer carries this repo's follow-ups; the items below were moved here from its roadmap. Each
-applies from the cyrius version it names. Everything else that changes between this repo's pin and cyrius
-6.7.6 is in cyrius's `CHANGELOG.md` and `docs/development/ecosystem-migration.md`.
-
-- **(cyrius ≥ 6.6.18, P4)** a `dist/<pkg>.deps` sidecar names exactly what the compile-verify proves and every
-  bundle carries a compile-verified requires block, so `include "dist/<pkg>.cyr"` alone compiles —
-  `programs/prelude.cyr` and the CI sidecar pin can go.
-- **(cyrius ≥ 6.6.18, P6)** the *Blocked on a sibling* row (`fuzz --poison` should follow a custom allocator seam)
-  is unblocked: `cyrius fuzz --poison` reaches `alloc()`, arenas, `fl_alloc` and any `_a` API through
-  `poison_allocator()` (`lib/poison.cyr`, with `poison_alloc`), with leading and trailing redzones and an A/B
-  differential (`--poison=ab`); an overwrite stops the harness with exit 86. Route `sd_alloc` through it to adopt.
+- ✅ **Adopted — P4 (6.6.18): a sidecar names what the compile-verify proves, and a bundle carries
+  its requires block.** `dist/rekha.deps` is gone (the base bundle needs no leaf), the WOFF bundle
+  opens with `string` + `sankoch`, `scripts/api_surface.py` accepts exactly that block before
+  `private`, and CI's leaf pin reads base `[]` / WOFF `[string sankoch]` (ADR 0010). ⚠ The note
+  said *"`programs/prelude.cyr` and the CI sidecar pin can go"*. The pin STAYS — it is what makes
+  the fixpoint's answer a deliberate one, and a cyrius change could move it. The prelude's reason
+  (keep harness leaves out of the union) is gone; it remains as the harness's include list, and
+  folding it is cleanup, not a fix (`programs/prelude.cyr`'s header).
+- ✅ **Adopted — P5-A (6.6.17): `cyrius coverage --programs 'programs/*_test.cyr'`**, as a CI step that
+  prints and never gates (*Coverage*, above). The CI comment that called coverage blind is revised.
+- 🟡 **Open — P6 (6.6.18): `poison_alloc` through the `sd_alloc` seam.** `lib/poison.cyr` (vendored
+  since this pin, through `lib/alloc.cyr`) gives leading and trailing redzones and an A/B
+  differential; an overwrite stops the harness with exit 86. To adopt: install `poison_alloc` as
+  sadish's hook (`sd_alloc_set`) around `programs/hostile_test.cyr`'s mutation loop, or in a
+  `cyrius fuzz --poison` harness, and record what it finds beside the hand-built 4,096-byte
+  redzone differential it would complement.
+- 🟡 **Open — P2 (6.6.19): `[embed]` for the default face.** `[embed] REKHA_FACE = "fonts/<face>.ttf"`
+  and a `[lib.face]` profile would produce `dist/rekha-face.cyr` with no generated `.cyr` and no
+  `scripts/face2cyr.py`. ⛔ **In 1.x it can only be ADDED beside `fonts/face_data.cyr`**: that
+  path and its ten accessors are frozen surface (`docs/api/open.md`, *The embedded default face*;
+  agnos consumes it by path), so the generator and the 1.65 MB module stay through 1.x; a face
+  profile would re-export the same ten names from an accessor module listed under
+  `[lib.face] modules`. ⚠ A plain `[embed]` entry rides in EVERY binary of rekha's own project (the
+  410,820 B face in each test binary) and shares cycc's 2 MiB string pool; measure both first.
+- ⚠ **Beyond 6.6.20**: sankoch 2.8.3 and execution coverage (P5-B) are cyrius 6.7.x. A 6.7.x pin
+  move reads cyrius's `CHANGELOG.md` and its 6.7.x migration notes first. ⚠ sankoch's 2.8.3 notes
+  record that cyrius refuses an `[embed]` name any stdlib leaf already declares — rekha embeds
+  nothing today, so that applies only if P2 above lands.

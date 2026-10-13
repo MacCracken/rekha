@@ -1,6 +1,6 @@
 # 0003 — The one-leaf sidecar: stdlib includes live only in `src/lib.cyr`, and the bundle needs `string`
 
-**Status**: Accepted
+**Status**: Accepted; the sidecar half superseded by [0010](0010-the-zero-leaf-sidecar.md) (1.0.0) — the include rule stands
 **Date**: 2026-09-21 (decided 0.4.4 / 0.4.5; recorded at 0.9.0)
 
 ## Context
@@ -33,4 +33,6 @@ line (`.github/workflows/ci.yml`, "Pin the published leaf requirements").
 ## Alternatives considered
 
 - **Declare what the tests need**: taxes every consumer with eight leaves of nothing. Rejected.
-- **A test-only-leaf channel in cyrius**: does not exist; filed as blocked-on-a-sibling.
+- **A test-only-leaf channel in cyrius**: did not exist; filed as blocked-on-a-sibling. cyrius
+  6.6.18 answered it another way — the sidecar is the compile-verify fixpoint alone — and that
+  is ADR 0010.

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 0.9.0
+Version: 1.0.0
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -14,13 +14,14 @@ owns *what the glyph is* (SFNT tables → outlines), sadish owns *how it
 becomes pixels* (fill → coverage). rekha is pure CPU Cyrius: no GPU, no C
 shim, no external binaries.
 
-⭐ **The API is frozen (0.9.0).** [`docs/api/`](docs/api/README.md) is the reference — 178
-functions and 72 constants in the bundle, 10 in the data module, each with its signature,
-units, sentinel and allocation — and the boundary is the compiler's, not a comment's: the
-bundle begins with `private`, so a name that is not `public fn` in `src/` will not link from a
-consumer (`'rekha_rd_u16' is private to its file`). Through 1.x no documented name is removed
-or changed; additions are additive. Consumers need **cyrius 6.6.6+**. The decisions behind the
-shape are in [`docs/adr/`](docs/adr/README.md); the threat model in [`SECURITY.md`](SECURITY.md).
+⭐ **1.0.0 — the API is frozen (0.9.0) and promised for the 1.x line.**
+[`docs/api/`](docs/api/README.md) is the reference — 178 functions and 72 constants in the bundle,
+10 in the data module, each with its signature, units, sentinel and allocation — and the boundary
+is the compiler's, not a comment's: the bundle begins with `private`, so a name that is not
+`public fn` in `src/` will not link from a consumer (`'rekha_rd_u16' is private to its file`).
+Through 1.x no documented name is removed or changed; additions are additive. Consumers need
+**cyrius 6.6.6+** and, for `dist/rekha.cyr`, no stdlib leaf at all. The decisions behind the shape
+are in [`docs/adr/`](docs/adr/README.md); the threat model in [`SECURITY.md`](SECURITY.md).
 
 ## Scope
 
@@ -237,8 +238,8 @@ sentinel: every call that can set a code clears it first, but a reader that cann
 ## Roadmap
 
 The full list, with the evidence behind every item, is
-[`docs/development/roadmap.md`](docs/development/roadmap.md). What stands between 0.4.12 and a
-**1.0.0** — rekha's promise *complete, correct and frozen*:
+[`docs/development/roadmap.md`](docs/development/roadmap.md). The road from 0.4.12 to **1.0.0** —
+rekha's promise *complete, correct and frozen* — and what 1.x is:
 
 | milestone | what it closes |
 |---|---|
@@ -247,7 +248,8 @@ The full list, with the evidence behind every item, is
 | ~~**0.7.x — failures that say what failed**~~ | **Closed.** `RekhaErr` had been published and produced by nothing since 0.1.0. Every refusal now says which, out of the handle, with no byte allocated — and the ambiguity turned out to sit one level below where it was being looked for. |
 | ~~**0.8.x — hinting**~~ | **Closed.** 0.8.0 shipped the machine, 0.8.1 the zones and `prep`, 0.8.2 the glyph loader, the phantom points, `IUP`, composites and the **hinted-outline call** — measured against FreeType 2.14.3 itself: 233 (glyph, ppem) rows of its hinted Liberation Sans point for point, the whole face and 165 + 50 host faces through `scripts/hint_glyph_diff.py` with 0 differences. ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
 | ~~**0.9.0 — the freeze**~~ | **Closed.** 178 `public fn` and 72 `public var` in `src/` against 287 internals, a `private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs, `SECURITY.md`, `CONTRIBUTING.md`, and a CI probe that must fail to reach an internal. |
-| **1.0.0** | **Next.** Lock it in: a release with no change to the surface after the freeze has been consumed. |
+| ~~**1.0.0 — lock it in**~~ | **Shipped.** The freeze consumed — crab and dhancha build against the `private` 0.9.0 bundle and crab's QEMU face test drew through it — and a release with no surface change: `docs/api/surface.txt` is byte-identical to 0.9.0's across a cyrius 6.6.6 → 6.6.20 move. Refuse-don't-guess is kept for the line (ADR 0002). |
+| **1.x** | **Additive only.** The pinned table in the roadmap — every row a new call or a new reader, none a changed answer. |
 
 ⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
 complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and
@@ -292,13 +294,13 @@ fonts/face_data.cyr`; `programs/face_test.cyr` is the RUN proof.
 
 ## Consumers
 
-**agnos** (1.57.2) is the first live consumer — of the *data* half: the
-kernel folds `fonts/face_data.cyr` into its build and serves the face
-read-only at `/fonts/default.ttf` (see *The embedded default face* above).
-Downstream repos pull the *parser* half, `dist/rekha.cyr`, via a
-`[deps.rekha]` git-tag entry; its intended consumers are the AGNOS
-text/typography path — the `dhancha` UI toolkit, `crab`, a terminal,
-document / UI text — anywhere scalable glyphs are needed.
+**agnos** is the first live consumer — of the *data* half: the kernel folds
+`fonts/face_data.cyr` into its build and serves the face read-only at
+`/fonts/default.ttf` (see *The embedded default face* above). The *parser*
+half, `dist/rekha.cyr`, is pulled through a `[deps.rekha]` git-tag entry by
+**dhancha** (the UI toolkit, tag 0.9.0 since its 0.10.1) and **crab** (tag
+0.9.0), whose QEMU face test loaded `/fonts/default.ttf` through rekha 0.9.0
+and drew it with sadish 0.11.2 — the face path end to end, on AGNOS.
 
 ## Dependencies
 
@@ -319,25 +321,20 @@ document / UI text — anywhere scalable glyphs are needed.
   coordinate as an address. VERIFIED at the 0.4.5 pin bump: rekha names no polyline symbol anywhere
   in `src/` or `programs/` — it emits paths and never reads a flatten output. A consumer that *does*
   walk polylines must port to `sd_polyline_point_x` / `_y` before taking this pin.
-- **Cyrius stdlib** — what a CONSUMER of `dist/rekha.cyr` must vendor is **`string`**, and that is
-  the whole list (0.4.5; `dist/rekha.deps`). It is there because `src/` calls `strlen` + `memcpy`.
-  The WOFF bundle adds `sankoch` (`dist/rekha-woff.deps`).
-  ⚠ **`alloc` left that list in 0.4.5 and the bundle did not change — the toolchain did.** Through
-  6.6.4 `lib/string.cyr` called `alloc()` (`strdup`/`strndup`) and declared no include for it, so
-  distlib's compile-verify had to re-add the leaf; 6.6.6 makes that file self-sufficient, so `alloc`
-  now arrives transitively with `string`. It is still linked; only the name a consumer has to
-  resolve went away. ⛔ That ties the sidecar to the toolchain: a consumer **below 6.6.6** vendoring
-  only `string` gets `warning: undefined function 'alloc'` and traps (SIGILL) at a `strdup` call, so
-  consumers of `dist/rekha.cyr` 0.4.5 and up must be on 6.6.6 or later — rekha's own pin.
-  ⚠ rekha's own test harness uses seven more (`fmt`, `vec`, `str`, `io`, `syscalls`, `assert`,
-  `bench`) — those are declared in `programs/prelude.cyr` and are deliberately NOT published,
-  because every leaf in the sidecar is one each consumer has to vendor. Resolved by
+- **Cyrius stdlib** — a CONSUMER of `dist/rekha.cyr` vendors **no stdlib leaf** (1.0.0; there is no
+  `dist/rekha.deps`). Since cyrius 6.6.18 a sidecar is what the bundle's compile-verify proves on
+  six targets, and the base modules have called nothing in the stdlib since 0.5.0 — the `string`
+  leaf 0.4.5 to 0.9.0 published was the old include-scan union's, not a need ([ADR 0010](docs/adr/0010-the-zero-leaf-sidecar.md)).
+  The WOFF bundle needs `string` (`memcpy`) + `sankoch` (`dist/rekha-woff.deps`), and opens with
+  those two as its own compile-verified requires block.
+  ⚠ rekha's own test harness uses eight leaves (`fmt`, `alloc`, `vec`, `str`, `io`, `syscalls`,
+  `assert`, `bench`), declared in `programs/prelude.cyr`; none reaches a sidecar. Resolved by
   `cyrius deps` into `lib/`.
 - **sankoch** — only for the web containers, and only through `dist/rekha-woff.cyr`:
   `zlib_decompress_capped` for WOFF 1.0 (sankoch >= 2.7.13) and `brotli_decompress_capped` for
-  WOFF2 (**>= 2.8.0**, which is the floor for that bundle as of 0.4.6; the cyrius 6.6.6 stdlib ships
-  exactly 2.8.0). A consumer includes `lib/sync.cyr` and
-  `lib/sankoch.cyr` before the bundle.
+  WOFF2 (**>= 2.8.0**, which is the floor for that bundle as of 0.4.6; the cyrius 6.6.20 stdlib
+  ships 2.8.1, a toolchain release with no source change from 2.8.0). The bundle's requires block
+  includes `lib/sankoch.cyr` itself; a consumer brings `lib/sync.cyr`, which sankoch needs.
   ⭐ **Both rekha filings against sankoch are closed in 2.8.0**, which is what the 0.4.5 toolchain
   snapshot brings. The lean `[lib.zlib]` profile **links now** — every alloc-bearing profile bundle
   was unlinkable from 2.7.10 through 2.7.15 (`runtime.cyr` called a `_sankoch_reset_tables` that only
@@ -349,7 +346,7 @@ document / UI text — anywhere scalable glyphs are needed.
   profile bundle, so the profile fix is a consumer's good news rather than a gate here.
   `dist/rekha.cyr` needs no sankoch.
 
-The toolchain pin is `cyrius = "6.6.6"`.
+The toolchain pin is `cyrius = "6.6.20"`; consumers need 6.6.6 or later.
 
 ## Quick Start
 

@@ -5,6 +5,114 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.0] - 2026-10-13 — lock it in
+
+The surface frozen at 0.9.0, promised for the major line. **No public name, signature or
+documented answer changed**: `docs/api/surface.txt` is byte-identical to 0.9.0's
+(`git diff 0.9.0 -- docs/api/surface.txt` is empty), and the code lines of `dist/rekha.cyr` are
+identical to 0.9.0's — what moved is comments, the version header, the toolchain, and one file a
+consumer no longer has to read. Moving from 0.9.0 is a tag change.
+
+### The three things the roadmap asked of 1.0.0
+
+- **The freeze was consumed.** crab and dhancha both pin tag 0.9.0 against the `private` bundle
+  (dhancha 0.10.1: its five `rekha_*` calls resolve at the same arity; crab: its three are
+  `public fn`). crab's QEMU face test on agnos 1.57.5 printed `crab: font /fonts/default.ttf 410820
+  bytes adv=9 upem=2048` — the face loaded through rekha 0.9.0 and drawn by sadish 0.11.2, with no
+  fault. agnos takes `fonts/face_data.cyr` by path. That is a boundary leaned on, from two sides.
+- **A release with no surface change.** This one: a cyrius 6.6.6 → 6.6.20 move, a regenerated
+  `dist/`, every suite re-run — and the surface, the code, and every check count unchanged.
+- **Refuse-don't-guess is settled for the line.** It stands (ADR 0002, *Confirmed* 2026-10-13):
+  `rekha_hint_glyph` keeps refusing what FreeType's default mode reads as 0, and draws the glyph
+  unhinted. FreeType's fallbacks can still arrive in 1.x, but only as a new opt-in call — the
+  default answer cannot move inside the major line.
+
+### Changed — cyrius 6.6.6 → 6.6.20
+
+- `[package].cyrius` **6.6.6 → 6.6.20**. `scripts/ci-install-cyrius.sh` carries the new committed
+  hashes, verified three ways before committing: `install.sh` from the `6.6.20` tag ref is
+  byte-equal to `git show 6.6.20:scripts/install.sh` (`099f628e…`); both release tarballs equal
+  their `.sha256` sidecars and their `SHA256SUMS` lines (x86_64 `38814a81…`, aarch64
+  `2216cb1f…`); and `cyrsign verify` accepts `SHA256SUMS.sig` against
+  `keys/cyrius-release.ed25519.pub` at the tag (`adbde6b1…4008`, the key 6.6.6 was checked with).
+  The script itself was run end to end into a throwaway `HOME`: installed, active version 6.6.20.
+  The 6.6.6 and 6.6.4 hashes stay for a bisect.
+- `lib/` re-resolved clean (`rm -rf lib && cyrius deps`): **25 → 26 files** — 21 of the 25 hashes
+  change (`fnptr`, `alloc_agnos`, `args_macos` and `sadish` do not), and `lib/poison.cyr` is new,
+  included by 6.6.20's `lib/alloc.cyr` for 6.6.18's poison seam. The lock re-verifies sadish's
+  commit (`d9f41f3`); sadish stays **0.11.2**, its latest tag.
+- The stdlib's sankoch goes **2.8.0 → 2.8.1**, a toolchain release with no source change (sankoch
+  CHANGELOG [2.8.1]). `woff_test` (124 checks) and `woff2_test` (186) pass unchanged. The published
+  floor for `dist/rekha-woff.cyr` stays **sankoch >= 2.8.0**.
+- **Consumers stay on 6.6.6+.** Measured against a scratch consumer pinned to **6.6.6** with a
+  `[deps.rekha]` entry and `cyrius deps`: both 1.0.0 bundles build, the public probe links with no
+  warning, and three internals are refused `is private to its file`. Nothing in this release asks
+  crab, dhancha or agnos to move their toolchain.
+
+### Changed — the published sidecar is EMPTY (ADR 0010)
+
+- **`dist/rekha.deps` is gone.** cyrius 6.6.18 — rekha's 2026-09-16 filing, shipped as option 2 —
+  writes a sidecar from the compile-verify fixpoint ALONE, on six targets, instead of the include
+  scan of `src/lib.cyr` unioned with `[deps] stdlib`. The base modules have called nothing in
+  `lib/string.cyr` since 0.5.0 took the last `strlen` out with `rekha_err_print_name` (checked at
+  the 0.4.12, 0.5.0, 0.6.0, 0.7.0, 0.8.2 and 0.9.0 tags: 1 call, then 0, 0, 0, 0, 0), so the
+  fixpoint proves no leaf and `distlib` writes no file. **A consumer of `dist/rekha.cyr` vendors
+  no stdlib leaf** — the `string` it carried from 0.4.5 to 0.9.0 was the union's, never a need.
+- **`dist/rekha-woff.cyr` opens with a compile-verified requires block** — `include
+  "lib/string.cyr"`, `include "lib/sankoch.cyr"`, the leaves of `dist/rekha-woff.deps` (the WOFF
+  modules call `memcpy`) — ahead of `private`. Those lines include other files, so `private` still
+  binds exactly the bundle; the probes say so on 6.6.20 and on 6.6.6.
+- `scripts/api_surface.py` accepts that block before `private` only when it is exactly the
+  sidecar's leaves, in order. Mutation-checked: deleting the `sankoch` line fails the gate by name.
+- CI's leaf pin: base `[]` (no file), WOFF `[string sankoch]`. Mutation-checked: a hand-written
+  `dist/rekha.deps` naming `string` fails it. The base freeze probe now includes `lib/sadish.cyr`
+  alone — the consumer's real chain.
+- ADR 0003's sidecar half is superseded by **ADR 0010**; its include rule stands.
+
+### Added
+
+- **`docs/adr/0010-the-zero-leaf-sidecar.md`.**
+- **A coverage step in CI** — visibility only, like the bench. cyrius 6.6.17 (rekha's 2026-09-20
+  filing) takes the RUN programs as a corpus: `cyrius coverage --programs 'programs/*_test.cyr'`
+  reports **202 of 465 functions** referenced. That is TEXT coverage — an internal reached only
+  through another function does not count. Of the **178 public functions, 176** are named by a
+  suite; `rekha_hint_error_clear` and `rekha_hvar_lsb_delta` run only inside other public calls.
+
+### Measured
+
+- Every gate CI runs, replayed locally on 6.6.20: `lint --strict` clean on every `src/` and
+  `programs/` file; formatting in place leaves the tree unchanged; `vet`; `distlib --check`; the
+  API-surface gate (178 public fns, 10 in the face module, 72 constants, 9 enum members, 0
+  problems); both bundles' probes; the triplet, Standard Encoding, Mac Roman and face
+  regeneration gates; **all 35 programs under `CYRIUS_DCE=0` and `1` — 70 of 70 runs pass**, no
+  `warning` in any build log; aarch64 (666,120 B) and AGNOS (535,480 B) link checks clean.
+- Every suite's check count is 0.9.0's. The hostile suite's mutation loop is the same loop to the
+  load: 120 mutants, 117 opened, **240,908 hinted loads**, 0 A/B differences.
+- ⚠ `cyrius fmt --check`'s false negative (0.4.5) does not reproduce on 6.6.20: it exits 1 on a
+  deliberately mis-indented copy of `src/error.cyr` and agrees with the sadish file it was found
+  on. The in-place gate stays; it cannot silently agree on any toolchain.
+
+### Docs
+
+- README: `Version: 1.0.0`; the stability paragraph; the roadmap table closes 1.0.0 and names 1.x
+  (additive only); *Consumers* names crab and dhancha; *Dependencies* says no stdlib leaf.
+- `docs/api/README.md`: promised for 1.x at 1.0.0; what a 1.x release may still change.
+- `CONTRIBUTING.md`: the 6.6.20 pin and the hash rule; the sidecar gate; "no stdlib call in a base
+  module". `SECURITY.md`: **1.x and 0.9.x** supported (0.9.x → 1.0.0 is a drop-in).
+- `docs/development/roadmap.md` rewritten for the line: 1.0.0 leaves the file; nothing is scheduled
+  into a milestone because every item is additive; the three cyrius notes become *Toolchain
+  follow-ups* — P4 and P5-A adopted here, P6 (`poison_alloc` through `sd_alloc`) and P2 (`[embed]`
+  for the face, which in 1.x can only be ADDED beside the frozen `fonts/face_data.cyr`) open; all
+  three rekha filings against cyrius recorded as shipped; the stale "horizontal-only by name" row
+  removed (the vertical twins shipped at 0.6.7).
+- **The WOFF2 encoder issue was reviewed and stays OPEN, retargeted.** Its trigger, "sankoch
+  2.8.1", fired by number and not by content: 2.8.1 was a toolchain release with no source change,
+  and sankoch's roadmap now numbers the encoder **2.8.4** (sankoch is at 2.8.3; no
+  `brotli_compress` exists). rekha also needs a cyrius pin whose stdlib folds it. The issue now
+  names the alternative that would not wait — a committed WOFF2 from the reference encoder, diffed
+  glyph by glyph against the committed `.ttf` — with what it costs (a converted font in the repo,
+  and the OFL Reserved Font Name question), as the maintainer's call.
+
 ## [0.9.0] - 2026-09-21 — the freeze
 
 0.8.x closed with every rendering gap measured; what remained was an API that was *exported*
