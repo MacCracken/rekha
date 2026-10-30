@@ -73,7 +73,7 @@ with the measurement each claim rests on.
 
 | version | status |
 |---|---|
-| 1.x, and 0.9.x | security fixes, in a patch release with a CHANGELOG entry; 0.9.x → 1.0.0 → 1.1.0 is a drop-in (`docs/api/surface.txt` byte-identical) |
+| 1.x, and 0.9.x | security fixes, in a patch release with a CHANGELOG entry; 0.9.x → 1.0.0 → 1.1.x is a drop-in (`docs/api/surface.txt` byte-identical) |
 | 0.8.x and below | not supported — the API is frozen at 0.9.0; move to 1.x |
 
 A fix never changes a documented answer (`docs/api/README.md`, the stability promise); where

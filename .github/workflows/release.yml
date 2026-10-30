@@ -65,7 +65,13 @@ jobs:
           rm -rf lib
           mkdir lib
           cyrius deps --locked
-          cyrius deps
+          # Same superseded-pin check as ci.yml's lock gate.
+          out="$(cyrius deps 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out"
+          if grep -q 'cyrius.lock keeps' <<< "$out"; then
+            echo "ERROR: cyrius.lock carries a superseded commit pin (the note above)."
+            exit 1
+          fi
           if ! git diff --exit-code -- cyrius.lock; then
             echo "ERROR: cyrius.lock does not match a clean resolve."
             exit 1

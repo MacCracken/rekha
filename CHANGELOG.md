@@ -5,6 +5,135 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-10-30 — the 6.7.18 pin
+
+A patch release: the toolchain pin moves **6.7.9 → 6.7.18** and sadish **0.12.0 → 0.12.1**, its
+6.7.18 release. **No public name, signature or documented answer changed**: `docs/api/surface.txt`
+is byte-identical to 1.1.0's, and so are the code lines of both bundles — `dist/` differs from
+1.1.0's in its version headers and one comment. Neither published sidecar moved (base: none; WOFF:
+`sankoch`). **Every suite prints exactly what it printed at 1.1.0**: all 72 build-and-runs, 1.1.0
+on 6.7.9 against 1.1.1 on 6.7.18, diff to zero. Moving from 1.1.0 is a tag change.
+
+### Changed — cyrius 6.7.9 → 6.7.18
+
+- `[package].cyrius` **6.7.9 → 6.7.18**. `scripts/ci-install-cyrius.sh` carries the new committed
+  hashes, verified the same three ways: `install.sh` from the `6.7.18` tag ref is byte-equal to
+  `git show 6.7.18:scripts/install.sh` (`28515fca…`); both release tarballs equal their `.sha256`
+  sidecars and their `SHA256SUMS` lines (x86_64 `1411e773…`, aarch64 `89d84a15…`); `cyrsign verify`
+  accepts `SHA256SUMS.sig` against `keys/cyrius-release.ed25519.pub` at the tag (`adbde6b1…4008`,
+  unchanged) and refuses a copy with one byte changed. The script ran end to end into a throwaway
+  `HOME`: installed, active version 6.7.18, its `lib/` and its `cycc`, `cyrius`, `cyrfmt` and
+  `cyrlint` byte-identical to the 6.7.18 install every measurement below ran on. The 6.7.9 hashes
+  stay, with the older ones, for a bisect.
+- **The 6.7.10 – 6.7.18 migration notes were checked against the source.** They run to about 6,700
+  lines. 6.7.18 changes no language rule (its notes: stdlib and folds only), and what 6.7.12 and
+  6.7.17 newly refuse or warn on, the build reports — nothing, below. That leaves what compiles with
+  a different meaning: 133 items tagged *changes what it computes* in 6.7.10 – 6.7.16, and 6.7.17's,
+  on generics, struct and vector values, coroutines and Windows. Most are about constructs rekha
+  does not use: **zero** `struct`,
+  `Str` values, tuples, `f64` / `f32`, generics, closures, `callptr` / `fncallN`, `trait` / `impl`,
+  `asm`, typed pointers or `u128` in `src/`, `programs/` or `fonts/face_data.cyr` (comments and
+  string literals stripped). The rest were checked one by one, zero sites each:
+  - 6.7.14 FE-15, 6.7.15 FE-13, 6.7.16 ZN-1 — a global declared twice, or one written by an earlier
+    initialiser's call, now takes its constant from program start. **No global is declared twice**
+    in `src/` (296 globals), in any program, in the face module, or across them. `src/` has **no**
+    global initialised by a call; the 36 in `programs/` are each program's `main()` line, and no
+    global is declared after it.
+  - 6.7.16 SS-15 / SS-16 — narrow-typed globals and parameters now read at their width. **Zero**
+    narrow-typed (`i8` .. `u32`) globals, parameters or locals outside typed arrays.
+  - 6.7.15 IT-5 — include-once now keys on spellings of 128 characters and more. rekha's longest
+    include line is 41.
+  - 6.7.13 RC-4 — operator result kinds with an `f64` right operand. No `f64`.
+- The stdlib's sankoch goes **2.8.3 → 2.8.9**. No decoder signature changed; 2.8.6's hardening made
+  DEFLATE refuse five classes of malformed stream that zlib also refuses, and fixed shared-table
+  and locking faults (sankoch CHANGELOG 2.8.6). `woff_test` (124 checks) and `woff2_test` (186)
+  print what they printed at 1.1.0. The published floor for `dist/rekha-woff.cyr` stays
+  **sankoch >= 2.8.0**.
+- **Consumers stay on 6.6.6+**, re-measured: the two scratch consumers pinned to cyrius **6.6.6**
+  and sadish **0.11.2** build both 1.1.1 bundles, the public probe links with no warning or error,
+  and three internals are refused `is private to its file`.
+
+### Changed — sadish 0.12.0 → 0.12.1
+
+- `[deps.sadish] tag = "0.12.1"`; the lock re-verifies commit `8671900`. The only code line that
+  differs in `dist/sadish.cyr` is `sadish_version()`'s return (1200 → 1201), which rekha never calls;
+  its sidecar is unchanged (`syscalls`, `alloc`, `string`). The floor stays **0.9.0**.
+- `lib/` re-resolved clean: the same **17 files**; 12 hashes change (11 with the toolchain,
+  `lib/sadish.cyr` with its tag) and 5 do not (`alloc_agnos`, `alloc_macos`, `atomic`, `poison`,
+  `string`). The tag moved, so the lock was deleted and re-resolved (CONTRIBUTING): one commit row.
+
+### Changed — CI
+
+- **The lock gate fails on a superseded commit pin.** 1.1.0 found one by eye: with a tag moved under
+  an existing lock, cyrius keeps the old tag's `commit` row beside the new one (fail-closed, by
+  design), `--locked` passes, and the resolve rewrites the lock unchanged, so neither check saw it.
+  From 6.7.12 the resolve prints `note: cyrius.lock keeps <dep>@<tag>'s pin …; delete cyrius.lock to
+  re-pin`, and the step (in `ci.yml` and `release.yml`) now fails on that note. MEASURED by running
+  the step's own text: on a lock carrying sadish 0.12.0's row beside 0.12.1's it prints the note and
+  exits 1, naming the fix; on the committed lock, no note, rc 0.
+- **Execution coverage on the coverage step** (cyrius 6.7.10, P5-B), still visibility only:
+  `--exec='programs/*_test.cyr'` builds every suite instrumented, runs it, and counts the functions
+  it entered — **456 of 465**, 35 runs, 0 failed, 27 s. MEASURED: with one check broken in
+  `error_test` the step names it (`FAIL: programs/error_test.cyr (exit 1)`) and exits 1. Text
+  coverage still reads 202 of 465.
+
+### Found — nine internals with no call site
+
+Execution coverage's 9 unentered functions have **no call site anywhere** in `src/` or `programs/`:
+the seven table-directory accessors `rekha_w2_ent_tag` .. `rekha_w2_ent_ooff`
+(`src/woff2.cyr:182-188`), `rekha_hint_trig_atan` (`src/hint.cyr:3834`, the CORDIC arctangent table;
+`rekha_hint_vlen` keeps only the length — "the angle … is not needed and not kept",
+`src/hint.cyr:3849`) and `rekha_cff2_regions` (`src/cff2.cyr:74`). None is public, so the `private`
+bundle already hides them from a consumer, and DCE drops them from binaries. They are left in place
+here, a pin-only release; the roadmap carries them.
+
+### Measured
+
+- **Every CI gate, replayed from the workflow's own `run:` blocks** in a clean clone with this change
+  committed: the lock gate (now with the pin-note check), `lint --strict`, formatting in place,
+  `vet`, `distlib --check`, the API-surface gate (178 public fns, 10 in the face module, 72
+  constants, 9 enum members, 0 problems), both bundles' probes, the four regeneration gates, smoke
+  and all 35 RUN suites under `CYRIUS_DCE=0` and `1` (72 of 72, no `warning` in any build log), the
+  aarch64 and AGNOS link checks, coverage, the syscall scan, the docs job.
+- **Output does not move.** The 72 runs, 1.1.0 on 6.7.9 against 1.1.1 on 6.7.18, print
+  byte-identical stdout. The hostile loop is the same to the load: 120 mutants, 117 opened,
+  **240,908 hinted loads**, 0 A/B differences.
+- What the pin costs, in bytes:
+
+  | | 6.7.9 (1.1.0) | 6.7.18 (1.1.1) | |
+  |---|---:|---:|---|
+  | smoke, `CYRIUS_DCE=1` (CI's build) | 27,240 | **23,152** | **−15.0%** |
+  | smoke, no DCE | 518,760 | 522,864 | +4,104 B |
+  | all 37 programs, DCE off | 26,405,032 | 26,672,176 | +1.01% |
+  | the same 37, DCE on | 10,516,648 | 10,501,168 | −0.15% |
+  | smoke, `--aarch64` | 666,120 | 666,144 | +24 B |
+  | smoke, `--agnos` | 535,496 | 539,736 | +4,240 B |
+
+  With DCE on, 14 of the 37 programs shrink about 4 KB (4,080 or 4,088 B), 20 grow 8–16 B, and the
+  three WOFF suites, which link the stdlib's sankoch, grow 13,792–13,816 B. The DCE shrink is
+  consistent with 6.7.14's dead-code notes (IN-4, IN-18: "a `CYRIUS_DCE=1` binary can shrink");
+  which release produced it was not bisected — sadish's smoke shrank 17.8% across the same move.
+- In time: `programs/bench_hotpath.cyr`, the median of 11 interleaved runs of each build, moves at
+  most 2.6% on any of its six rows (4–817 ns), within this host's noise.
+- `cyrius fmt --check` re-measured on 6.7.18: exits 1 on the mis-indented copy of `src/error.cyr`,
+  0 on the original; formatting in place restores it byte for byte.
+
+### Docs
+
+- README: `Version: 1.1.1`; the 1.x row; the 0.12.1 tag; sankoch 2.8.9; the toolchain line.
+- `CONTRIBUTING.md`: the 6.7.18 pin and the 0.12.1 tag; the lock gate's pin-note check.
+  `SECURITY.md`: 0.9.x → 1.0.0 → 1.1.x is a drop-in.
+- `docs/development/roadmap.md`: *Blocked on a sibling* is empty — the WOFF2 encoder item moved to
+  a new *Toolchain follow-ups — unblocked by the cyrius 6.7.18 pin*, beside the two CI adoptions and
+  the nine uncalled internals.
+- **The WOFF2 encoder issue is UNBLOCKED.** The pinned stdlib's `lib/sankoch.cyr` (2.8.9) defines
+  `brotli_compress`, `brotli_compress_level` and `brotli_compress_bound`, and rekha's suites already
+  take that file from the pin. Not taken here; the issue records that sankoch's encoder against
+  sankoch's decoder is a round trip, not an independent check.
+- Comments that cited the 6.7.9 snapshot or sadish 0.12.0 as current: `cyrius.cyml`,
+  `src/woff.cyr`, `programs/woff2_test.cyr` (which said sankoch does not encode),
+  `.github/workflows/ci.yml`.
+
 ## [1.1.0] - 2026-10-29 — the 6.7 line
 
 The toolchain moves onto cyrius's **6.7 language minor** (6.6.20 → **6.7.9**) and sadish moves

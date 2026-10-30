@@ -56,6 +56,12 @@ jobs:
         # rc 1 with 23 named differences on 1.0.0's 6.6.20 lock, which it left byte-identical.
         # ⚠ It vendors nothing either (rc 0 with no lib/ at all), so `cyrius deps` still runs after
         # it, and the git diff stays as a backstop on what that resolve wrote.
+        # ⛔ Neither of those sees a SUPERSEDED commit pin. When a [deps.*] tag moves, cyrius keeps
+        # the old tag's `commit` row beside the new one on purpose (fail-closed), `--locked` passes
+        # the two-row lock, and the resolve rewrites it unchanged — so 1.1.0 had to find it by eye.
+        # From 6.7.12 the resolve prints `note: cyrius.lock keeps <dep>@<tag>'s pin …`, and this
+        # step fails on that note. MEASURED at 1.1.1 (6.7.18): the note and rc 1 on a lock carrying
+        # sadish 0.12.0's row beside 0.12.1's, no note and rc 0 on the committed lock.
         run: |
           # Whole-file, not per-section: cbt keeps reading a [deps.X] section across a following
           # `[d…]` or `[[…]]` header, which a section-tracking guard would treat as closed.
@@ -66,7 +72,12 @@ jobs:
           rm -rf lib
           mkdir lib
           cyrius deps --locked
-          cyrius deps
+          out="$(cyrius deps 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out"
+          if grep -q 'cyrius.lock keeps' <<< "$out"; then
+            echo "ERROR: cyrius.lock carries a superseded commit pin (the note above). Run 'rm -rf lib cyrius.lock && cyrius deps' and commit cyrius.lock."
+            exit 1
+          fi
           if ! git diff --exit-code -- cyrius.lock; then
             echo "ERROR: cyrius.lock does not match a clean resolve. Run 'rm -rf lib && cyrius deps' and commit cyrius.lock."
             exit 1
@@ -103,9 +114,10 @@ jobs:
         # formatter, and `--check` agrees on all 33. This is the gate being repaired, not the tree.
         # Re-measured at the 6.6.20 pin (1.0.0): `--check` exits 1 on a deliberately mis-indented
         # copy of src/error.cyr and agrees with sadish's file, so the false negative does not
-        # reproduce there. Re-measured at the 6.7.9 pin (1.1.0): `--check` exits 1 on the same
-        # mis-indented copy and 0 on the original, and formatting the copy in place restores it
-        # byte for byte. The in-place form stays: it cannot silently agree, on any toolchain.
+        # reproduce there. Re-measured at the 6.7.9 pin (1.1.0) and the 6.7.18 pin (1.1.1):
+        # `--check` exits 1 on the same mis-indented copy and 0 on the original, and formatting the
+        # copy in place restores it byte for byte. The in-place form stays: it cannot silently
+        # agree, on any toolchain.
         run: |
           for f in src/*.cyr programs/*.cyr; do
             [ -e "$f" ] || continue
@@ -368,16 +380,21 @@ jobs:
           done
           [ $fail -eq 0 ] || { echo "cross-target link-check failed"; exit 1; }
 
-      - name: Coverage (references — visibility only, never gates)
+      - name: Coverage (references + execution — visibility only, never gates)
         # cyrius 6.6.17 (rekha's filing, P5-A) lets `coverage` take the RUN programs as its corpus;
-        # before it, the corpus was tests/**/*.tcyr only and rekha read ~0%. This is TEXT coverage:
-        # a function counts if a corpus file names it, so an internal reached only through another
-        # function does not. Measured at 1.0.0: 202 of 465 functions, and 176 of the 178 public
-        # ones (rekha_hint_error_clear and rekha_hvar_lsb_delta run only inside other public calls).
-        # 202 of 465 again at 1.1.0 (6.7.9). Execution coverage (cyrius P5-B) is not in 6.7.9.
+        # before it, the corpus was tests/**/*.tcyr only and rekha read ~0%. `--programs` is TEXT
+        # coverage: a function counts if a corpus file names it, so an internal reached only through
+        # another function does not. Measured at 1.0.0: 202 of 465 functions, and 176 of the 178
+        # public ones (rekha_hint_error_clear and rekha_hvar_lsb_delta run only inside other public
+        # calls); 202 again at 1.1.0 and 1.1.1.
+        # ⭐ `--exec` (cyrius 6.7.10, P5-B) builds every suite instrumented, runs it, and counts the
+        # functions it ENTERED. Measured at 1.1.1 (6.7.18): 456 of 465, 35 runs, 0 failed, 27 s. The
+        # 9 it never enters have no call site anywhere in src/ or programs/ — seven rekha_w2_ent_*
+        # accessors, rekha_hint_trig_atan, rekha_cff2_regions; internal, so the private bundle hides
+        # them (roadmap). A failing suite fails the step by name; it still never gates.
         continue-on-error: true
         timeout-minutes: 5
-        run: cyrius coverage --programs 'programs/*_test.cyr'
+        run: cyrius coverage --programs 'programs/*_test.cyr' --exec='programs/*_test.cyr'
 
       - name: Bench (hot path — visibility only, never gates)
         # Shared runners are noisy: numbers are printed, never thresholded. Allocation cost is

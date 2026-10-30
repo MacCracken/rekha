@@ -3,8 +3,10 @@
 #
 # ⭐ THE CONTAINERS ARE BUILT HERE, FROM THE EMBEDDED FACE — no converted font is committed. That
 # takes two things sankoch cannot do for us:
-#   1. ⛔ sankoch DECODES Brotli and does not encode it — 2.8.1 to 2.8.3 were toolchain releases and
-#      the encoder is now numbered 2.8.4 (docs/development/issues/2026-09-20-…). So this file
+#   1. ⛔ sankoch DECODED Brotli and did not encode it when this was written (through 2.8.3). Its
+#      encoder shipped in 2.8.4, and the 6.7.18 stdlib this repo pins from 1.1.1 carries it (2.8.9:
+#      `brotli_compress`), but this suite does not use it yet (docs/development/issues/2026-09-20-…,
+#      now unblocked). So this file
 #      emits RFC 7932 STORED meta-blocks — the uncompressed form — by hand, and group S proves the
 #      emitter against sankoch's own decoder before any of it is trusted. That is exactly what the
 #      roadmap meant by testing WOFF2 "on transformed-but-uncompressed tables": the TABLES get the

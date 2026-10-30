@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-10-29, at **1.1.0**.
+> **Last updated:** 2026-10-30, at **1.1.1**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -18,7 +18,8 @@ and crab's QEMU face test loaded `/fonts/default.ttf` through it — and held ac
 changed nothing on it (`git diff 0.9.0 -- docs/api/surface.txt` is empty over a cyrius 6.6.6 →
 6.6.20 move); refuse-don't-guess was confirmed for the line (ADR 0002). **1.1.0** held it again
 across the move onto cyrius's 6.7 language line (6.7.9) and sadish 0.12.0: the surface
-byte-identical, and every suite's output byte-identical to 1.0.0's (CHANGELOG 1.1.0).
+byte-identical, and every suite's output byte-identical to 1.0.0's (CHANGELOG 1.1.0) — and
+**1.1.1** again at 6.7.18 and sadish 0.12.1 (CHANGELOG 1.1.1).
 
 **Through 1.x every change to the surface is an ADDITION** — a new call, a new constant, a new
 reader — and no documented answer moves (`docs/api/README.md`, *Stability promise*). So nothing
@@ -26,7 +27,7 @@ below is scheduled into a numbered milestone: each item is additive, and any of 
 next minor release when a consumer asks for it or the evidence for it changes.
 
 Everything below is **pinned** (real, evidenced, unscheduled), **toolchain follow-up** (unblocked
-by the 6.6.20 and 6.7.9 pins), **blocked on a sibling**, or an explicit **non-goal**.
+by the 6.6.20, 6.7.9 and 6.7.18 pins), **blocked on a sibling**, or an explicit **non-goal**.
 
 ---
 
@@ -259,7 +260,11 @@ The rule: a missing sibling capability gets a filed proposal plus a line here. N
 
 | waiting on | filing | status |
 |---|---|---|
-| **sankoch 2.8.4** — the Brotli **encoder** (renumbered from 2.8.1, which shipped as a toolchain release with no source change), and a **cyrius pin whose stdlib folds it**, so CI can build a genuinely compressed WOFF2 instead of a hand-emitted stored one | [`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md) | 🟡 open — reviewed at 1.1.0. The sibling half is DONE: sankoch **2.8.4** shipped the encoder (`src/brotli_enc.cyr`, 2026-10-13). What is left is rekha's: the 6.7.9 stdlib carries **2.8.3** (no `brotli_compress`), and the first cyrius whose stdlib folds the encoder is **6.7.11** (sankoch 2.8.7) — so the next pin move to 6.7.11 or later unblocks it |
+| *(none open)* | | |
+
+⭐ **Unblocked at 1.1.1:** the WOFF2 encoder filing ([`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md)). sankoch
+shipped the encoder in 2.8.4 and the 6.7.18 stdlib rekha pins carries it (2.8.9), so the item moved
+to *Toolchain follow-ups — unblocked by the cyrius 6.7.18 pin*.
 
 ⭐ **Closed, for the record:** both earlier rekha filings against sankoch shipped in **2.8.0** — the
 WOFF2 Brotli decoder, and the profile bundles that could not link. All three rekha filings against
@@ -381,6 +386,25 @@ All test-side or cleanup; none touches the surface.
   `load8` .. `load64` on computed addresses (1,448 call sites in `src/`), which it does not check,
   beside a few dozen fixed-size typed-array locals (`var m: i64[6]`, `src/cff.cyr:468`). What it
   would cover has to be counted before it is worth a CI leg.
-- ⏳ **Next pin: cyrius >= 6.7.11** folds sankoch's Brotli encoder (2.8.7), which unblocks the
-  WOFF2 filing in *Blocked on a sibling*. Execution coverage (P5-B) is not in 6.7.9
-  (`cyrius coverage --help`: "not execution coverage (that is v6.7.x)").
+- ✅ **Taken at 1.1.1 — the next pin**, cyrius 6.7.18 (below).
+
+## Toolchain follow-ups — unblocked by the cyrius 6.7.18 pin (1.1.1)
+
+- ✅ **Adopted — execution coverage (6.7.10, cyrius P5-B)**, as `--exec` on CI's coverage step,
+  which still never gates: **456 of 465** functions entered, 35 runs, 0 failed, 27 s. MEASURED: a
+  suite with one check broken fails the step by name (`FAIL: programs/error_test.cyr (exit 1)`).
+- ✅ **Adopted — the superseded-pin note (6.7.12)** is a CI failure: the lock gate fails when
+  `cyrius deps` prints `cyrius.lock keeps <dep>@<tag>'s pin`, which neither `--locked` nor the
+  lock diff catches (CHANGELOG 1.1.0 found one by eye).
+- 🟡 **Open — nine internal functions have no call site**, found by execution coverage: the seven
+  table-directory accessors `rekha_w2_ent_tag` .. `rekha_w2_ent_ooff` (`src/woff2.cyr:182-188`),
+  `rekha_hint_trig_atan` (`src/hint.cyr:3834`, the CORDIC's arctangent table — `rekha_hint_vlen`
+  keeps only the length: "the angle … is not needed and not kept", `src/hint.cyr:3849`), and
+  `rekha_cff2_regions`
+  (`src/cff2.cyr:74`). `grep -rn '<name>(' src programs` finds only each definition. None is
+  public, so the `private` bundle already hides them and removing them changes no surface; each
+  either goes or gets the caller it was written for. Not done at 1.1.1, which changed only the pin.
+- 🟡 **Open, and unblocked — the WOFF2 suite with a real Brotli encoder** ([`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md)).
+  `brotli_compress` / `brotli_compress_level` are in the pinned stdlib's `lib/sankoch.cyr` (2.8.9);
+  the filing's four steps can be taken. ⚠ sankoch's encoder against sankoch's decoder is a
+  round trip, not an independent check — the filing names the reference-encoder alternative.

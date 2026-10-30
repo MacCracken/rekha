@@ -7,12 +7,12 @@ call. In 1.x a change to the surface is an ADDITION, never anything else.
 
 ## Toolchain
 
-- cyrius **6.7.9**, pinned in `cyrius.cyml` (`[package] cyrius`); consumers need 6.6.6+ for the
+- cyrius **6.7.18**, pinned in `cyrius.cyml` (`[package] cyrius`); consumers need 6.6.6+ for the
   visibility keywords ([ADR 0009](docs/adr/0009-the-freeze.md)), and the sidecars are what
   6.6.18's compile-verify proves ([ADR 0010](docs/adr/0010-the-zero-leaf-sidecar.md)).
   `cyrius --version` first. A pin move updates `scripts/ci-install-cyrius.sh`'s hashes in the
   same commit.
-- sadish at the tag `[deps.sadish]` pins (0.12.0); `cyrius deps` vendors it into `lib/`. A local
+- sadish at the tag `[deps.sadish]` pins (0.12.1); `cyrius deps` vendors it into `lib/`. A local
   `path = "../sadish"` beside the tag is used only under `CYRIUS_LOCAL=1` (cyrius 6.7.6+) and is
   never committed.
 - python3 for the scripts under `scripts/` (no third-party modules); the hinting oracles need
@@ -31,15 +31,17 @@ them under `CYRIUS_DCE=0` and `1` and fails on any build-log warning. ⚠ **`cyr
 rewrites `cyrius.lock`** (it re-resolves and rehashes `lib/`): run `git checkout cyrius.lock`
 after building, and regenerate the lock only through `rm -rf lib && cyrius deps`. ⚠ When a
 `[deps.*]` tag moves, delete the lock too (`rm -rf lib cyrius.lock && cyrius deps`): cyrius keeps
-the old tag's `commit` row beside the new one, fail-closed, `--locked` accepts it, and 6.7.9 prints
-nothing about it (6.7.12 and later print a note). CHANGELOG 1.1.0.
+the old tag's `commit` row beside the new one, fail-closed, and `--locked` accepts it. From cyrius
+6.7.12 the resolve prints `note: cyrius.lock keeps <dep>@<tag>'s pin …`, and CI's lock gate fails on
+that note (1.1.1). CHANGELOG 1.1.0, 1.1.1.
 
 ## The gates, in CI order
 
 `.github/workflows/ci.yml` is the list; the local mirror is the same commands in a shell loop.
 
 1. `cyrius.lock` equals a clean resolve: `cyrius deps --locked` (writes nothing, names each
-   difference), then `cyrius deps`, then `git diff --exit-code -- cyrius.lock`.
+   difference), then `cyrius deps` (failing on a `cyrius.lock keeps …'s pin` note), then
+   `git diff --exit-code -- cyrius.lock`.
 2. `cyrius lint <file> --strict` on every `src/` and `programs/` file: no `warn`, no untracked
    `deferral`. The deferral words (`TODO`, `FIXME`, `XXX`, "for now", "not yet", "later",
    "out of scope", …) fail unless the line carries a tracking pointer (`docs/…`, `CHANGELOG`,

@@ -1,6 +1,6 @@
 # rekha
 
-Version: 1.1.0
+Version: 1.1.1
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -249,7 +249,7 @@ rekha's promise *complete, correct and frozen* — and what 1.x is:
 | ~~**0.8.x — hinting**~~ | **Closed.** 0.8.0 shipped the machine, 0.8.1 the zones and `prep`, 0.8.2 the glyph loader, the phantom points, `IUP`, composites and the **hinted-outline call** — measured against FreeType 2.14.3 itself: 233 (glyph, ppem) rows of its hinted Liberation Sans point for point, the whole face and 165 + 50 host faces through `scripts/hint_glyph_diff.py` with 0 differences. ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
 | ~~**0.9.0 — the freeze**~~ | **Closed.** 178 `public fn` and 72 `public var` in `src/` against 287 internals, a `private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs, `SECURITY.md`, `CONTRIBUTING.md`, and a CI probe that must fail to reach an internal. |
 | ~~**1.0.0 — lock it in**~~ | **Shipped.** The freeze consumed — crab and dhancha build against the `private` 0.9.0 bundle and crab's QEMU face test drew through it — and a release with no surface change: `docs/api/surface.txt` is byte-identical to 0.9.0's across a cyrius 6.6.6 → 6.6.20 move. Refuse-don't-guess is kept for the line (ADR 0002). |
-| **1.x** | **Additive only.** The pinned table in the roadmap — every row a new call or a new reader, none a changed answer. **1.1.0** moved onto cyrius's 6.7 language line (6.7.9) and sadish 0.12.0 with `docs/api/surface.txt` byte-identical again. |
+| **1.x** | **Additive only.** The pinned table in the roadmap — every row a new call or a new reader, none a changed answer. **1.1.0** moved onto cyrius's 6.7 language line (6.7.9) and sadish 0.12.0, and **1.1.1** to 6.7.18 and sadish 0.12.1, each with `docs/api/surface.txt` byte-identical. |
 
 ⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
 complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and
@@ -311,7 +311,7 @@ and drew it with sadish 0.11.2 — the face path end to end, on AGNOS.
   still compile (`warning: undefined function 'sd_alloc'`, printed either way)
   and fault at the first `rekha_font_open`, or be refused outright, depending
   on where the first call site sits (CHANGELOG 0.3.10). Wired via
-  `[deps.sadish]` (`tag = "0.12.0"`, commit-pinned in `cyrius.lock`; for
+  `[deps.sadish]` (`tag = "0.12.1"`, commit-pinned in `cyrius.lock`; for
   cross-repo dev add `path = "../sadish"` in an UNCOMMITTED copy and build
   with `CYRIUS_LOCAL=1` — from cyrius 6.7.6 a default build always builds the
   tag — and CI refuses a committed `path` line).
@@ -336,9 +336,10 @@ and drew it with sadish 0.11.2 — the face path end to end, on AGNOS.
   toolchain snapshot.
 - **sankoch** — only for the web containers, and only through `dist/rekha-woff.cyr`:
   `zlib_decompress_capped` for WOFF 1.0 (sankoch >= 2.7.13) and `brotli_decompress_capped` for
-  WOFF2 (**>= 2.8.0**, which is the floor for that bundle as of 0.4.6; the cyrius 6.7.9 stdlib
-  ships 2.8.3, whose two decoders behave as 2.8.0's — 2.8.1 and 2.8.2 changed no codec, and 2.8.3
-  moved the Brotli dictionary into an `[embed]`). The bundle's requires block
+  WOFF2 (**>= 2.8.0**, which is the floor for that bundle as of 0.4.6; the cyrius 6.7.18 stdlib
+  ships 2.8.9 — no decoder signature changed since 2.8.0, 2.8.6 made DEFLATE refuse five classes of
+  malformed stream zlib also refuses, and rekha's WOFF suites print what they did on 2.8.3). The
+  bundle's requires block
   includes `lib/sankoch.cyr` itself; a consumer brings `lib/sync.cyr`, which sankoch needs.
   ⭐ **Both rekha filings against sankoch are closed in 2.8.0**, which is what the 0.4.5 toolchain
   snapshot brings. The lean `[lib.zlib]` profile **links now** — every alloc-bearing profile bundle
@@ -351,7 +352,7 @@ and drew it with sadish 0.11.2 — the face path end to end, on AGNOS.
   profile bundle, so the profile fix is a consumer's good news rather than a gate here.
   `dist/rekha.cyr` needs no sankoch.
 
-The toolchain pin is `cyrius = "6.7.9"`; consumers need 6.6.6 or later.
+The toolchain pin is `cyrius = "6.7.18"`; consumers need 6.6.6 or later.
 
 ## Quick Start
 

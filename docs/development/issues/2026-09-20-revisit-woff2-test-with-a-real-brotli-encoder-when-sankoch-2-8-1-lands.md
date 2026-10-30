@@ -1,13 +1,15 @@
 # Revisit the WOFF2 suite with a REAL Brotli encoder once sankoch's encoder lands (now 2.8.4)
 
-**Status:** 🟡 **OPEN — the sibling half is done; what is left is a rekha pin move.** Reviewed
-2026-10-29 at rekha 1.1.0: sankoch 2.8.4 shipped the encoder, and the first cyrius stdlib that folds
-it is 6.7.11 — rekha pins 6.7.9 (below). Reviewed 2026-10-13 at 1.0.0: the trigger this file was
+**Status:** 🟢 **OPEN and UNBLOCKED — nothing is waited on; the steps below can be taken.**
+Reviewed 2026-10-30 at rekha 1.1.1: the cyrius 6.7.18 pin carries sankoch 2.8.9, encoder included.
+Reviewed 2026-10-29 at 1.1.0: sankoch 2.8.4 had shipped the encoder, and rekha's 6.7.9 pin predated
+the first stdlib that folds it (6.7.11). Reviewed 2026-10-13 at 1.0.0: the trigger this file was
 filed against fired by NUMBER and not by CONTENT.
 **Filed:** 2026-09-20, by rekha, at the close of **0.4.6 (WOFF2)**. The filename keeps the original
 `2-8-1` slug so links stay stable; the trigger is **2.8.4**.
-**Blocked on:** sankoch's Brotli encoder, **renumbered 2.8.4** (✅ shipped 2026-10-13), AND a
-cyrius pin whose stdlib snapshot folds it (⏳ cyrius >= 6.7.11; rekha pins 6.7.9 at 1.1.0) —
+**Blocked on:** nothing since 1.1.1. It was sankoch's Brotli encoder, **renumbered 2.8.4** (✅
+shipped 2026-10-13), AND a cyrius pin whose stdlib snapshot folds it (✅ cyrius 6.7.18, pinned at
+1.1.1) —
 rekha's suites take `lib/sankoch.cyr` from the toolchain pin, never from a git dep. sankoch's
 roadmap: *"Nothing preempts 2.8.4"*, with fuzz round-trips (encode → both
 decoders) in its own test plan; ADR `0001-brotli-decoder-placement.md` reserves the encode side as
@@ -17,6 +19,21 @@ follow-up, recorded so the gap does not quietly become permanent.
 **Severity:** a **coverage gap in CI**, not a defect, and not a 1.0.0 blocker — it is test-only
 and every step of the plan below is additive. Every claim 0.4.6 makes is true; one class of input
 is reached today only by a measurement that CI cannot run.
+
+## Reviewed 2026-10-30 (rekha 1.1.1, cyrius 6.7.18) — unblocked here
+
+- **The pinned stdlib encodes.** `~/.cyrius/versions/6.7.18/lib/sankoch.cyr` is `# Version: 2.8.9`
+  and defines `brotli_compress_bound`, `brotli_compress` and `brotli_compress_level`
+  (`grep -c '^fn brotli_compress'` is 3). rekha's suites already take this file from the toolchain
+  pin (`programs/woff2_test.cyr` includes `lib/sankoch.cyr`), so step 1 below needs no manifest or
+  dependency change.
+- rekha's suites pass against 2.8.9 unchanged: `woff2_test` 186 checks, `woff_test` 124, both DCE
+  modes, output byte-identical to 1.1.0's on 6.7.9.
+- **Not taken at 1.1.1**, a release that changed only the pin. ⚠ One thing the plan below has to
+  keep in view: sankoch's encoder round-tripped through sankoch's decoder is not an independent
+  check of that decoder — it covers the compressed paths the stored stream never reaches, but a
+  mistake both halves share would pass. The reference-encoder alternative below is the
+  independent one.
 
 ## Reviewed 2026-10-29 (rekha 1.1.0, cyrius 6.7.9) — unblocked upstream, not yet here
 
