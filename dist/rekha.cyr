@@ -2795,7 +2795,13 @@ fn rekha_cff_fd(font, gid): i64 {
     # ⚠ CFF2 requires an FDArray but not an FDSelect: with one Font DICT every glyph takes it, and
     # the table is omitted. A CFF with ROS always has one (rekha_cff_resolve refuses it otherwise).
     if (sel == 0) { return 0; }
-    if (load8(buf + sel) == 0) { return load8(buf + sel + 1 + gid); }
+    if (load8(buf + sel) == 0) {
+        # ⛔ Format 0 is one byte per glyph, validated at open for exactly the CharStrings count
+        # (font+232) — so the gid is bounded HERE, not by the CharStrings lookup that runs after
+        # this one. Unbounded, gid n read past the table and past len (1.1.2 audit, HIGH).
+        if (gid < 0 || gid >= load64(font + 232)) { return 0 - 1; }
+        return load8(buf + sel + 1 + gid);
+    }
     var nr = rekha_rd_u16(buf, sel + 1);
     var lo = 0;
     var hi = nr;
@@ -3539,6 +3545,13 @@ fn rekha_cff_load(font, gid): i64 {
     # bounds a run — a CFF still refuses its 49th operand. Sizing it per dialect would need two
     # frames or an allocation, and rekha_cff_load is called once per glyph, not per point.
     var stk: i64[513];
+    # An id outside the CharStrings INDEX answers what the glyf path answers (rekha_glyf_span):
+    # empty, REKHA_ERR_OTHER "glyph id". maxp.numGlyphs is the font's word, not the CFF's, so a
+    # cmap can hand rekha an id in the gap between the two.
+    if (gid < 0 || gid >= load64(font + 232)) {
+        rekha_fail(font, REKHA_ERR_OTHER, "glyph id");
+        return rekha_outline_empty();
+    }
     if (rekha_cff_run(font, gid, &s, &stk, 0) == 0) { return rekha_outline_empty(); }
     var np = load64(&s + RC_NP);
     var nc = load64(&s + RC_NC);
@@ -5523,6 +5536,11 @@ fn rekha_stat_resolve(f): i64 {
     if (t + 18 > end) { return 0; }
     var buf = load64(f);
     if (rekha_rd_u16(buf, t) != 1) { return 0; }
+    # ⛔ The header is 18 bytes in 1.0 and 20 from minorVersion 1, which adds elidedFallbackNameID
+    # at +18. Only 18 were required, so a 1.1 table of 18 or 19 bytes passed and the field was read
+    # past the table — past len when STAT was last (1.1.2 audit, HIGH). It is a header that does
+    # not fit: the table is absent.
+    if (rekha_rd_u16(buf, t + 2) >= 1 && t + 20 > end) { return 0; }
     if (rekha_rd_u16(buf, t + 4) < 8) { return 0; }                # designAxisSize
     var na = rekha_rd_u16(buf, t + 6);
     var ao = t + rekha_rd_u32(buf, t + 8);
@@ -5550,6 +5568,7 @@ public fn rekha_stat_fallback_name_id(font): i64 {
     if (rekha_stat_present(font) == 0) { return 0; }
     var t = load64(font + 520);
     if (rekha_rd_u16(load64(font), t + 2) < 1) { return 0; }
+    if (t + 20 > load64(font + 528)) { return 0; }                 # resolve guarantees it; so does this
     return rekha_rd_u16(load64(font), t + 18);
 }
 

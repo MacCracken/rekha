@@ -55,6 +55,11 @@ fn rekha_stat_resolve(f): i64 {
     if (t + 18 > end) { return 0; }
     var buf = load64(f);
     if (rekha_rd_u16(buf, t) != 1) { return 0; }
+    # ⛔ The header is 18 bytes in 1.0 and 20 from minorVersion 1, which adds elidedFallbackNameID
+    # at +18. Only 18 were required, so a 1.1 table of 18 or 19 bytes passed and the field was read
+    # past the table — past len when STAT was last (1.1.2 audit, HIGH). It is a header that does
+    # not fit: the table is absent.
+    if (rekha_rd_u16(buf, t + 2) >= 1 && t + 20 > end) { return 0; }
     if (rekha_rd_u16(buf, t + 4) < 8) { return 0; }                # designAxisSize
     var na = rekha_rd_u16(buf, t + 6);
     var ao = t + rekha_rd_u32(buf, t + 8);
@@ -82,6 +87,7 @@ public fn rekha_stat_fallback_name_id(font): i64 {
     if (rekha_stat_present(font) == 0) { return 0; }
     var t = load64(font + 520);
     if (rekha_rd_u16(load64(font), t + 2) < 1) { return 0; }
+    if (t + 20 > load64(font + 528)) { return 0; }                 # resolve guarantees it; so does this
     return rekha_rd_u16(load64(font), t + 18);
 }
 

@@ -113,6 +113,7 @@ var o_smaj = 1;         # the STAT majorVersion
 var o_sminor = 1;       # the STAT minorVersion
 var o_sasz = 8;         # the STAT designAxisSize
 var o_sbadoff = 0;      # push the axis value array past the table
+var o_sshort = 0;       # != 0: a header-only STAT of this declared length (no axes, no values)
 
 var g_fvar = 0;
 var g_fvarlen = 0;
@@ -172,6 +173,17 @@ fn put_stat(at): i64 {
     pu16(at, o_smaj);
     pu16(at + 2, o_sminor);
     pu16(at + 4, o_sasz);
+    if (o_sshort != 0) {
+        # counts and offsets 0. elidedFallbackNameID's two bytes hold 340 when the table covers
+        # them, else 0xFFFF — past the declared length, and past len (STAT is the last table) —
+        # so a read of them shows.
+        if (o_sshort >= 20) {
+            pu16(at + 18, 340);
+        } else {
+            pu16(at + 18, 0xFFFF);
+        }
+        return o_sshort;
+    }
     pu16(at + 6, 2);                                    # designAxisCount
     pu32(at + 8, 20);                                   # designAxesOffset
     pu16(at + 12, 5);                                   # axisValueCount
@@ -292,6 +304,7 @@ fn opts_reset(): i64 {
     o_sminor = 1;
     o_sasz = 8;
     o_sbadoff = 0;
+    o_sshort = 0;
     return 0;
 }
 
@@ -518,6 +531,29 @@ fn t_stat_refuse(): i64 {
     o_sbadoff = 1;
     check(openf() != 0, 1);
     check(rekha_stat_present(g_f), 0);
+    # ⛔ a minorVersion 1 header is 20 bytes (1.1.2 audit, HIGH): at 18 or 19 it is a header that
+    # does not fit, and elidedFallbackNameID — 0xFFFF past the table here — is never read
+    var hl = 18;
+    while (hl <= 20) {
+        opts_reset();
+        o_sshort = hl;
+        check(openf() != 0, 1);
+        if (hl < 20) {
+            check(rekha_stat_present(g_f), 0);
+            check(rekha_stat_fallback_name_id(g_f), 0);
+        } else {
+            check(rekha_stat_present(g_f), 1);
+            check(rekha_stat_fallback_name_id(g_f), 340);
+        }
+        hl = hl + 1;
+    }
+    # a 1.0 header is 18 bytes and carries no fallback field
+    opts_reset();
+    o_sshort = 18;
+    o_sminor = 0;
+    check(openf() != 0, 1);
+    check(rekha_stat_present(g_f), 1);
+    check(rekha_stat_fallback_name_id(g_f), 0);
     # ...and the instances are untouched by any of it
     check(rekha_var_instance_count(g_f), 4);
     return 0;

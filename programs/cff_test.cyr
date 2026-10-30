@@ -845,6 +845,19 @@ fn t_cid(): i64 {
         pt(1, 0, 10, 1);                            # gid 2 -> FD 1
         check(load(3), 2);
         pt(1, 0, 10, 1);
+        # ⛔ An id outside the 4 CharStrings (1.1.2 audit, HIGH): format 0 is one byte per glyph,
+        # so an unbounded lookup at gid 4 read the byte after the table — 0 here, FB being zeroed,
+        # i.e. a valid FD — and at gid 1000000 a byte 1 MB on, past the font. Both formats answer
+        # -1, and the loader refuses the id the way the glyf path does.
+        check(rekha_cff_fd(g_f, 4), 0 - 1);
+        check(rekha_cff_fd(g_f, 5), 0 - 1);
+        check(rekha_cff_fd(g_f, 0 - 1), 0 - 1);
+        empty(4);
+        check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+        empty(1000000);
+        check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+        empty(0 - 1);
+        check(rekha_font_error(g_f), REKHA_ERR_OTHER);
         fmt = fmt + 1;
     }
     # FDSelect format 3 whose sentinel stops short of the last glyph: that glyph has no FD -> empty
