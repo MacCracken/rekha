@@ -140,6 +140,12 @@ fn rekha_vvar_delta(font, gid, moff): i64 {
     store64(&pair, 0);
     store64(&pair + 8, gid);
     var mo = rekha_rd_u32(buf, vv + moff);
+    # ⛔ ONLY THE ADVANCE MAP IS IMPLICIT. The spec lets the advance-height map be NULL (glyph id =
+    # row); side-bearing and vertical-origin variation data are optional and, when present, NEED a
+    # map — so a NULL tsb / vOrg map means that metric does not vary. HVAR's lsb reader has had this
+    # rule since 0.8.2 (src/hvar.cyr, rekha_hvar_lsb_delta); VVAR, from 0.6.7, applied the advance
+    # rows to the tsb and the origin instead (1.1.2 audit).
+    if (mo == 0 && moff != 8) { return 0; }
     if (mo != 0) {
         if (rekha_dsim(font, vv + mo, end, gid, &pair) == 0) { return 0; }
     }
@@ -177,6 +183,9 @@ public fn rekha_top_side_bearing(font, gid): i64 {
     var vmtx = load64(font + 624);
     if (vmtx == 0) { return 0; }
     var len = load64(font + 632);
+    # no glyph id exceeds a u16 — and past 2^62 the offset below wraps negative and the length check
+    # passes, a read before the table or a fault (1.1.2 audit)
+    if (gid > 65535) { return 0; }
     var at = 0;
     if (gid < nvm) {
         at = gid * 4 + 2;

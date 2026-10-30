@@ -115,6 +115,11 @@ public fn rekha_var_axis_max(font, i): i64     { return rekha_var_axis_at(font, 
 # Normalize a user value onto [-1, 1] (OpenType's rule): clamp to the axis range, then scale the
 # distance from the default by the half-range it falls in.
 fn rekha_var_normalize(lo, def, hi, v): i64 {
+    # ⛔ An axis whose min / default / max are out of order is no range at all: it sits at its
+    # default, FreeType's rule (min = max = default, ref2143/ttgxvar.c). Unchecked, min 100 /
+    # default 200 / max 50 normalised every value to -1.5, outside rekha_var_coord's documented
+    # [-65536, 65536] (1.1.2 audit).
+    if (lo > def || def > hi) { return 0; }
     if (v < lo) { v = lo; }
     if (v > hi) { v = hi; }
     if (v == def) { return 0; }
@@ -134,7 +139,12 @@ fn rekha_var_avar(font, i, coord): i64 {
     var avar = load64(font + 296);
     if (avar == 0) { return coord; }
     var buf = load64(font);
-    var end = load64(font + 304);
+    # ⛔ The TABLE's end, looked up here — font+304 is the file's, which the CFF2 store reader shares,
+    # and bounding the maps by it read them from whatever followed an avar that declared itself too
+    # short (1.1.2 audit). Once per axis change, not per glyph, so the lookup is no cost.
+    var alen: i64[1];
+    if (rekha_find_table_len(font, REKHA_TAG_AVAR, &alen) != avar) { return coord; }
+    var end = avar + load64(&alen);
     if (avar + 8 > end) { return coord; }
     var nmaps = rekha_rd_u16(buf, avar + 6);
     if (i >= nmaps) { return coord; }
@@ -244,7 +254,7 @@ fn rekha_var_build_scalars(font, vstore): i64 {
     var arr = load64(font + 320);
     if (arr == 0) {
         arr = sd_alloc(REKHA_VAR_MAXREGION * 8);
-        if (arr == 0) { return 0; }
+        if (arr == 0) { return 0 - 1; }             # not "the store does not validate": OOM
         store64(font + 320, arr);
     }
     var r = 0;
@@ -377,8 +387,21 @@ public fn rekha_var_set_axis(font, i, value): i64 {
     }
     var nc = rekha_var_normalize(rekha_var_axis_min(font, i), rekha_var_axis_default(font, i),
       rekha_var_axis_max(font, i), value);
-    store64(c + i * 8, rekha_var_avar(font, i, nc));
-    rekha_var_build_scalars(font, load64(font + 264));
+    # an avar `toCoordinate` is an F2Dot14 and may say more than 1.0; the coordinate is documented in
+    # [-65536, 65536], and past it every tent reads as if the axis were off its range (1.1.2 audit)
+    var mc = rekha_var_avar(font, i, nc);
+    if (mc > REKHA_VAR_ONE) { mc = REKHA_VAR_ONE; }
+    if (mc < 0 - REKHA_VAR_ONE) { mc = 0 - REKHA_VAR_ONE; }
+    var was = load64(c + i * 8);
+    store64(c + i * 8, mc);
+    # ⛔ A refused scalar array is the documented allocation failure: 0, and the coordinate not
+    # moved. Through 1.1.1 the call answered 1 and a CFF2 face drew its default instance while
+    # rekha_var_coord, HVAR and MVAR reported the new one (1.1.2 audit). The array is allocated on a
+    # face's first call, so a refusal here means no earlier call ever varied it.
+    if (rekha_var_build_scalars(font, load64(font + 264)) < 0) {
+        store64(c + i * 8, was);
+        return 0;
+    }
     rekha_hint_axes_changed(font);
     return 1;
 }

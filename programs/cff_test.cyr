@@ -287,6 +287,9 @@ var g_sids = 0;         # i64[ng]: the SID of each glyph, index 1..ng-1 (glyph 0
 var o_upem = 1000;      # head.unitsPerEm, which the FontMatrix is folded with
 var o_fmtx = 0;         # 1 = put the g_fm bytes in the Top DICT (a FontMatrix, or a broken one)
 var o_fdmtx = 0;        # 1 = put them in FD 0's Font DICT instead (CID; rekha must refuse)
+# 1.1.2 audit, a malformed DICT: 1 CharStrings with two operands · 2 CharStrings twice · 3 a REAL
+# CharStrings offset · 4 Subrs with three operands · 5 (CID) a ROS with two operands
+var o_dictbad = 0;
 
 # Build an OTTO font from charstrings `cs`, global subrs `gs`, local subrs `ls` (name-keyed), or for a
 # CID font: FD local subrs `ls` (FD 0) and `ls1` (FD 1). Returns the font length.
@@ -331,6 +334,8 @@ fn build(cs, gs, ls, ls1): i64 {
     # Top DICT INDEX: one object of known size
     var tsz = 0;
     if (o_nocs == 0) { tsz = tsz + 6; }                 # int + 17
+    if (o_dictbad == 1) { tsz = tsz + 5; }
+    if (o_dictbad == 2) { tsz = tsz + 6; }
     tsz = tsz + 11;                                     # int int + 18 (Private)
     if (o_cstype != 0) { tsz = tsz + 7; }               # int + 12 6
     if (o_cid != 0) { tsz = tsz + 17 + 7 + 7; }         # ROS (3 ints + 12 30), FDArray, FDSelect
@@ -354,7 +359,10 @@ fn build(cs, gs, ls, ls1): i64 {
 
     # Private DICT(s) + Subrs, and for CID the FDArray + FDSelect
     var priv0 = p;
-    var psz = 11 + 6;                                   # (dummy defaultWidthX int + 20) + Subrs int + 19
+    # (int defaultWidthX 20) (int nominalWidthX 21) (int Subrs 19). ⛔ Through 1.1.1 the second
+    # operator byte was overwritten by the Subrs operand, so Subrs carried TWO operands — malformed,
+    # which rekha read as its last and FreeType as its first; since 1.1.2 rekha refuses it (1.1.2 audit).
+    var psz = 18;
     var subrs0 = priv0 + psz;
     g_priv0 = priv0;
     g_ls_at = subrs0;
@@ -362,9 +370,10 @@ fn build(cs, gs, ls, ls1): i64 {
     d_int(FB, priv0, 0);
     store8(FB + priv0 + 5, 20);
     d_int(FB, priv0 + 6, 0);
-    store8(FB + priv0 + 11, 20);
-    d_int(FB, priv0 + 11, psz);
-    store8(FB + priv0 + 16, 19);
+    store8(FB + priv0 + 11, 21);
+    if (o_dictbad == 4) { store8(FB + priv0 + 11, 139); }   # an operand (0) where nominalWidthX was
+    d_int(FB, priv0 + 12, psz);
+    store8(FB + priv0 + 17, 19);
 
     var fdarray = 0;
     var fdselect = 0;
@@ -375,9 +384,9 @@ fn build(cs, gs, ls, ls1): i64 {
         d_int(FB, priv1, 0);
         store8(FB + priv1 + 5, 20);
         d_int(FB, priv1 + 6, 0);
-        store8(FB + priv1 + 11, 20);
-        d_int(FB, priv1 + 11, psz);
-        store8(FB + priv1 + 16, 19);
+        store8(FB + priv1 + 11, 21);
+        d_int(FB, priv1 + 12, psz);
+        store8(FB + priv1 + 17, 19);
         # FDArray: two Font DICTs, each Private (size, offset)
         fdarray = p;
         var fdm = 0;
@@ -453,9 +462,22 @@ fn build(cs, gs, ls, ls1): i64 {
         q = q + g_fmn;
     }
     if (o_nocs == 0) {
-        q = q + d_int(FB, q, cs_at - cff);
-        store8(FB + q, 17);
-        q = q + 1;
+        if (o_dictbad == 1) { q = q + d_int(FB, q, 0); }
+        if (o_dictbad == 3) {
+            store8(FB + q, 30);                         # a real, 1.0: nibbles 1 f
+            store8(FB + q + 1, 0x1f);
+            store8(FB + q + 2, 17);
+            q = q + 6;                                  # the int's room, left as zero bytes
+        } else {
+            q = q + d_int(FB, q, cs_at - cff);
+            store8(FB + q, 17);
+            q = q + 1;
+        }
+        if (o_dictbad == 2) {
+            q = q + d_int(FB, q, cs_at - cff);
+            store8(FB + q, 17);
+            q = q + 1;
+        }
     }
     q = q + d_int(FB, q, psz);
     q = q + d_int(FB, q, priv0 - cff);
@@ -477,7 +499,12 @@ fn build(cs, gs, ls, ls1): i64 {
     if (o_cid != 0) {
         q = q + d_int(FB, q, 391);
         q = q + d_int(FB, q, 392);
-        q = q + d_int(FB, q, 0);
+        if (o_dictbad == 5) {
+            store8(FB + q, 0);                          # five zero bytes keep the layout
+            q = q + 5;
+        } else {
+            q = q + d_int(FB, q, 0);
+        }
         store8(FB + q, 12);
         store8(FB + q + 1, 30);
         q = q + 2;
@@ -511,6 +538,7 @@ fn opts_reset(): i64 {
     o_upem = 1000;
     o_fmtx = 0;
     o_fdmtx = 0;
+    o_dictbad = 0;
     fm_reset();
     return 0;
 }
@@ -802,7 +830,18 @@ fn t_refuse(): i64 {
     g_group = "B refusals";
     var k = 0;
     while (k <= 16) {
-        if (k != 9) { empty(B0 + k); }
+        if (k != 9) {
+            empty(B0 + k);
+            # ⛔ and NAMED (1.1.2 audit): every one answered REKHA_OK through 1.1.1, the code
+            # docs/api reserves for a blank that was real. B8 is the point cap, and so is B4: its
+            # fan-out draws past 4,096 points before it spends 65,536 operators. The rest are bad
+            # charstrings.
+            if (k == 8 || k == 4) {
+                check(rekha_font_error(g_f), REKHA_ERR_OOM);
+            } else {
+                check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+            }
+        }
         k = k + 1;
     }
     check(load(B0 + 9), 4096);
@@ -869,6 +908,12 @@ fn t_cid(): i64 {
     g_f = rekha_font_open(FB, l2);
     check(load(2), 2);
     empty(3);
+    # ⛔ a ROS with two operands is malformed: the CFF is refused — never read as a NAME-keyed font,
+    # which is what treating the malformed operator as absent would do (1.1.2 audit)
+    opts_reset();
+    o_cid = 3;
+    o_dictbad = 5;
+    no_cff(build(cs, gs, l0, l1));
     return 0;
 }
 
@@ -903,6 +948,22 @@ fn t_resolve(): i64 {
     opts_reset(); len = build(g_cst, g_gst, g_lst, 0);
     put_u32(FB, 0, 0x00010000);                     # the same bytes as a TrueType sfntVersion: CFF not read
     no_cff(len);
+    # ⛔ A MALFORMED DICT IS REFUSED (1.1.2 audit), not read one way of two: rekha took the last
+    # operand of the first occurrence (reals as 0), FreeType the first operand of the last.
+    var bad = 1;
+    while (bad <= 3) {                              # CharStrings: two operands / twice / a real
+        opts_reset(); o_dictbad = bad; len = build(g_cst, g_gst, g_lst, 0); no_cff(len);
+        bad = bad + 1;
+    }
+    # Subrs with three operands: the CFF stands, the local Subrs do not, and a glyph that calls one
+    # is refused and named while one that does not still draws
+    opts_reset(); o_dictbad = 4; len = build(g_cst, g_gst, g_lst, 0);
+    g_f = rekha_font_open(FB, len);
+    check(load64(g_f + 176) != 0, 1);
+    check(load64(g_f + 192), 0);
+    check(load(1), 3);
+    empty(16);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
     return 0;
 }
 
@@ -1199,7 +1260,7 @@ fn t_kills(): i64 {
     len = open_h(cs2, gs2, ls2);
     check(load(0), 2);
     pt(1, 9, 0, 1);
-    d_int(FB, g_priv0 + 11, g_gs_at - g_priv0);     # Subrs operand -> the Global Subr INDEX (negative)
+    d_int(FB, g_priv0 + 12, g_gs_at - g_priv0);     # Subrs operand -> the Global Subr INDEX (negative)
     check(g_gs_at < g_priv0, 1);
     g_f = rekha_font_open(FB, len);
     check(load64(g_f + 192), 0);
@@ -1355,9 +1416,13 @@ fn t_seac(): i64 {
     check(seac_load(10, 67, 66, 0, 0), 0);           # bchar names the seac glyph itself
     check(seac_load(10, 65, 67, 0, 0), 0);           # achar does
     check(seac_load(10, 65, 66, 0, 1), 0);           # the base is itself a seac
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);   # a refusal is named (1.1.2 audit)
     check(seac_load(1, 65, 66, 0, 0), 0);            # the Expert predefined charset
+    check(rekha_font_error(g_f), REKHA_ERR_UNSUPPORTED);  # rekha's missing table, not the font's
     check(seac_load(2, 65, 66, 0, 0), 0);            # ExpertSubset
+    check(rekha_font_error(g_f), REKHA_ERR_UNSUPPORTED);
     check(seac_load(0, 65, 66, 0, 0), 0);            # ISOAdobe: SID 34 is glyph 34, past this font
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
 
     # ⭐ and the ISOAdobe default DOES resolve when the font is big enough — SID i is glyph i, so a
     # 40-glyph font puts the base at 34 and the accent at 35. Without this the check above would

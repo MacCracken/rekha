@@ -322,6 +322,30 @@ fn main(): i64 {
     sp_close();
     var b130 = sp_emit();
 
+    # Components rekha REFUSES (1.1.2 audit): endPts {5, 3} (not increasing), and the triangle with
+    # its last coordinate byte cut off.
+    var bad = g_begin();
+    hdr(2);
+    w16(5);
+    w16(3);
+    w16(0);
+    i = 0;
+    while (i < 6) {
+        w8(1);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 12) {
+        w16(0);
+        i = i + 1;
+    }
+    sp_pt(10, 10, 1);
+    sp_pt(90, 10, 1);
+    sp_pt(50, 90, 1);
+    sp_close();
+    var trunc = sp_emit();
+    g_gp = g_gp - 1;
+
     # ================= composites =================
     # byte args, signed: (-100, 120). If read unsigned, -100 would be 156.
     var c_byte = g_begin();
@@ -420,6 +444,32 @@ fn main(): i64 {
     chdr();
     crec(0x0022, t, 0, 0);
     crec(0x0000, e, 0, 0);
+
+    # A refused component refuses the composite, first or last, and one level down (1.1.2 audit).
+    var c_bad_first = g_begin();
+    chdr();
+    crec(0x0022, bad, 0, 0);
+    crec(0x0002, t, 0, 0);
+    var c_bad_last = g_begin();
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0002, bad, 0, 0);
+    var c_trunc_first = g_begin();
+    chdr();
+    crec(0x0022, trunc, 0, 0);
+    crec(0x0002, t, 0, 0);
+    var c_gid_first = g_begin();
+    chdr();
+    crec(0x0022, 999, 0, 0);
+    crec(0x0002, t, 0, 0);
+    var c_gid_last = g_begin();
+    chdr();
+    crec(0x0022, t, 0, 0);
+    crec(0x0002, 999, 0, 0);
+    var c_nest_bad = g_begin();
+    chdr();
+    crec(0x0022, c_bad_first, 0, 0);
+    crec(0x0002, t, 0, 0);
 
     # MORE_COMPONENTS x3: T at (0,0), Q at (1000,0), T at (0,1000).
     var c_three = g_begin();
@@ -641,11 +691,44 @@ fn main(): i64 {
     pt(131, 210, 260);
     pt(132, 170, 340);
     g_case = "point matching, out of range";
+    # empty AND named (1.1.2 audit): an unnamed blank answered REKHA_OK, the code docs/api reserves
+    # for a blank that was real; the hinted loader always said BAD_GLYF "composite point"
     empty(c_pm_u16);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
     empty(c_pm_pa);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
     empty(c_pm_pb);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
     empty(c_pm_first);
-    empty(c_pm_echild);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
+
+    g_case = "a refused component refuses the composite";
+    # ⛔ Through 1.1.1 the rest was merged — a PARTIAL glyph — and a later component's span cleared
+    # the code, so a bad FIRST component answered REKHA_OK. The hinted loader and FreeType refuse.
+    empty(bad);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
+    empty(trunc);
+    check(rekha_font_error(g_font), REKHA_ERR_TRUNCATED);
+    empty(c_bad_first);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
+    empty(c_bad_last);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
+    empty(c_trunc_first);
+    check(rekha_font_error(g_font), REKHA_ERR_TRUNCATED);
+    empty(c_gid_first);
+    check(rekha_font_error(g_font), REKHA_ERR_OTHER);
+    empty(c_gid_last);
+    check(rekha_font_error(g_font), REKHA_ERR_OTHER);
+    empty(c_nest_bad);
+    check(rekha_font_error(g_font), REKHA_ERR_BAD_GLYF);
+
+    g_case = "point matching onto an empty child";
+    # ⚠ Skipped, not refused (1.1.2 audit): a component that adds no points is passed over before
+    # its offset or its pair is read — FreeType's `num_points == num_base_points` (ttgload.c:1878)
+    # and rekha's hinted loader. Through 1.1.1 the unhinted loader refused the whole composite.
+    shape(c_pm_echild, 1, 3);
+    check(rekha_font_error(g_font), REKHA_OK);
+    check(sd_path_verb_count(rekha_glyph_to_sdpath(g_font, c_pm_echild, SD_ONE, 0, 0)), 4);
 
     g_case = "MORE_COMPONENTS x3";
     # end_pts rebased: T [2]; Q [3, 6] + 3 = [6, 9]; T [2] + 10 = [12]

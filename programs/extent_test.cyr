@@ -289,7 +289,7 @@ fn t_extent(buf): i64 {
     check(rekha_find_table(f, REKHA_TAG_HEAD), 0);
     check(tlen(f, REKHA_TAG_HEAD), 0);
     check(rekha_units_per_em(f), 0);                    # cached as absent
-    check(rekha_loca_format(f), 0);
+    check(rekha_loca_format(f), 0 - 1);                 # no usable head: no loca width either
     check(rekha_glyph_count(f), 4);                     # other tables unaffected
     slot(buf, 0, REKHA_TAG_HEAD, 0, 54);                # over the offset table
     f = rekha_font_open(buf, FONT_LEN);
@@ -359,7 +359,11 @@ fn t_minlen(buf): i64 {
     check(rekha_find_table(f, REKHA_TAG_HEAD), 140);    # the directory still reports it
     check(tlen(f, REKHA_TAG_HEAD), 53);
     check(rekha_units_per_em(f), 0);
-    check(rekha_loca_format(f), 0);                     # the long-loca font reads as "short"
+    check(rekha_loca_format(f), 0 - 1);                 # the long-loca font is NOT read as short:
+    check(span_len(f, 0), 0);                           # the span is refused...
+    check(rekha_font_error(f), REKHA_ERR_NO_TABLE);     # ...naming head, not guessing the width
+    check(glyph_x0(f, 0), 0 - 1);                       # and the load answers empty
+    check(rekha_font_error(f), REKHA_ERR_NO_TABLE);
     check(rekha_glyph_advance_px(f, 0, 16), 0);         # no upem -> no pixel advance
     check(rekha_char_advance_px(f, 65, 16), 0);
     check(rekha_advance_width(f, 0), 500);              # design-unit metrics do not need head
@@ -367,6 +371,7 @@ fn t_minlen(buf): i64 {
     f = rekha_font_open(buf, FONT_LEN);
     check(rekha_units_per_em(f), 1000);
     check(rekha_loca_format(f), 1);
+    check(span_len(f, 0), 26);                          # control: head back, the span reads
     check(rekha_glyph_advance_px(f, 0, 16), 8);
 
     build(buf, 0);

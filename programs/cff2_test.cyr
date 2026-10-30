@@ -152,6 +152,14 @@ var o_privvs = 0 - 1;   # >= 0 = write that vsindex into the Private DICT
 var o_fvar = 0;         # 1 = emit an fvar with one 'wght' axis, 100 / 400 / 900
 var o_avar = 0;         # 1 = emit an avar mapping the positive half through 0.3 -> 0.8
 var o_avar2 = 0;        # 1 = stamp that avar majorVersion 2 instead of 1
+var o_avarshort = 0;    # 1 = declare the avar 8 bytes long (its map still follows) — 1.1.2 audit
+var o_avarbig = 0;      # 1 = the map's 0.3 goes to 1.5, past the coordinate's documented range
+var o_badaxis = 0;      # 1 = fvar min 500 above its default 400
+var o_ivd0bad = 0;      # 1 = itemVariationDataCount 0: subtable 0 does not resolve (1.1.2 audit)
+var o_badregion = 0;    # 1 = subtable 0 names region 7 of 2
+var o_axes2 = 0;        # 1 = the region list declares 2 axes (fvar has 1)
+var o_nopriv = 0;       # 1 = the Font DICT has no Private operator
+var o_privvsreal = 0;   # 1 = write o_privvs's vsindex as the REAL 1.0 (1.1.2 audit)
 var o_wide = 0;         # > 0 = ONE IVD over that many identical regions, instead of the pair
 
 fn opts_reset(): i64 {
@@ -165,6 +173,14 @@ fn opts_reset(): i64 {
     o_fvar = 0;
     o_avar = 0;
     o_avar2 = 0;
+    o_avarshort = 0;
+    o_avarbig = 0;
+    o_badaxis = 0;
+    o_ivd0bad = 0;
+    o_badregion = 0;
+    o_axes2 = 0;
+    o_nopriv = 0;
+    o_privvsreal = 0;
     o_wide = 0;
     return 0;
 }
@@ -218,12 +234,15 @@ fn build(): i64 {
         put_u16(FB, fvar_at + 10, 20);
         put_u32(FB, fvar_at + 16, 0x77676874);
         put_u32(FB, fvar_at + 20, 100 * 65536);
+        if (o_badaxis != 0) { put_u32(FB, fvar_at + 20, 500 * 65536); }
         put_u32(FB, fvar_at + 24, 400 * 65536);
         put_u32(FB, fvar_at + 28, 900 * 65536);
         put_u16(FB, fvar_at + 34, 256);
     }
     if (o_avar != 0) {
-        put_u32(FB, de, 0x61766172); put_u32(FB, de + 8, avar_at); put_u32(FB, de + 12, avlen);
+        var avdecl = avlen;
+        if (o_avarshort != 0) { avdecl = 8; }
+        put_u32(FB, de, 0x61766172); put_u32(FB, de + 8, avar_at); put_u32(FB, de + 12, avdecl);
         de = de + 16;
         put_u16(FB, avar_at, 1);
         if (o_avar2 != 0) { put_u16(FB, avar_at, 2); }
@@ -232,6 +251,7 @@ fn build(): i64 {
         put_u16(FB, avar_at + 10, 49152); put_u16(FB, avar_at + 12, 49152);   # -1 -> -1
         put_u16(FB, avar_at + 14, 0);     put_u16(FB, avar_at + 16, 0);       #  0 ->  0
         put_u16(FB, avar_at + 18, 4915);  put_u16(FB, avar_at + 20, 13107);   # 0.3 -> 0.8
+        if (o_avarbig != 0) { put_u16(FB, avar_at + 20, 24576); }            # ...or 1.5
         put_u16(FB, avar_at + 22, 16384); put_u16(FB, avar_at + 24, 16384);   #  1 ->  1
     }
     put_u16(FB, head_at + 18, 1000);
@@ -284,16 +304,25 @@ fn build(): i64 {
     var priv_at = p;
     var privlen = 0;
     if (o_privvs >= 0) {
-        privlen = d_int(p, o_privvs);
+        if (o_privvsreal != 0) {
+            store8(FB + p, 30);                         # a real: nibbles 1 f = 1.0
+            store8(FB + p + 1, 0x1f);
+            privlen = 2;
+        } else {
+            privlen = d_int(p, o_privvs);
+        }
         store8(FB + p + privlen, 22);                   # vsindex
         privlen = privlen + 1;
     }
     p = p + privlen;
     var fd_at = p;
-    var fdlen = d_int(p, privlen);
-    fdlen = fdlen + d_int(p + fdlen, priv_at - cff);
-    store8(FB + p + fdlen, 18);                         # Private (size, offset)
-    fdlen = fdlen + 1;
+    var fdlen = 0;
+    if (o_nopriv == 0) {
+        fdlen = d_int(p, privlen);
+        fdlen = fdlen + d_int(p + fdlen, priv_at - cff);
+        store8(FB + p + fdlen, 18);                     # Private (size, offset)
+        fdlen = fdlen + 1;
+    }
     p = p + fdlen;
     var fdarray_at = p;
     put_u32(FB, p, 1);
@@ -349,6 +378,7 @@ fn build(): i64 {
         put_u16(FB, ivs, 1);                            # format
         put_u32(FB, ivs + 2, rl);
         put_u16(FB, ivs + 6, 2);                        # itemVariationDataCount
+        if (o_ivd0bad != 0) { put_u16(FB, ivs + 6, 0); }
         put_u32(FB, ivs + 8, ivd0);
         put_u32(FB, ivs + 12, ivd1);
         put_u16(FB, ivs + ivd0, 0);
@@ -356,11 +386,13 @@ fn build(): i64 {
         put_u16(FB, ivs + ivd0 + 4, 2);                 # regionIndexCount = 2
         put_u16(FB, ivs + ivd0 + 6, 0);
         put_u16(FB, ivs + ivd0 + 8, 1);
+        if (o_badregion != 0) { put_u16(FB, ivs + ivd0 + 8, 7); }
         put_u16(FB, ivs + ivd1, 0);
         put_u16(FB, ivs + ivd1 + 2, 0);
         put_u16(FB, ivs + ivd1 + 4, 1);                 # regionIndexCount = 1
         put_u16(FB, ivs + ivd1 + 6, 0);
         put_u16(FB, ivs + rl, 1);                       # axisCount
+        if (o_axes2 != 0) { put_u16(FB, ivs + rl, 2); }
         put_u16(FB, ivs + rl + 2, 2);                   # regionCount
         # ⭐ Real tents, in F2Dot14: region 0 peaks at +0.5 over (0, 1], region 1 at -0.5 over
         # [-1, 0). At the DEFAULT location both are zero — every coordinate sits on an edge — which
@@ -369,6 +401,7 @@ fn build(): i64 {
         put_u16(FB, rb, 0);         put_u16(FB, rb + 2, 8192);  put_u16(FB, rb + 4, 16384);
         put_u16(FB, rb + 6, 49152); put_u16(FB, rb + 8, 57344); put_u16(FB, rb + 10, 0);
         var ivslen = rl + 4 + 12;
+        if (o_axes2 != 0) { ivslen = rl + 4 + 24; }     # two regions x two axes x 6 bytes fit
         put_u16(FB, p, ivslen);
         p = p + 2 + ivslen;
     }
@@ -765,6 +798,110 @@ fn t_instance(): i64 {
     return 0;
 }
 
+# ── G2) the 1.1.2 audit's four: avar's own end, a map past 1.0, an axis out of order, a refused
+# scalar array ───────────────────────────────────────────────────────────────────
+var g_refuse_from = 0;                                  # sd_alloc hook: refuse blocks this big
+
+fn big_refuser(n): i64 {
+    if (n >= g_refuse_from) { return 0; }
+    return alloc(n);
+}
+
+fn t_audit(): i64 {
+    g_group = "G2 1.1.2 audit";
+    tab_reset();
+    cs_reset();
+    cs_n(100); cs_n(200); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_n(2); cs_op(16);
+    cs_op(21); cs_n(300); cs_n(0); cs_op(5); tab_add();
+    # ⛔ an avar declared 8 bytes long: its map lies past the TABLE (through 1.1.1 the FILE bounded
+    # it), so wght 550 stays at +0.3 instead of mapping to +0.8
+    opts_reset();
+    o_fvar = 1;
+    o_avar = 1;
+    o_avarshort = 1;
+    check(open_it() > 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 19661);
+    # ⛔ a map that sends 0.3 to 1.5: the coordinate is clamped to its documented +1.0
+    opts_reset();
+    o_fvar = 1;
+    o_avar = 1;
+    o_avarbig = 1;
+    check(open_it() > 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 65536);
+    # ⛔ an axis whose min (500) sits above its default (400) is no range: it stays at its default
+    # whatever is asked, FreeType's rule — it normalised to -1.5 through 1.1.1
+    opts_reset();
+    o_fvar = 1;
+    o_badaxis = 1;
+    check(open_it() > 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 0);
+    check(rekha_var_set_axis(g_f, 0, 100 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 0);
+    # ⛔ a refused region-scalar array (32 KB; the 512-byte coordinate array is granted): 0, and the
+    # coordinate does not move, so rekha_var_coord and the glyph agree on the default
+    opts_reset();
+    o_fvar = 1;
+    check(open_it() > 0, 1);
+    g_refuse_from = 4096;
+    sd_alloc_set(&big_refuser);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 0);
+    sd_alloc_set(0);
+    check(rekha_var_coord(g_f, 0), 0);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);  # granted, the axis moves
+    check(rekha_var_coord(g_f, 0), 65536);
+    return 0;
+}
+
+# ── G3) the 1.1.2 audit: a blend that cannot be weighted REFUSES, never draws deltas as points ───
+fn t_blend_refuse(): i64 {
+    g_group = "G3 blend refusals";
+    tab_reset();
+    cs_reset();                                         # 0: blends over subtable 0
+    cs_n(100); cs_n(200); cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_n(2); cs_op(16);
+    cs_op(21); cs_n(300); cs_n(0); cs_op(5); tab_add();
+    cs_reset(); cs_n(7); cs_n(8); cs_op(21); cs_n(70); cs_n(0); cs_op(5); tab_add();   # 1: no blend
+    var mode = 0;
+    while (mode < 3) {
+        opts_reset();
+        o_fvar = 1;
+        if (mode == 0) { o_ivd0bad = 1; }
+        if (mode == 1) { o_badregion = 1; }
+        if (mode == 2) { o_axes2 = 1; }
+        check(open_it() > 0, 1);
+        # at the default and at an instance: the blend refuses, the glyph is empty and NAMED
+        empty(0);
+        check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+        check(rekha_var_set_axis(g_f, 0, 650 * 65536), 1);
+        empty(0);
+        # ...and a glyph that never blends is untouched: the refusal is the blend's, not the face's
+        check(load(1), 2);
+        pt(0, 7, 8, 1);
+        mode = mode + 1;
+    }
+    # ⛔ a vsindex written as the REAL 1.0 is malformed — the spec types it an integer — and refused:
+    # rekha read a real as 0 (subtable 0, two regions) and FreeType converts it (subtable 1, one)
+    opts_reset();
+    o_privvs = 1;
+    o_privvsreal = 1;
+    check(open_it() > 0, 1);
+    empty(0);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    # ⭐ no Private operator (a MUST): the glyphs start from subtable 0, as FreeType's do, so the
+    # blend drops its two regions' deltas — not the 4-point outline built from them 1.1.1 drew
+    opts_reset();
+    o_nopriv = 1;
+    check(open_it() > 0, 1);
+    check(load(0), 2);
+    pt(0, 100, 200, 1);
+    pt(1, 400, 200, 1);
+    return 0;
+}
+
 # ── G) avar: the same axis, mapped ──────────────────────────
 fn t_avar(): i64 {
     g_group = "G avar";
@@ -934,6 +1071,8 @@ fn main(): i64 {
     t_guard();
     t_instance();
     t_avar();
+    t_audit();
+    t_blend_refuse();
     t_widestack();
     if (g_fails == 0) {
         var ok = "cff2_test: PASS (container, shapes, blend, instancing, avar, wide stack, refusals, guard; ";

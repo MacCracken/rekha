@@ -202,6 +202,28 @@ fn t_range(buf): i64 {
     return 0;
 }
 
+# ── B0) AN ODD segCountX2 READS FLOORED, AS FreeType READS IT (1.1.2 audit) ─────────
+# Through 1.1.1 the arrays were strided by the odd value itself — one byte off — and every lookup
+# missed. FreeType floors it (ttcmap.c: num_segs /= 2) below its paranoid level.
+fn t_odd_segc(buf): i64 {
+    g_group = "B0 odd segCountX2";
+    base(buf, 100, 12 + 32);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    var s = CM + 12;
+    f4_hdr(buf, s, 2);
+    f4_seg(buf, s, 2, 0, 65, 70, 0 - 64, 0);        # 'A'..'F' -> 1..6
+    f4_seg(buf, s, 2, 1, 0xFFFF, 0xFFFF, 1, 0);
+    var f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 1);           # control: segCountX2 4
+    put_u16(buf, s + 6, 5);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 65), 1);
+    check(rekha_char_to_glyph(f, 70), 6);
+    check(rekha_char_to_glyph(f, 71), 0);
+    return 0;
+}
+
 # ── B) THE glyphIdArray INDEX IS BOUNDED BY THE cmap EXTENT ─────────────
 fn t_gia_extent(buf): i64 {
     g_group = "B glyphIdArray extent";
@@ -694,6 +716,7 @@ fn main(): i64 {
     alloc_init();
     var buf = alloc(BUF_LEN);
     t_range(buf);
+    t_odd_segc(buf);
     t_gia_extent(buf);
     t_select(buf);
     t_symbol(buf);

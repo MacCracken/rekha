@@ -136,7 +136,13 @@ fn rekha_cff_obj(buf, at, end, i, out): i64 {
 
 # Find operator `op` (a byte 0..21, or 1200 + the second byte of a 12-escape) in the DICT [a, b).
 # On a hit: out+0 = operands before it, out+8 = the last operand, out+16 = the one before (reals
-# count as operands of value 0). Returns 1 / 0 (absent, or a malformed operand stops the walk).
+# count as operands of value 0). Returns 1 found, 0 absent (or a malformed operand stopped the walk
+# before it), -1 MALFORMED — the operator's operand count is not its arity, it appears a second
+# time, or an operand that must be an integer is a real (1.1.2 audit). ⛔ Every caller treats -1 as
+# a refusal: through 1.1.1 rekha read the LAST operand of the FIRST occurrence with reals as 0 and
+# FreeType the FIRST operand of the LAST, so such a DICT decoded to different glyphs in each, and
+# ADR 0002 does not pick between two readings of a malformed font. The 405 OpenType CFF faces of
+# the dev host carry none (all resolve, every glyph unchanged — CHANGELOG 1.1.2).
 # `maxop` is the highest byte that counts as an OPERATOR. ⛔ It is 21 in CFF, where 22..27 are
 # reserved and a DICT holding one is malformed — the scan stops. CFF2 puts real operators up there:
 # `vstore` is 24 in the Top DICT, and `vsindex` (22) and `blend` (23) live in a Private DICT. Reading
@@ -151,6 +157,8 @@ fn rekha_cff_dict_op_max(buf, a, b, op, out, maxop): i64 {
     var n = 0;
     var last = 0;
     var prev = 0;
+    var reals = 0;
+    var found = 0;
     var p = a;
     while (p < b) {
         var b0 = load8(buf + p);
@@ -158,37 +166,42 @@ fn rekha_cff_dict_op_max(buf, a, b, op, out, maxop): i64 {
             var o = b0;
             p = p + 1;
             if (b0 == 12) {
-                if (p >= b) { return 0; }
+                if (p >= b) { return found; }
                 o = 1200 + load8(buf + p);
                 p = p + 1;
             }
             if (o == op) {
+                if (found != 0) { return 0 - 1; }               # a second occurrence
+                if (n != rekha_cff_dict_arity(op)) { return 0 - 1; }
+                if (reals != 0 && op != 1207 && op != 1230) { return 0 - 1; }
                 store64(out, n);
                 store64(out + 8, last);
                 store64(out + 16, prev);
-                return 1;
+                found = 1;
             }
             n = 0;
             last = 0;
             prev = 0;
+            reals = 0;
         } else {
             var v = 0;
             if (b0 == 28) {
-                if (p + 3 > b) { return 0; }
+                if (p + 3 > b) { return found; }
                 v = rekha_rd_i16(buf, p + 1);
                 p = p + 3;
             } else {
                 if (b0 == 29) {
-                    if (p + 5 > b) { return 0; }
+                    if (p + 5 > b) { return found; }
                     v = rekha_rd_u32(buf, p + 1);
                     if (v >= 0x80000000) { v = v - 0x100000000; }
                     p = p + 5;
                 } else {
                     if (b0 == 30) {
                         p = p + 1;
+                        reals = reals + 1;
                         var more = 1;
                         while (more != 0) {
-                            if (p >= b) { return 0; }
+                            if (p >= b) { return found; }
                             var nb = load8(buf + p);
                             p = p + 1;
                             if ((nb >> 4) == 15 || (nb & 15) == 15) { more = 0; }
@@ -199,7 +212,7 @@ fn rekha_cff_dict_op_max(buf, a, b, op, out, maxop): i64 {
                             p = p + 1;
                         } else {
                             if (b0 >= 247 && b0 <= 254) {
-                                if (p + 2 > b) { return 0; }
+                                if (p + 2 > b) { return found; }
                                 if (b0 <= 250) {
                                     v = (b0 - 247) * 256 + load8(buf + p + 1) + 108;
                                 } else {
@@ -207,7 +220,7 @@ fn rekha_cff_dict_op_max(buf, a, b, op, out, maxop): i64 {
                                 }
                                 p = p + 2;
                             } else {
-                                return 0;           # above maxop, 31, 255: reserved in a DICT
+                                return found;       # above maxop, 31, 255: reserved in a DICT
                             }
                         }
                     }
@@ -218,7 +231,15 @@ fn rekha_cff_dict_op_max(buf, a, b, op, out, maxop): i64 {
             n = n + 1;
         }
     }
-    return 0;
+    return found;
+}
+
+# How many operands each DICT operator rekha reads takes (TN 5176 table 9 / 10, CFF2 chapter).
+fn rekha_cff_dict_arity(op): i64 {
+    if (op == 18) { return 2; }                         # Private: size, offset
+    if (op == 1230) { return 3; }                       # ROS: Registry, Ordering, Supplement
+    if (op == 1207) { return 6; }                       # FontMatrix
+    return 1;                                           # 15 / 17 / 19 / 22 / 24 / 1206 / 1236 / 1237
 }
 
 fn rekha_cff_dict_op(buf, a, b, op, out): i64 {
@@ -505,7 +526,7 @@ fn rekha_cff_priv_subrs_csz(buf, cff, end, a, b, csz): i64 {
     var mx = 21;
     if (csz == 4) { mx = 27; }
     var d: i64[3];
-    if (rekha_cff_dict_op_max(buf, a, b, 18, &d, mx) == 0) { return 0; }
+    if (rekha_cff_dict_op_max(buf, a, b, 18, &d, mx) != 1) { return 0; }
     if (load64(&d) < 2) { return 0; }
     var size = load64(&d + 16);
     var poff = load64(&d + 8);
@@ -513,7 +534,7 @@ fn rekha_cff_priv_subrs_csz(buf, cff, end, a, b, csz): i64 {
     var pa = cff + poff;
     var pb = pa + size;
     if (pb > end) { return 0; }
-    if (rekha_cff_dict_op_max(buf, pa, pb, 19, &d, mx) == 0) { return 0; }
+    if (rekha_cff_dict_op_max(buf, pa, pb, 19, &d, mx) != 1) { return 0; }
     var rel = load64(&d + 8);
     if (rel < 0) { return 0; }
     var at = pa + rel;
@@ -577,10 +598,12 @@ fn rekha_cff_resolve(f): i64 {
     if (rekha_cff_index_next(buf, gs, end) == 0) { return 0; }   # Global Subr INDEX
 
     var d: i64[3];
-    if (rekha_cff_dict_op(buf, ta, tb, 1206, &d) != 0) {
+    var cst = rekha_cff_dict_op(buf, ta, tb, 1206, &d);
+    if (cst < 0) { return 0; }
+    if (cst == 1) {
         if (load64(&d + 8) != 2) { return 0; }
     }
-    if (rekha_cff_dict_op(buf, ta, tb, 17, &d) == 0) { return 0; }
+    if (rekha_cff_dict_op(buf, ta, tb, 17, &d) != 1) { return 0; }
     if (load64(&d + 8) < 0) { return 0; }
     var cs = cff + load64(&d + 8);
     var n = rekha_cff_index_count(buf, cs, end);
@@ -589,8 +612,10 @@ fn rekha_cff_resolve(f): i64 {
     var subrs = 0;
     var fdarray = 0;
     var fdselect = 0;
-    if (rekha_cff_dict_op(buf, ta, tb, 1230, &d) != 0) {
-        if (rekha_cff_dict_op(buf, ta, tb, 1236, &d) == 0) { return 0; }
+    var ros = rekha_cff_dict_op(buf, ta, tb, 1230, &d);
+    if (ros < 0) { return 0; }                          # a malformed ROS: never read as name-keyed
+    if (ros == 1) {
+        if (rekha_cff_dict_op(buf, ta, tb, 1236, &d) != 1) { return 0; }
         if (load64(&d + 8) < 0) { return 0; }
         fdarray = cff + load64(&d + 8);
         if (rekha_cff_index_count(buf, fdarray, end) <= 0) { return 0; }
@@ -607,7 +632,7 @@ fn rekha_cff_resolve(f): i64 {
             if (rekha_cff_dict_op(buf, fa, fa + load64(&fo + 8), 1207, &d) != 0) { return 0; }
             fi = fi + 1;
         }
-        if (rekha_cff_dict_op(buf, ta, tb, 1237, &d) == 0) { return 0; }
+        if (rekha_cff_dict_op(buf, ta, tb, 1237, &d) != 1) { return 0; }
         if (load64(&d + 8) < 0) { return 0; }
         fdselect = cff + load64(&d + 8);
         if (fdselect + 1 > end) { return 0; }
@@ -632,7 +657,9 @@ fn rekha_cff_resolve(f): i64 {
     # ⚠ This never fails the open. A charset rekha cannot use is recorded as -1 and costs only the
     # seac path; every other reader is untouched.
     var charset = 0;
-    if (rekha_cff_dict_op(buf, ta, tb, 15, &d) != 0) {
+    var csr = rekha_cff_dict_op(buf, ta, tb, 15, &d);
+    if (csr < 0) { charset = 0 - 1; }                   # malformed: unusable, as the note says
+    if (csr == 1) {
         var cv = load64(&d + 8);
         if (cv < 0) {
             charset = 0 - 1;
@@ -740,7 +767,8 @@ var RC_SMAX  = 272;
 # The font's FontMatrix block (`f + 368`) when it is not the identity, else 0. Held here so the
 # point store needs no font handle. 0.5.1.
 var RC_MTX   = 280;
-var RC_SLOTS = 36;
+var RC_AXBAD = 288;   # 1 when the store's region list and fvar disagree on the axis count
+var RC_SLOTS = 37;
 
 fn rekha_cff_arg(s, i): i64 { return load64(load64(s + RC_STK) + i * 8); }
 
@@ -1023,6 +1051,12 @@ fn rekha_cff_op(s, op, depth): i64 {
         # n x k deltas, then n. At the default location every region's scalar is zero, so each
         # blended value IS its default — which is already sitting in place, below the deltas. So the
         # whole operator is: drop the count, drop the deltas, leave the defaults.
+        # ⛔ A store whose subtable did not resolve has no region count to give — and a blend with
+        # none dropped only `n`, leaving the n x k deltas on the stack for the next operator to draw
+        # as coordinates (1.1.2 audit). Asked for one, it refuses; so does a region list whose axis
+        # count is not fvar's (FreeType: "Axis count mismatch", cffload.c).
+        if (load64(s + RC_VST) != 0 && load64(s + RC_IVD) == 0) { store64(s + RC_BAD, 1); return 0 - 1; }
+        if (load64(s + RC_AXBAD) != 0) { store64(s + RC_BAD, 1); return 0 - 1; }
         var k = load64(s + RC_NREG);
         if (nb + nb * k > sp) { store64(s + RC_BAD, 1); return 0 - 1; }
         var base = sp - nb - nb * k;
@@ -1043,11 +1077,12 @@ fn rekha_cff_op(s, op, depth): i64 {
                 var j = 0;
                 while (j < k) {
                     var ri = rekha_rd_u16(buf2, ivd + 6 + j * 2);
-                    if (ri < nsc) {
-                        var sc = load64(scal + ri * 8);
-                        if (sc != 0) {
-                            acc = acc + load64(stk2 + (base + nb + vi2 * k + j) * 8) * sc;
-                        }
+                    # rekha_cff2_ivd validated every index against the region list; one past the
+                    # live scalars now refuses rather than counting as 0
+                    if (ri >= nsc) { store64(s + RC_BAD, 1); return 0 - 1; }
+                    var sc = load64(scal + ri * 8);
+                    if (sc != 0) {
+                        acc = acc + load64(stk2 + (base + nb + vi2 * k + j) * 8) * sc;
                     }
                     j = j + 1;
                 }
@@ -1330,7 +1365,12 @@ fn rekha_cff_seac(font, s, gid): i64 {
     if (load64(font + 200) != 0) { return 0; }
     var bgid = rekha_cff_sid_to_gid(font, rekha_cff_stdenc(load64(s + RC_BCH)));
     var agid = rekha_cff_sid_to_gid(font, rekha_cff_stdenc(load64(s + RC_ACH)));
-    if (bgid <= 0 || agid <= 0) { return 0; }
+    if (bgid <= 0 || agid <= 0) {
+        # Through an Expert charset (1 / 2) the miss is rekha's missing table, not the font's fault.
+        var cset = load64(font + 240);
+        if (cset == 1 || cset == 2) { return rekha_fail(font, REKHA_ERR_UNSUPPORTED, "seac charset"); }
+        return 0;
+    }
     # ⛔ Not even one level of self-reference: a base that is this glyph would re-enter the same
     # charstring and park the same request again.
     if (bgid == gid || agid == gid) { return 0; }
@@ -1359,6 +1399,7 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
     store64(s + RC_MTX, 0);
     if (load64(font + 360) != 0) { store64(s + RC_MTX, font + 368); }
     store64(s + RC_VST, load64(font + 264));
+    store64(s + RC_AXBAD, rekha_cff2_axes_bad(font));
     store64(s + RC_VSOK, v2);
     if (load64(font + 200) != 0) {                  # CID-keyed, or ANY CFF2: FDArray[FDSelect(gid)]
         var fd = rekha_cff_fd(font, gid);           # -1 (no range) fails the object lookup below
@@ -1407,10 +1448,28 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
 
 # Decode glyph `gid` of a CFF font into a RekhaOutline. Empty for an out-of-range gid (the CharStrings
 # lookup refuses it), a broken rule or a bound (see the head of this file); 0 only on OOM.
+# A charstring rekha refused: an empty outline, NAMED. Through 1.1.1 every refusal here answered
+# REKHA_OK, which docs/api/outline.md reserves for a blank that was real — a space (1.1.2 audit).
+# A site that knows better named it already (the gid guard, an Expert-charset seac); the point cap
+# is the run's own count past REKHA_COMPOSITE_MAXP; anything else is a malformed charstring.
+fn rekha_cff_refused(font, s): i64 {
+    if (rekha_font_error(font) == REKHA_OK) {
+        # A run stops at its first refusal, so whichever ceiling is past its value is what fired.
+        if (load64(s + RC_NP) > REKHA_COMPOSITE_MAXP) {
+            rekha_fail(font, REKHA_ERR_OOM, "point cap");
+        } elif (load64(s + RC_OPS) > REKHA_CFF_MAXOPS) {
+            rekha_fail(font, REKHA_ERR_OOM, "operator budget");
+        } else {
+            rekha_fail(font, REKHA_ERR_BAD_GLYF, "charstring");
+        }
+    }
+    return rekha_outline_empty();
+}
+
 # ⚠ No load context: a CFF glyph has no components, so one decode is one load, and its points are
 # already capped at REKHA_COMPOSITE_MAXP — below any budget a context would carry.
 fn rekha_cff_load(font, gid): i64 {
-    var s: i64[36];
+    var s: i64[37];
     # ⚠ ONE array, sized for the larger dialect (4,104 B of frame), and RC_SMAX is what actually
     # bounds a run — a CFF still refuses its 49th operand. Sizing it per dialect would need two
     # frames or an allocation, and rekha_cff_load is called once per glyph, not per point.
@@ -1422,7 +1481,7 @@ fn rekha_cff_load(font, gid): i64 {
         rekha_fail(font, REKHA_ERR_OTHER, "glyph id");
         return rekha_outline_empty();
     }
-    if (rekha_cff_run(font, gid, &s, &stk, 0) == 0) { return rekha_outline_empty(); }
+    if (rekha_cff_run(font, gid, &s, &stk, 0) == 0) { return rekha_cff_refused(font, &s); }
     var np = load64(&s + RC_NP);
     var nc = load64(&s + RC_NC);
     var cap = load64(&s + RC_NPMAX);
@@ -1437,8 +1496,14 @@ fn rekha_cff_load(font, gid): i64 {
     store64(&s + RC_YS, ys);
     store64(&s + RC_OC, oc);
     store64(&s + RC_EPS, eps);
-    if (rekha_cff_run(font, gid, &s, &stk, 1) == 0) { return rekha_outline_clear(o); }
-    if (load64(&s + RC_NP) != np || load64(&s + RC_NC) != nc) { return rekha_outline_clear(o); }
+    if (rekha_cff_run(font, gid, &s, &stk, 1) == 0) {
+        rekha_cff_refused(font, &s);
+        return rekha_outline_clear(o);
+    }
+    if (load64(&s + RC_NP) != np || load64(&s + RC_NC) != nc) {
+        rekha_cff_refused(font, &s);
+        return rekha_outline_clear(o);
+    }
     store64(o, nc);
     store64(o + 8, np);
     store64(o + 16, eps);

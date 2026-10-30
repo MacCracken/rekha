@@ -67,6 +67,14 @@ var o_twosub = 0;       # two subtables in the first lookup, so the FIRST match 
 var o_badtype = 0;      # make the first lookup type 4, which rekha skips
 var o_legacy = 0;       # also emit a legacy `kern` table, which GPOS must beat
 var o_junkscript = 0;   # fill the ScriptList with garbage: rekha must not care
+# 1.1.2 audit: put_gpos_many instead of put_gpos — g_mnfr `kern` FeatureRecords all aimed at ONE
+# Feature naming g_mnli lookup indices (0, 1, 2, ... when g_mdistinct, else all 0), over a
+# LookupList of g_mnlook PairPos lookups, lookup k carrying (1 + k) times the base values
+var o_many = 0;
+var g_mnfr = 1;
+var g_mnli = 1;
+var g_mnlook = 1;
+var g_mdistinct = 1;
 
 var g_gpos = 0;
 var g_gposlen = 0;
@@ -306,6 +314,43 @@ fn put_legacy_kern(at): i64 {
     return 4 + 6 + 8 + 6;
 }
 
+fn put_gpos_many(at): i64 {
+    var fl = 12;
+    pu16(at + 10, 0);                                   # ScriptList: no scripts
+    pu16(at + fl, g_mnfr);
+    var fe = 2 + g_mnfr * 6;
+    var r = 0;
+    while (r < g_mnfr) {
+        pu32(at + fl + 2 + r * 6, 0x6B65726E);
+        pu16(at + fl + 2 + r * 6 + 4, fe);
+        r = r + 1;
+    }
+    pu16(at + fl + fe, 0);
+    pu16(at + fl + fe + 2, g_mnli);
+    var j = 0;
+    while (j < g_mnli) {
+        var li = 0;
+        if (g_mdistinct != 0) { li = j; }
+        pu16(at + fl + fe + 4 + j * 2, li);
+        j = j + 1;
+    }
+    var ll = fl + fe + 4 + g_mnli * 2;
+    pu16(at + ll, g_mnlook);
+    var lbody = 2 + g_mnlook * 2;
+    var k = 0;
+    while (k < g_mnlook) {
+        pu16(at + ll + 2 + k * 2, lbody);
+        lbody = lbody + put_lookup(at + ll + lbody, 2, 1, 1 + k);
+        k = k + 1;
+    }
+    pu16(at, 1);
+    pu16(at + 2, 0);
+    pu16(at + 4, 10);
+    pu16(at + 6, fl);
+    pu16(at + 8, ll);
+    return ll + lbody;
+}
+
 fn build(): i64 {
     memset(FB, 0, FB_CAP);
     var ntab = 6;
@@ -326,7 +371,13 @@ fn build(): i64 {
     var gpos_at = kern_at + ((kernlen + 3) & (0 - 4));
     g_gpos = gpos_at;
     g_gposlen = 0;
-    if (o_nogpos == 0) { g_gposlen = put_gpos(gpos_at); }
+    if (o_nogpos == 0) {
+        if (o_many != 0) {
+            g_gposlen = put_gpos_many(gpos_at);
+        } else {
+            g_gposlen = put_gpos(gpos_at);
+        }
+    }
 
     pu16(head_at + 18, 1000);
     pu16(head_at + 50, 1);
@@ -372,6 +423,11 @@ fn opts_reset(): i64 {
     o_badtype = 0;
     o_legacy = 0;
     o_junkscript = 0;
+    o_many = 0;
+    g_mnfr = 1;
+    g_mnli = 1;
+    g_mnlook = 1;
+    g_mdistinct = 1;
     return 0;
 }
 
@@ -529,6 +585,62 @@ fn t_multi(): i64 {
     return 0;
 }
 
+# ── F2) the 1.1.2 audit: both ceilings refuse, and a refused allocation is retried ──────
+var g_refuse_from = 0;
+
+fn big_refuser(n): i64 {
+    if (n >= g_refuse_from) { return 0; }
+    return alloc(n);
+}
+
+fn t_ceilings(): i64 {
+    g_group = "F2 1.1.2 audit";
+    # 64 distinct lookups still all apply: lookup k says -40 (1 + k), and 1 + ... + 64 = 2080
+    opts_reset();
+    o_many = 1;
+    g_mnli = 64;
+    g_mnlook = 64;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40 * 2080);
+    # ⛔ a 65th is a REFUSAL, not a drop: no GPOS kern at all, never the partial -40 x 2080 of
+    # the first 64 that 1.1.1 answered
+    opts_reset();
+    o_many = 1;
+    g_mnli = 65;
+    g_mnlook = 65;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 0);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0);
+    # ⛔ the walk is budgeted: 40 records x 100 indices (4,000 pairs) resolve — one lookup, deduplicated
+    opts_reset();
+    o_many = 1;
+    g_mnfr = 40;
+    g_mnli = 100;
+    g_mdistinct = 0;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40);
+    # ...and 50 x 100 (5,000) is refused, where 1.1.1 walked records x indices x 64 with no bound
+    opts_reset();
+    o_many = 1;
+    g_mnfr = 50;
+    g_mnli = 100;
+    g_mdistinct = 0;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 0);
+    # ⛔ a refused 512-byte lookup list is not cached as "no GPOS kern": the next query retries
+    opts_reset();
+    check(openf() != 0, 1);
+    g_refuse_from = 512;
+    sd_alloc_set(&big_refuser);
+    check(rekha_gpos_kern_present(g_f), 0);
+    sd_alloc_set(0);
+    check(rekha_gpos_kern_present(g_f), 1);
+    expect(1);
+    return 0;
+}
+
 # ── G) GPOS beats the legacy table ──────────────────────────
 fn t_source(): i64 {
     g_group = "G source";
@@ -637,6 +749,7 @@ fn main(): i64 {
     t_valueformat();
     t_extension();
     t_multi();
+    t_ceilings();
     t_source();
     t_refuse();
     t_guard();

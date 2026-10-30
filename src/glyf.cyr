@@ -329,9 +329,17 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     var xs = end_pts + nc * 8;
     var ys = xs + np * 8;
     var on_curve = ys + np * 8;
-    # A truncation or a re-read endPt out of order after the carve returns the block cleared, as
-    # every post-carve refusal here always has.
-    if (rekha_glyf_decode_simple(buf, &h, nc, end_pts, xs, ys, on_curve) != 1) {
+    # A truncation or a re-read endPt out of order after the carve returns the block cleared, and
+    # NAMED — the decoder leaves that to its caller, and an unnamed blank answered REKHA_OK, which
+    # docs/api/outline.md reserves for a blank that was real (1.1.2 audit). The same codes as the
+    # hinted loader's over the same decoder (src/hint.cyr, rekha_hint_load_simple).
+    var dec = rekha_glyf_decode_simple(buf, &h, nc, end_pts, xs, ys, on_curve);
+    if (dec == 0) {
+        rekha_fail(font, REKHA_ERR_TRUNCATED, "points");
+        return rekha_outline_clear(o);
+    }
+    if (dec != 1) {
+        rekha_fail(font, REKHA_ERR_BAD_GLYF, "endPts order");
         return rekha_outline_clear(o);
     }
 
@@ -339,7 +347,9 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     # contours are known, and nothing has been scaled or emitted yet — which is exactly what gvar's
     # deltas and its per-contour interpolation need. At the default location, or in a font with no
     # gvar, this is one load and a return (0.4.12).
-    rekha_gvar_apply(font, gid, xs, ys, np, nc, end_pts);
+    # -1: the gvar scratch was refused. That is OOM — rekha_load_glyph's 0 — never the default
+    # instance drawn in the varied one's place (1.1.2 audit).
+    if (rekha_gvar_apply(font, gid, xs, ys, np, nc, end_pts) < 0) { return 0; }
 
     store64(o, nc);
     store64(o + 8, np);
@@ -454,6 +464,12 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
         var co = rekha_load_glyph_d(font, load64(&rec + 8), depth + 1, ctx);
         if (co == 0) { return 0; }
         if (load64(ctx + 16) != 0) { return rekha_outline_empty(); }   # sticky abort
+        # ⛔ A REFUSED component refuses the composite, with the component's code. A blank one
+        # (a space, code REKHA_OK) is merged as nothing; a refused one came back just as empty, and
+        # merging the rest drew a PARTIAL glyph — then the next component's rekha_glyf_span cleared
+        # the code, so it even answered REKHA_OK (1.1.2 audit). FreeType and rekha_hint_glyph
+        # refuse the whole glyph; "never partial" is the documented promise (docs/api/outline.md).
+        if (rekha_font_error(font) != REKHA_OK) { return rekha_outline_empty(); }
         store64(comps + k * 8, co);
         tot_pts = tot_pts + rekha_outline_n_points(co);
         tot_ctr = tot_ctr + rekha_outline_n_contours(co);
@@ -482,7 +498,7 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
                 store64(cdx + zc * 8, 0);
                 zc = zc + 1;
             }
-            rekha_gvar_apply(font, gid, cdx, cdy, n, 0, 0);
+            if (rekha_gvar_apply(font, gid, cdx, cdy, n, 0, 0) < 0) { return 0; }   # OOM, as above
         }
     }
 
@@ -506,6 +522,13 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
         var coc = rekha_outline_on_curve(c);
         var ceps = rekha_outline_end_pts(c);
         var flags = load64(&rec);
+        # A blank component adds nothing and has no point to match: skipped BEFORE its offset or its
+        # point-matching pair is read, as FreeType skips it (ref2143/ttgload.c:1878-1879) and as the
+        # hinted loader does. Matching against it refused the whole composite here (1.1.2 audit).
+        if (cnp == 0) {
+            k = k + 1;
+            continue;
+        }
         var xx = load64(&rec + 32);
         var xy = load64(&rec + 40);
         var yx = load64(&rec + 48);
@@ -529,8 +552,10 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
         } else {                               # point matching: merged[arg1] <- child[arg2]
             var pa = load64(&rec + 16);
             var pb = load64(&rec + 24);
-            if (pa >= base) { return rekha_outline_clear(o); }
-            if (pb >= cnp) { return rekha_outline_clear(o); }
+            if (pa >= base || pb >= cnp) {
+                rekha_fail(font, REKHA_ERR_BAD_GLYF, "composite point");   # the hinted loader's code
+                return rekha_outline_clear(o);
+            }
             var bx = load64(cxs + pb * 8);
             var by = load64(cys + pb * 8);
             dx = load64(xs + pa * 8) - sd_asr(xx * bx + yx * by + 8192, 14);

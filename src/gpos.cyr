@@ -49,6 +49,8 @@ var REKHA_TAG_GPOS = 0x47504F53;   # 'GPOS'
 var REKHA_TAG_KERN_FEAT = 0x6B65726E;   # 'kern', as a feature tag
 # Deduplicated lookups behind every `kern` feature in one font. Real fonts use one or two.
 var REKHA_GPOS_MAXLOOKUP = 64;
+# (feature record, lookup index) pairs one resolve may walk; past it the GPOS kern is refused.
+var REKHA_GPOS_MAXPAIRS = 4096;
 
 fn rekha_gpos_resolve(f): i64 {
     store64(f + 576, 0);
@@ -239,6 +241,14 @@ fn rekha_gpos_pairpos(font, sub, l, r, end, out): i64 {
 }
 
 # Resolve every `kern` feature's lookups, once, into the font's cache. Returns the count.
+# ⛔ BOTH CEILINGS ARE REFUSALS (ADR 0002), and either leaves the GPOS kern absent (count 0):
+#   - a 65th distinct lookup. Through 1.1.1 it was DROPPED, so a font with more answered a partial
+#     sum with REKHA_OK. 2,155 host faces carry at most 12 (1.1.2 audit).
+#   - more than REKHA_GPOS_MAXPAIRS (feature record, lookup index) pairs walked. The walk was
+#     nf x nli x 64 with no bound: one 196 KB GPOS cost 105.7 s on its first kerning query, and
+#     FeatureRecords may all point at one Feature, so deduplicating offsets does not bound it.
+#     Host faces walk at most 29 (1.1.2 audit).
+# A refused ALLOCATION is not cached: the next query tries again, as rekha_var_set_axis does.
 fn rekha_gpos_lookups(font): i64 {
     var n = load64(font + 600);
     if (n >= 0) { return n; }
@@ -256,10 +266,14 @@ fn rekha_gpos_lookups(font): i64 {
     var nl = rekha_rd_u16(buf, ll);
     if (ll + 2 + nl * 2 > end) { return 0; }
     var arr = sd_alloc(REKHA_GPOS_MAXLOOKUP * 8);
-    if (arr == 0) { return 0; }
+    if (arr == 0) {
+        store64(font + 600, 0 - 1);                     # unresolved, so the next query retries
+        return 0;
+    }
     store64(font + 592, arr);
 
     var cnt = 0;
+    var walked = 0;
     var i = 0;
     while (i < nf) {
         var fr = fl + 2 + i * 6;
@@ -268,6 +282,8 @@ fn rekha_gpos_lookups(font): i64 {
             if (fe >= fl && fe + 4 <= end) {
                 var nli = rekha_rd_u16(buf, fe + 2);
                 if (fe + 4 + nli * 2 <= end) {
+                    walked = walked + nli;
+                    if (walked > REKHA_GPOS_MAXPAIRS) { return 0; }   # refused: the count stays 0
                     var j = 0;
                     while (j < nli) {
                         var li = rekha_rd_u16(buf, fe + 4 + j * 2);
@@ -281,8 +297,9 @@ fn rekha_gpos_lookups(font): i64 {
                                 if (load64(arr + k * 8) == lo) { seen = 1; }
                                 k = k + 1;
                             }
-                            if (seen == 0 && cnt < REKHA_GPOS_MAXLOOKUP) {
+                            if (seen == 0) {
                                 if (lo >= ll && lo + 6 <= end) {
+                                    if (cnt >= REKHA_GPOS_MAXLOOKUP) { return 0; }   # refused
                                     store64(arr + cnt * 8, lo);
                                     cnt = cnt + 1;
                                 }

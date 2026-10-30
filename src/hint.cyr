@@ -3741,6 +3741,7 @@ fn rekha_hint_gvar(font, gid, xs, ys, np, nc, eps): i64 {
         k = k + 1;
     }
     var varied = rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, np + 4);
+    if (varied < 0) { return 0 - 1; }               # the scratch was refused: the caller refuses
     if (varied == 0) { return 0; }
     if (load64(font + 416) != 0) {
         store64(xs + np * 8, load64(&keep));        store64(ys + np * 8, load64(&keep + 32));
@@ -3936,7 +3937,9 @@ fn rekha_hint_load_empty(ctx, gid, base, lc): i64 {
     var k = 0;
     while (k < 4) { store8(tags + k, 0); k = k + 1; }
     rekha_hint_phantoms(ctx, gid, 0, 0, xs, ys);
-    rekha_hint_gvar(load64(ctx + HC_FONT), gid, xs, ys, 0, 0, 0);
+    if (rekha_hint_gvar(load64(ctx + HC_FONT), gid, xs, ys, 0, 0, 0) < 0) {
+        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, "gvar scratch");
+    }
     rekha_hint_scale_zone(ctx, base, 4);
     store64(lc + LC_NC, 0);
     return 0;
@@ -4012,7 +4015,11 @@ fn rekha_hint_load_simple_at(ctx, gid, start, end, nc, base, cbase, lc): i64 {
     while (k < 4) { store8(tags + np + k, 0); k = k + 1; }
     rekha_hint_phantoms(ctx, gid, rekha_rd_i16(buf, start + 2), rekha_rd_i16(buf, start + 8),
       xs + np * 8, ys + np * 8);
-    rekha_hint_gvar(font, gid, xs, ys, np, nc, eps);
+    # a refused gvar scratch refuses the glyph — the default instance hinted in the varied one's
+    # place answered 1 with REKHA_OK through 1.1.1 (1.1.2 audit)
+    if (rekha_hint_gvar(font, gid, xs, ys, np, nc, eps) < 0) {
+        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, "gvar scratch");
+    }
     rekha_hint_scale_zone(ctx, base, np + 4);
     store64(lc + LC_NC, nc);
     if (load64(lc + LC_HINT) == 0) { return np; }
@@ -4097,7 +4104,9 @@ fn rekha_hint_load_composite_at(ctx, gid, start, end, depth, base, cbase, lc): i
     }
     rekha_hint_phantoms(ctx, gid, rekha_rd_i16(buf, start + 2), rekha_rd_i16(buf, start + 8),
       &cdx + n * 8, &cdy + n * 8);
-    rekha_hint_gvar(font, gid, &cdx, &cdy, n, 0, 0);
+    if (rekha_hint_gvar(font, gid, &cdx, &cdy, n, 0, 0) < 0) {
+        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, "gvar scratch");
+    }
     var sc = load64(ctx + HC_SCALE);
     var ppx: i64[4];
     var ppy: i64[4];

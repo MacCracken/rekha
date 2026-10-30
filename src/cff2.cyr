@@ -66,8 +66,43 @@ fn rekha_cff2_ivd(buf, vstore, end, idx): i64 {
     if (ivd + 6 > ivend) { return 0; }
     # ⚠ The region INDEXES are bounds-checked too, not just their count: instancing reads WHICH
     # regions a subtable blends over, so the whole array has to lie inside the store.
-    if (ivd + 6 + rekha_rd_u16(buf, ivd + 4) * 2 > ivend) { return 0; }
+    var nri = rekha_rd_u16(buf, ivd + 4);
+    if (ivd + 6 + nri * 2 > ivend) { return 0; }
+    # ⛔ ...and every index has to NAME a region. Through 1.1.1 one past the region list was skipped
+    # in the blend — its delta 0, every other region's applied: a half-varied outline. FreeType
+    # refuses it ("region index out of range", cffload.c), and so does rekha's own HVAR reader
+    # (src/hvar.cyr, rekha_ivs_delta). The region list must fit whole, as the scalars read it.
+    var rl = ivs + rekha_rd_u32(buf, ivs + 2);
+    if (rl < ivs || rl + 4 > ivend) { return 0; }
+    var nreg = rekha_rd_u16(buf, rl + 2);
+    if (rl + 4 + nreg * rekha_rd_u16(buf, rl) * 6 > ivend) { return 0; }
+    var j = 0;
+    while (j < nri) {
+        if (rekha_rd_u16(buf, ivd + 6 + j * 2) >= nreg) { return 0; }
+        j = j + 1;
+    }
     return ivd;
+}
+
+# 1 when a face has both fvar and a CFF2 variation store and they disagree on the axis count, which
+# FreeType refuses a blend for ("Axis count mismatch", cffload.c) and rekha too (1.1.2 audit): the
+# scalars would be computed against coordinates the font never defined. 0 otherwise — including no
+# fvar, where nothing can move, and a region list rekha_cff2_ivd will refuse on its own.
+fn rekha_cff2_axes_bad(font): i64 {
+    var vstore = load64(font + 264);
+    if (vstore == 0) { return 0; }
+    var nax = load64(font + 280);
+    if (nax < 1) { return 0; }
+    var buf = load64(font);
+    var end = load64(font + 224);
+    if (vstore + 2 > end) { return 0; }
+    var ivs = vstore + 2;
+    var ivend = ivs + rekha_rd_u16(buf, vstore);
+    if (ivend > end || ivs + 8 > ivend) { return 0; }
+    var rl = ivs + rekha_rd_u32(buf, ivs + 2);
+    if (rl < ivs || rl + 4 > ivend) { return 0; }
+    if (rekha_rd_u16(buf, rl) != nax) { return 1; }
+    return 0;
 }
 
 # The number of regions ItemVariationData[idx] blends over, or -1.
@@ -85,15 +120,21 @@ fn rekha_cff2_regions(buf, vstore, end, idx): i64 {
 fn rekha_cff2_priv_ivd(buf, cff, end, a, b, vstore): i64 {
     if (vstore == 0) { return 0; }
     var d: i64[3];
-    if (rekha_cff_dict_op_max(buf, a, b, 18, &d, 27) == 0) { return 0; }
-    if (load64(&d) < 2) { return 0; }
+    # A Private DICT is a MUST in a CFF2 Font DICT. Without a readable one the glyphs start from
+    # subtable 0, as FreeType's do — through 1.1.1 this answered 0 here, and a blend then took no
+    # region count and drew its deltas as coordinates (1.1.2 audit). A subtable 0 that does not
+    # resolve is still 0: the `blend` that asks for it refuses, not the glyph that never blends.
+    if (rekha_cff_dict_op_max(buf, a, b, 18, &d, 27) != 1) { return rekha_cff2_ivd(buf, vstore, end, 0); }
+    if (load64(&d) < 2) { return rekha_cff2_ivd(buf, vstore, end, 0); }
     var size = load64(&d + 16);
     var poff = load64(&d + 8);
-    if (size < 0 || poff < 0) { return 0; }
+    if (size < 0 || poff < 0) { return rekha_cff2_ivd(buf, vstore, end, 0); }
     var pa = cff + poff;
     var pb = pa + size;
-    if (pb > end) { return 0; }
-    if (rekha_cff_dict_op_max(buf, pa, pb, 22, &d, 27) == 0) {
+    if (pb > end) { return rekha_cff2_ivd(buf, vstore, end, 0); }
+    var vsr = rekha_cff_dict_op_max(buf, pa, pb, 22, &d, 27);
+    if (vsr < 0) { return 0 - 1; }                      # a malformed vsindex names nothing usable
+    if (vsr == 0) {
         # No vsindex written down: subtable 0 by default, and a store with nothing in it is not an
         # error — it simply means no deltas.
         return rekha_cff2_ivd(buf, vstore, end, 0);
@@ -142,7 +183,7 @@ fn rekha_cff2_resolve(f): i64 {
     if (rekha_cff_idx_next(buf, gs, end, 4) == 0) { return 0; }
 
     var d: i64[3];
-    if (rekha_cff_dict_op_max(buf, ta, tb, 17, &d, 27) == 0) { return 0; }        # CharStrings
+    if (rekha_cff_dict_op_max(buf, ta, tb, 17, &d, 27) != 1) { return 0; }        # CharStrings
     if (load64(&d + 8) < 0) { return 0; }
     var cs = cff + load64(&d + 8);
     if (rekha_cff_idx_next(buf, cs, end, 4) == 0) { return 0; }
@@ -151,21 +192,25 @@ fn rekha_cff2_resolve(f): i64 {
 
     # ⛔ REQUIRED, unlike CFF: a CFF2 font's Private DICTs live in Font DICTs and nowhere else, so
     # without an FDArray there is no Private DICT, no local Subrs and no vsindex to find.
-    if (rekha_cff_dict_op_max(buf, ta, tb, 1236, &d, 27) == 0) { return 0; }      # FDArray
+    if (rekha_cff_dict_op_max(buf, ta, tb, 1236, &d, 27) != 1) { return 0; }      # FDArray
     if (load64(&d + 8) < 0) { return 0; }
     var fdarray = cff + load64(&d + 8);
     if (rekha_cff_idx_next(buf, fdarray, end, 4) == 0) { return 0; }
     if (rekha_cff_idx_count_at(buf, fdarray, 4) < 1) { return 0; }
 
     var fdselect = 0;
-    if (rekha_cff_dict_op_max(buf, ta, tb, 1237, &d, 27) != 0) {                  # FDSelect, optional
+    var fsr = rekha_cff_dict_op_max(buf, ta, tb, 1237, &d, 27);
+    if (fsr < 0) { return 0; }
+    if (fsr == 1) {                                                                # FDSelect, optional
         if (load64(&d + 8) < 0) { return 0; }
         fdselect = cff + load64(&d + 8);
         if (rekha_cff2_fdselect_ok(buf, fdselect, end, n) == 0) { return 0; }
     }
 
     var vstore = 0;
-    if (rekha_cff_dict_op_max(buf, ta, tb, 24, &d, 27) != 0) {                    # vstore, optional
+    var vtr = rekha_cff_dict_op_max(buf, ta, tb, 24, &d, 27);
+    if (vtr < 0) { return 0; }
+    if (vtr == 1) {                                                                # vstore, optional
         if (load64(&d + 8) < 0) { return 0; }
         vstore = cff + load64(&d + 8);
         if (vstore + 2 > end) { return 0; }

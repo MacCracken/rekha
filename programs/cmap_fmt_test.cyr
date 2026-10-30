@@ -293,6 +293,37 @@ fn two(buf, p0, e0, o0, p1, e1, o1): i64 {
     return opn(buf);
 }
 
+# ⛔ A format 12 whose groups are not well formed and strictly increasing is RANKED OUT (1.1.2
+# audit), as FreeType refuses it at every level: the binary search over such groups is no search, so
+# through 1.1.1 a malformed (3,10) outranked a valid (3,1) and answered a wrong id or none.
+fn t_bad12(buf): i64 {
+    g_group = "E2 malformed format 12";
+    var f = two(buf, 3, 1, 20, 3, 10, 52);          # control: one good group, (3,10) wins
+    check(rekha_char_to_glyph(f, 65), 6);
+    var k = 0;
+    while (k < 3) {
+        two(buf, 3, 1, 20, 3, 10, 52);
+        f12_hdr(buf, CM + 52, 12, 2);
+        set_clen(buf, 20 + 32 + 16 + 24);
+        if (k == 0) {                               # overlapping: 60 starts inside the first group
+            f12_grp(buf, CM + 52, 0, 65, 65, 6);
+            f12_grp(buf, CM + 52, 1, 60, 70, 9);
+        }
+        if (k == 1) {                               # unsorted
+            f12_grp(buf, CM + 52, 0, 80, 90, 6);
+            f12_grp(buf, CM + 52, 1, 65, 65, 9);
+        }
+        if (k == 2) {                               # inverted: start past end
+            f12_grp(buf, CM + 52, 0, 70, 65, 6);
+            f12_grp(buf, CM + 52, 1, 80, 80, 9);
+        }
+        f = opn(buf);
+        check(rekha_char_to_glyph(f, 65), 5);       # the valid (3,1) format 4 answers
+        k = k + 1;
+    }
+    return 0;
+}
+
 fn t_rank(buf): i64 {
     g_group = "E ranks";
     var f = two(buf, 3, 1, 20, 3, 10, 52);          # (3,1) fmt4, (3,10) fmt12
@@ -419,6 +450,10 @@ fn t_parity(buf, ng_maxp): i64 {
     var i = 0;
     while (i < NG) {
         cp = cp + rnd(4000);                        # a gap of 0..3999 (0 = an ADJACENT group)
+        # ⛔ stop at the codepoint ceiling: past it the clamp below wrote groups whose start passed
+        # their end — an inverted group, which FreeType and (since 1.1.2) rekha refuse the whole
+        # table for. The generator's artifact, never what this sweep is about.
+        if (cp > 0x10FFFF) { break; }
         var len = 1;
         if (rnd(4) != 0) { len = 1 + rnd(300); }    # one group in four covers one codepoint
         var e = cp + len - 1;
@@ -431,13 +466,14 @@ fn t_parity(buf, ng_maxp): i64 {
         cp = e + 1;
         i = i + 1;
     }
-    var clen = 12 + 16 + NG * 12;
+    var ng = i;
+    var clen = 12 + 16 + ng * 12;
     base(buf, ng_maxp, clen, 1);
     rec(buf, 0, 3, 10, 12);
     var s = CM + 12;
-    f12_hdr(buf, s, 12, NG);
+    f12_hdr(buf, s, 12, ng);
     i = 0;
-    while (i < NG) {
+    while (i < ng) {
         f12_grp(buf, s, i, load64(g_start + i * 8), load64(g_end + i * 8), load64(g_gid + i * 8));
         i = i + 1;
     }
@@ -448,9 +484,9 @@ fn t_parity(buf, ng_maxp): i64 {
     var gi = 0;
     cp = 0;
     while (cp <= 0x10FFFF) {
-        while (gi < NG && load64(g_end + gi * 8) < cp) { gi = gi + 1; }
+        while (gi < ng && load64(g_end + gi * 8) < cp) { gi = gi + 1; }
         var want = 0;
-        if (gi < NG) {
+        if (gi < ng) {
             if (load64(g_start + gi * 8) <= cp) {
                 want = load64(g_gid + gi * 8) + (cp - load64(g_start + gi * 8));
                 if (want > 65535) { want = 0; }
@@ -475,6 +511,7 @@ fn main(): i64 {
     t_f12(buf);
     t_f13(buf);
     t_rank(buf);
+    t_bad12(buf);
     t_symbol(buf);
     t_public(buf);
     var m1 = t_parity(buf, 65535);

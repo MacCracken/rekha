@@ -247,13 +247,15 @@ fn rekha_gvar_scalar(font, naxes, pk, st, en): i64 {
 
 # The scratch one glyph's variation needs, allocated once per font and reused. Laid out in units of
 # REKHA_GVAR_SCRATCH: dx at 0, dy at 8, the shared point list at 16, one TOUCHED BYTE per point at
-# 24, a private point list at 25, and the raw x / y delta runs at 33 and 41 — 49 units in all.
+# 24, a private point list at 25, the raw x / y delta runs at 33 and 41, and the SUM of the scaled
+# deltas over every tuple at 49 and 57 (1.1.2) — 65 units in all.
 var REKHA_GVAR_SCRATCH = 4100;      # REKHA_COMPOSITE_MAXP + 4 phantom points
+var REKHA_GVAR_UNITS = 65;
 
 fn rekha_gvar_scratch(font): i64 {
     var sc = load64(font + 344);
     if (sc != 0) { return sc; }
-    sc = sd_alloc(REKHA_GVAR_SCRATCH * 49);
+    sc = sd_alloc(REKHA_GVAR_SCRATCH * REKHA_GVAR_UNITS);
     if (sc == 0) { return 0; }
     store64(font + 344, sc);
     return sc;
@@ -261,9 +263,12 @@ fn rekha_gvar_scratch(font): i64 {
 
 # Apply `gvar` to a glyph whose points glyf.cyr has already decoded into xs / ys, with `nc` contours
 # ending at `eps`. Returns 1 when the outline was varied, 0 when it was left exactly as it was —
-# which covers "no gvar", "no axes set", "this glyph has no variation data" and every refusal.
-# ⛔ A refusal never half-varies: the deltas of a tuple are accumulated and only added to xs / ys
-# once that tuple has been read in full.
+# which covers "no gvar", "no axes set", "this glyph has no variation data" and every refusal — and
+# -1 when the scratch could not be allocated, which the CALLER refuses (REKHA_ERR_OOM): drawing the
+# default instance in place of the varied one is a plausible wrong glyph (1.1.2 audit).
+# ⛔ A refusal never half-varies: every tuple's scaled deltas are summed in the scratch, and the sum
+# is added to xs / ys only once the LAST tuple has been read in full. Through 1.1.1 each tuple was
+# added as it was read, so a later tuple's refusal left the earlier ones applied (1.1.2 audit).
 fn rekha_gvar_apply(font, gid, xs, ys, np, nc, eps): i64 {
     return rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, np);
 }
@@ -318,11 +323,19 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
     if (total > REKHA_GVAR_SCRATCH) { return 0; }
     if (napply > total) { napply = total; }
     var sc = rekha_gvar_scratch(font);
-    if (sc == 0) { return 0; }
+    if (sc == 0) { return 0 - 1; }
     var dx = sc;
     var dy = sc + REKHA_GVAR_SCRATCH * 8;
     var pts = sc + REKHA_GVAR_SCRATCH * 16;
     var tch = sc + REKHA_GVAR_SCRATCH * 24;
+    var accx = sc + REKHA_GVAR_SCRATCH * 49;
+    var accy = sc + REKHA_GVAR_SCRATCH * 57;
+    var z = 0;
+    while (z < napply) {
+        store64(accx + z * 8, 0);
+        store64(accy + z * 8, 0);
+        z = z + 1;
+    }
 
     # shtup point numbers, when the glyph declares them, come first in the serialized data
     var sp = dstart;
@@ -409,7 +422,10 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
                 i = i + 1;
             }
             # ⭐ IUP, per contour and per tuple: a tuple that named only some points has the rest
-            # inferred BEFORE its deltas are scaled in, not after the tuples are summed.
+            # inferred BEFORE its deltas are scaled in, not after the tuples are summed — and against
+            # the DEFAULT outline, which xs / ys still are: the sum goes on after the loop. Through
+            # 1.1.1 a second sparse tuple interpolated against points the first had already moved,
+            # so the outline depended on tuple order (FreeType's points_org, ref2143/ttgxvar.c).
             if (cnt >= 0) {
                 var first = 0;
                 var ci = 0;
@@ -421,15 +437,16 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
                     ci = ci + 1;
                 }
             }
+            # rounded per tuple, as before — the one-rounding question is 1.5.1's, not this fix's
             i = 0;
             while (i < napply) {
                 var ddx = load64(dx + i * 8);
                 var ddy = load64(dy + i * 8);
                 if (ddx != 0) {
-                    store64(xs + i * 8, load64(xs + i * 8) + sd_asr(ddx * scalar + 32768, 16));
+                    store64(accx + i * 8, load64(accx + i * 8) + sd_asr(ddx * scalar + 32768, 16));
                 }
                 if (ddy != 0) {
-                    store64(ys + i * 8, load64(ys + i * 8) + sd_asr(ddy * scalar + 32768, 16));
+                    store64(accy + i * 8, load64(accy + i * 8) + sd_asr(ddy * scalar + 32768, 16));
                 }
                 i = i + 1;
             }
@@ -438,7 +455,14 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
         data = dend;
         t = t + 1;
     }
-    return varied;
+    if (varied == 0) { return 0; }
+    var j = 0;
+    while (j < napply) {
+        store64(xs + j * 8, load64(xs + j * 8) + load64(accx + j * 8));
+        store64(ys + j * 8, load64(ys + j * 8) + load64(accy + j * 8));
+        j = j + 1;
+    }
+    return 1;
 }
 
 # Resolve `gvar` into the RekhaFont cache. Never fails an open.
@@ -451,6 +475,9 @@ fn rekha_gvar_resolve(f): i64 {
     if (g == 0) { return 0; }
     if (load64(&c) < 20) { return 0; }
     store64(f + 336, g);
-    store64(f + 352, load64(f + 8));
+    # ⛔ The TABLE's end, not the file's: through 1.1.1 every read below was bounded by len, so a gvar
+    # declared 20 bytes long drew its offsets and deltas from whatever followed it — the class 0.3.11
+    # closed for cmap / hmtx / loca / glyf, back in a module written after that audit (1.1.2 audit).
+    store64(f + 352, g + load64(&c));
     return 1;
 }

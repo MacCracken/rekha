@@ -51,16 +51,38 @@ fn rekha_cmap_fit(buf, sub, cend, first_out): i64 {
     var fmt = rekha_rd_u16(buf, sub);
     if (fmt == 4) {
         if (sub + 14 > cend) { return 0; }
-        var segc2 = rekha_rd_u16(buf, sub + 6);
+        # ⚠ An ODD segCountX2 is read FLOORED, as FreeType reads it (ttcmap.c: num_segs /= 2, and the
+        # arrays at 16 + num_segs * 2). Taken raw, the arrays were strided by the odd value — one
+        # byte off — and every lookup missed what FreeType maps (1.1.2 audit).
+        var segc2 = (rekha_rd_u16(buf, sub + 6) / 2) * 2;
         if (segc2 < 2) { return 0; }
         # endCode[] @ +14, reservedPad, startCode[], idDelta[], idRangeOffset[] — the last must end in cmap
         if (sub + 16 + segc2 * 4 > cend) { return 0; }
+        # ⚠ Deliberately NOT FreeType's whole-subtable refusals for format 4 (a segment whose start
+        # passes its end, an idRangeOffset range past glyphIdArray / the cmap): rekha refuses per
+        # CHARACTER — each lookup bounds its own glyphIdArray read by the cmap extent and a char in a
+        # gap answers .notdef — so no such table can map a WRONG id, only fewer (0.3.11, R-05;
+        # programs/cmap_ext_test.cyr group B). Re-decided at the 1.1.2 audit and kept.
         return segc2;
     }
     if (fmt == 12 || fmt == 13) {
         if (sub + 16 > cend) { return 0; }
         var ng = rekha_rd_u32(buf, sub + 12);
         if (sub + 16 + ng * 12 > cend) { return 0; }
+        # ⛔ The groups must be well formed and STRICTLY increasing, or the binary search is not a
+        # search: start <= end, and each start past the previous end — FreeType refuses the table at
+        # every level otherwise (tt_cmap12_validate). Kept through 1.1.1, so an unsorted or
+        # overlapping (3,10) outranked a valid (3,1) and mapped wrong ids (1.1.2 audit).
+        var last = 0;
+        var gi = 0;
+        while (gi < ng) {
+            var gs = rekha_rd_u32(buf, sub + 16 + gi * 12);
+            var ge = rekha_rd_u32(buf, sub + 16 + gi * 12 + 4);
+            if (gs > ge) { return 0; }
+            if (gi > 0 && gs <= last) { return 0; }
+            last = ge;
+            gi = gi + 1;
+        }
         return ng;
     }
     if (fmt == 6) {

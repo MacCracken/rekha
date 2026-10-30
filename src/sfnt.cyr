@@ -352,7 +352,7 @@ fn rekha_font_resolve(f): i64 {
     var c: i64[1];
 
     var upem = 0;
-    var lfmt = 0;
+    var lfmt = 0 - 1;                  # no usable head: rekha_glyf_span refuses, it does not guess
     var head = rekha_find_table_len(f, REKHA_TAG_HEAD, &c);
     if (head != 0) {
         if (load64(&c) >= 54) {
@@ -538,8 +538,9 @@ public fn rekha_units_per_em(font): i64 {
 }
 
 # head.indexToLocFormat (at head+50): 0 = short loca (u16 offsets, doubled),
-# 1 = long loca (u32 offsets). Returns 0 (short) if the handle is 0 or head is
-# absent / shorter than 54 B. Any other value is returned as read, and
+# 1 = long loca (u32 offsets). Returns 0 if the handle is 0 and -1 if head is
+# absent / shorter than 54 B (rekha_glyf_span refuses REKHA_ERR_NO_TABLE "head"
+# rather than guess the loca width). Any other value is returned as read, and
 # rekha_glyf_span refuses it (no outline).
 fn rekha_loca_format(font): i64 {
     if (font == 0) { return 0; }
@@ -706,6 +707,9 @@ public fn rekha_left_side_bearing(font, gid): i64 {
     if (nhm <= 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "hhea"); }
     var hmtx = load64(font + 112);
     if (hmtx == 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "hmtx"); }
+    # no glyph id exceeds a u16; past 2^62 the offset wrapped negative and passed the length check —
+    # a read before the table, or a fault (1.1.2 audit). The read would pass hmtx, so: TRUNCATED.
+    if (gid > 65535) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "hmtx"); }
     var at = gid * 4 + 2;
     if (gid >= nhm) { at = nhm * 4 + (gid - nhm) * 2; }
     if (at + 2 > load64(font + 120)) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "hmtx"); }
@@ -779,6 +783,7 @@ fn rekha_glyf_span(font, gid, out): i64 {
     var buf = load64(font);
     var loca_len = load64(font + 72);
     var fmt = load64(font + 48);
+    if (fmt < 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "head"); }
 
     var o0 = 0;
     var o1 = 0;

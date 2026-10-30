@@ -1245,7 +1245,7 @@ fn t_r04(): i64 {
     var f = hb_corpus(g_fb, len0);
     check(rekha_find_table(f, REKHA_TAG_HEAD), len0);
     check(rekha_units_per_em(f), 0);
-    check(rekha_loca_format(f), 0);
+    check(rekha_loca_format(f), 0 - 1);
     check(rekha_glyph_advance_px(f, 1, 16), 0);
     check(rekha_char_advance_fx(f, 66, 16), 0);
     fb_build(g_fb);
@@ -1256,7 +1256,7 @@ fn t_r04(): i64 {
     var len = fb_to_eof(g_fb, len0, HB_E_HEAD, 53);
     f = hb_corpus(g_fb, len);
     check(rekha_units_per_em(f), 0);
-    check(rekha_loca_format(f), 0);
+    check(rekha_loca_format(f), 0 - 1);
     fb_build(g_fb);
     len = fb_to_eof(g_fb, len0, HB_E_HEAD, 54);        # control: exactly long enough, at EOF
     f = hb_corpus(g_fb, len);

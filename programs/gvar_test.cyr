@@ -57,6 +57,12 @@ var o_nofvar = 0;       # omit fvar, so the font has no axes at all
 var o_badver = 0;       # write a gvar majorVersion rekha must refuse
 var o_longoff = 0;      # 32-bit glyph offsets instead of the halved 16-bit ones
 var o_badshared = 0;    # a shared-tuple index past sharedTupleCount
+# 1.1.2 audit: a TWO-tuple gvar (put_gvar2) instead — TA (shared tuple, all points, p0 x +100) and
+# TB (embedded peak +1, private points {0, 2}, x {0, +100}); 1 writes TA then TB, 2 TB then TA
+var o_pair = 0;
+var o_badsecond = 0;    # with o_pair 1: the SECOND tuple names shared tuple 7 of 1 — a refusal
+var o_shortlen = 0;     # declare gvar 20 bytes long; the offsets and data still follow it
+var o_hint = 0;         # maxp 1.0 and a 4-byte cvt, so rekha_hint_ctx takes the face (no programs)
 
 var g_glyf = 0;
 var g_glyflen = 0;
@@ -171,17 +177,80 @@ fn put_gvar(at): i64 {
     return data_at + total;
 }
 
+# The two-tuple gvar of o_pair. Both peak at +1, so at wght 900 both are live with scalar 1.
+# TB names only points 0 and 2 of contour 0 and the rest are interpolated — against the DEFAULT
+# outline, so the result cannot depend on whether TA, which moves p0 alone, came first.
+fn put_gvar2(at): i64 {
+    pu16(at, 1);
+    pu16(at + 4, 1);                                    # one axis
+    pu16(at + 6, 1);                                    # sharedTupleCount
+    pu32(at + 8, 26);
+    pu16(at + 12, 2);                                   # glyphCount
+    pu16(at + 14, 0);
+    pu32(at + 16, 28);
+    pu16(at + 26, 16384);                               # shared tuple 0: peak +1.0
+    var g = at + 28;
+    var ta = g + 4;
+    var tb = ta + 4;
+    if (o_pair == 2) {
+        tb = g + 4;
+        ta = tb + 6;
+    }
+    var body = g + 4 + 4 + 6;
+    pu16(g, 2);
+    pu16(g + 2, body - g);
+    # TA: all twelve points; x: +100 on p0 then eleven zeros; y: twelve zeros
+    var da = body;                                      # the data follow the headers' order
+    var db = body + 4;
+    if (o_pair == 2) {
+        db = body;
+        da = body + 8;
+    }
+    store8(FB + da, 0);                                 # a run of one, byte deltas
+    store8(FB + da + 1, 100);
+    store8(FB + da + 2, 128 + 10);                      # eleven zero deltas, no data bytes
+    store8(FB + da + 3, 128 + 11);                      # twelve zero y deltas
+    pu16(ta, 4);
+    pu16(ta + 2, 0);                                    # shared tuple 0
+    if (o_badsecond != 0) { pu16(tb + 2, 7); }
+    # TB: private points {0, 2}; x {0, +100}; y {0, 0}
+    store8(FB + db, 2);
+    store8(FB + db + 1, 1);
+    store8(FB + db + 2, 0);
+    store8(FB + db + 3, 2);
+    store8(FB + db + 4, 1);
+    store8(FB + db + 5, 0);
+    store8(FB + db + 6, 100);
+    store8(FB + db + 7, 129);                           # two zero y deltas
+    pu16(tb, 8);
+    if (o_badsecond == 0) {
+        pu16(tb + 2, 40960);                            # EMBEDDED_PEAK | PRIVATE_POINT_NUMBERS
+        pu16(tb + 4, 16384);                            # peak +1.0
+    } else {
+        pu16(tb + 2, 7);                                # shared tuple 7: past sharedTupleCount
+        pu16(tb + 4, 0);
+    }
+    var total = (body - g) + 4 + 8;
+    pu16(at + 20, 0);
+    pu16(at + 22, 0);
+    pu16(at + 24, total / 2);
+    return 28 + total;
+}
+
 fn build(): i64 {
     memset(FB, 0, FB_CAP);
     var ntab = 6;
     if (o_nofvar == 0) { ntab = ntab + 1; }
     if (o_nogvar == 0) { ntab = ntab + 1; }
+    if (o_hint != 0) { ntab = ntab + 1; }
     pu32(0, 0x00010000);
     pu16(4, ntab);
     var at = 12 + ntab * 16;
     var head_at = at;
     var maxp_at = head_at + 56;
-    var hhea_at = maxp_at + 8;
+    var maxp_len = 6;
+    if (o_hint != 0) { maxp_len = 32; }
+    var hhea_at = maxp_at + 32;
     var hmtx_at = hhea_at + 40;
     var loca_at = hmtx_at + 8;
     var glyf_at = loca_at + 12;
@@ -191,11 +260,23 @@ fn build(): i64 {
     if (o_nofvar == 0) { fvlen = 36; }
     var gvar_at = fvar_at + fvlen;
     var gvlen = 0;
-    if (o_nogvar == 0) { gvlen = put_gvar(gvar_at); }
+    if (o_nogvar == 0) {
+        if (o_pair != 0) {
+            gvlen = put_gvar2(gvar_at);
+        } else {
+            gvlen = put_gvar(gvar_at);
+        }
+    }
 
     pu16(head_at + 18, 1000);
     pu16(head_at + 50, 1);                              # long loca
     pu16(maxp_at + 4, 2);
+    if (o_hint != 0) {
+        pu32(maxp_at, 0x00010000);
+        pu16(maxp_at + 6, 8);                           # maxPoints
+        pu16(maxp_at + 8, 2);                           # maxContours
+        pu16(maxp_at + 14, 2);                          # maxZones
+    }
     pu16(hhea_at + 34, 2);
     pu16(hmtx_at, 500);
     pu16(hmtx_at + 4, 500);
@@ -218,7 +299,7 @@ fn build(): i64 {
 
     var d = 12;
     pu32(d, REKHA_TAG_HEAD); pu32(d + 8, head_at); pu32(d + 12, 54); d = d + 16;
-    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, 6);  d = d + 16;
+    pu32(d, REKHA_TAG_MAXP); pu32(d + 8, maxp_at); pu32(d + 12, maxp_len);  d = d + 16;
     pu32(d, REKHA_TAG_HHEA); pu32(d + 8, hhea_at); pu32(d + 12, 36); d = d + 16;
     pu32(d, REKHA_TAG_HMTX); pu32(d + 8, hmtx_at); pu32(d + 12, 8);  d = d + 16;
     pu32(d, REKHA_TAG_LOCA); pu32(d + 8, loca_at); pu32(d + 12, 12); d = d + 16;
@@ -227,9 +308,18 @@ fn build(): i64 {
         pu32(d, 0x66766172); pu32(d + 8, fvar_at); pu32(d + 12, fvlen); d = d + 16;
     }
     if (o_nogvar == 0) {
-        pu32(d, 0x67766172); pu32(d + 8, gvar_at); pu32(d + 12, gvlen); d = d + 16;
+        var gdecl = gvlen;
+        if (o_shortlen != 0) { gdecl = 20; }
+        pu32(d, 0x67766172); pu32(d + 8, gvar_at); pu32(d + 12, gdecl); d = d + 16;
     }
     g_flen = gvar_at + gvlen;
+    if (o_hint != 0) {
+        var cvt_at = (g_flen + 3) & (0 - 4);
+        pu16(cvt_at, 0);
+        pu16(cvt_at + 2, 0);
+        pu32(d, 0x63767420); pu32(d + 8, cvt_at); pu32(d + 12, 4); d = d + 16;
+        g_flen = cvt_at + 4;
+    }
     return g_flen;
 }
 
@@ -239,6 +329,10 @@ fn opts_reset(): i64 {
     o_badver = 0;
     o_longoff = 0;
     o_badshared = 0;
+    o_pair = 0;
+    o_badsecond = 0;
+    o_shortlen = 0;
+    o_hint = 0;
     return 0;
 }
 
@@ -374,6 +468,75 @@ fn t_refuse(): i64 {
     return 0;
 }
 
+# ── E2) the 1.1.2 audit's four: order, a late refusal, the table's end, a refused scratch ─────
+var g_refuse_from = 0;                                  # sd_alloc hook: refuse blocks this big
+
+fn big_refuser(n): i64 {
+    if (n >= g_refuse_from) { return 0; }
+    return alloc(n);
+}
+
+fn t_audit(): i64 {
+    g_group = "E2 1.1.2 audit";
+    # ⛔ IUP against the DEFAULT outline: the same answer in either tuple order. Through 1.1.1 the
+    # second tuple interpolated against points the first had moved, and TA-then-TB put p1 at 100.
+    var ord = 1;
+    while (ord <= 2) {
+        opts_reset();
+        o_pair = ord;
+        openf();
+        check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+        check(load1(), 8);
+        pt(0, 100, 0); pt(1, 200, 0); pt(2, 200, 100); pt(3, 0, 100);
+        pt(4, 200, 0); pt(7, 200, 100);                 # contour 1: nothing names it
+        ord = ord + 1;
+    }
+    # ⛔ a refusal AFTER an applied tuple leaves the DEFAULT outline, never TA alone
+    opts_reset();
+    o_pair = 1;
+    o_badsecond = 1;
+    openf();
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    expect_default();
+    check(rekha_gvar_apply(g_f, 1, rekha_outline_xs(g_o), rekha_outline_ys(g_o), 8, 2,
+        rekha_outline_end_pts(g_o)), 0);
+    check(load64(rekha_outline_xs(g_o)), 0);             # ...and the apply left it untouched
+    # ⛔ a gvar declared 20 bytes long: its offsets and deltas lie past the TABLE, so nothing varies
+    opts_reset();
+    o_shortlen = 1;
+    openf();
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    expect_default();
+    # ⛔ a refused gvar scratch is OOM — 0 and REKHA_ERR_OOM — not the default instance drawn as
+    # the varied one. The axis is set first, outside the hook, as a consumer must.
+    opts_reset();
+    openf();
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    g_refuse_from = 100000;
+    sd_alloc_set(&big_refuser);
+    g_o = rekha_load_glyph(g_f, 1);
+    sd_alloc_set(0);
+    check(g_o, 0);
+    check(rekha_font_error(g_f), REKHA_ERR_OOM);
+    check(load1(), 8);                                  # granted, it varies as it always did
+    pt(0, 10, 20);
+    # ...and the hinted loader refuses the same way: 0 and OOM "gvar scratch", where it hinted the
+    # default instance and answered 1 through 1.1.1. The context is made outside the hook.
+    opts_reset();
+    o_hint = 1;
+    openf();
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    var hc = rekha_hint_ctx(g_f, 16);
+    check(hc != 0, 1);
+    sd_alloc_set(&big_refuser);
+    check(rekha_hint_glyph(hc, 1), 0);
+    sd_alloc_set(0);
+    check(rekha_hint_error(hc), REKHA_ERR_OOM);
+    check(rekha_hint_glyph(hc, 1), 1);
+    check(rekha_hint_error(hc), REKHA_OK);
+    return 0;
+}
+
 # ── F) a guard differential and a byte-mutation sweep over the gvar table ─────────────
 var g_gb = 0;
 
@@ -444,6 +607,7 @@ fn main(): i64 {
     t_iup();
     t_intermediate();
     t_refuse();
+    t_audit();
     t_guard();
     if (g_fails == 0) {
         var ok = "gvar_test: PASS (default, shared tuple, IUP, intermediate, refusals, guard; ";

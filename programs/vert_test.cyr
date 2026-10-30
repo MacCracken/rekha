@@ -358,11 +358,18 @@ fn t_vvar(): i64 {
     check(rekha_top_side_bearing(g_f, 1), 51);
     check(rekha_vert_origin_y(g_f, 1), 900);
     check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
-    # ⭐ THE ADVANCE MAP SENDS g TO ROW g, and the tsb has NO map, so the glyph id is the row.
+    # ⭐ THE ADVANCE MAP SENDS g TO ROW g. ⛔ The tsb has NO map, and that means the tsb does NOT
+    # vary: only the advance map is implicit (the spec; HVAR's lsb rule). Through 1.1.1 this pinned
+    # 71 / 93 — the advance rows applied to the bearing (1.1.2 audit).
     check(rekha_advance_height(g_f, 1), 1030);          # 1010 + 20
     check(rekha_advance_height(g_f, 0), 1010);          # 1000 + 10
-    check(rekha_top_side_bearing(g_f, 1), 71);          # 51 + 20
-    check(rekha_top_side_bearing(g_f, 3), 93);          # 53 + 40
+    check(rekha_top_side_bearing(g_f, 1), 51);          # unvaried
+    check(rekha_top_side_bearing(g_f, 3), 53);
+    # ...and no glyph id past a u16 is read at all — at 2^62 the tail offset wrapped (1.1.2 audit)
+    check(rekha_top_side_bearing(g_f, 4611686018427387904), 0);
+    check(rekha_top_side_bearing(g_f, 9223372036854775638), 0);
+    check(rekha_left_side_bearing(g_f, 4611686018427387904), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_TRUNCATED);
     # ⛔ ...BUT THE VERTICAL-ORIGIN MAP SENDS g TO ROW g + 2. A reader that used the advance map's
     # offset here would answer 920, which is wrong and entirely plausible.
     check(rekha_vert_origin_y(g_f, 1), 940);            # 900 + row 3 = 40
