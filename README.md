@@ -237,9 +237,10 @@ sentinel: every call that can set a code clears it first, but a reader that cann
 
 ## Roadmap
 
-The full list, with the evidence behind every item, is
+The full ladder, every release pinned and every item with its evidence, is
 [`docs/development/roadmap.md`](docs/development/roadmap.md). The road from 0.4.12 to **1.0.0** —
-rekha's promise *complete, correct and frozen* — and what 1.x is:
+rekha's promise *complete, correct and frozen* — and the 1.x ladder after it (additive only: a new
+call lands in a minor, a fix measured against the font or FreeType in a patch):
 
 | milestone | what it closes |
 |---|---|
@@ -249,7 +250,12 @@ rekha's promise *complete, correct and frozen* — and what 1.x is:
 | ~~**0.8.x — hinting**~~ | **Closed.** 0.8.0 shipped the machine, 0.8.1 the zones and `prep`, 0.8.2 the glyph loader, the phantom points, `IUP`, composites and the **hinted-outline call** — measured against FreeType 2.14.3 itself: 233 (glyph, ppem) rows of its hinted Liberation Sans point for point, the whole face and 165 + 50 host faces through `scripts/hint_glyph_diff.py` with 0 differences. ⚠ CFF's own hints are parsed for stem count and discarded — two jobs, and only the TrueType one was ever named. |
 | ~~**0.9.0 — the freeze**~~ | **Closed.** 178 `public fn` and 72 `public var` in `src/` against 287 internals, a `private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs, `SECURITY.md`, `CONTRIBUTING.md`, and a CI probe that must fail to reach an internal. |
 | ~~**1.0.0 — lock it in**~~ | **Shipped.** The freeze consumed — crab and dhancha build against the `private` 0.9.0 bundle and crab's QEMU face test drew through it — and a release with no surface change: `docs/api/surface.txt` is byte-identical to 0.9.0's across a cyrius 6.6.6 → 6.6.20 move. Refuse-don't-guess is kept for the line (ADR 0002). |
-| **1.x** | **Additive only.** The pinned table in the roadmap — every row a new call or a new reader, none a changed answer. **1.1.0** moved onto cyrius's 6.7 language line (6.7.9) and sadish 0.12.0, and **1.1.1** to 6.7.18 and sadish 0.12.1, each with `docs/api/surface.txt` byte-identical. |
+| ~~**1.1.0 / 1.1.1 — the 6.7 line**~~ | **Shipped.** cyrius 6.7.9 and sadish 0.12.0, then 6.7.18 and 0.12.1 — each with `docs/api/surface.txt` byte-identical and every suite's output byte-identical to the release before. |
+| ▶ **1.1.2 — the P(-1) audit** | **Next.** The first full audit since 0.3.11, which covered 4 modules and 1,331 lines; `src/` is 13,175 now. One adversarial lens per surface (the hint interpreter, CFF / CFF2, the web containers, variations, layout and names, the boundary), the mutation loop extended past the TrueType face, a real Brotli stream into WOFF2, `poison_alloc` through the `sd_alloc` seam, and a dossier under `docs/audit/`. |
+| **1.2.x — the formats still refused or skipped** | `cmap` format 14 variation selectors (1.2.0); the reference differentials in CI (1.2.1); `cmap` 2 / 8 / 10, the Expert charsets and CFF2 FDSelect 4, `kern` format 2. |
+| **1.3.x — metrics for composites and variable fonts** | Resolvers beside the O(1) readers — `USE_MY_METRICS`, `gvar` phantom advances, the HVAR rsb map, GPOS kerning that follows the axes (1.3.0); `avar` 2.0's variation store (1.3.1). |
+| **1.4.x — the web containers, completed** | `_why` twins for the container opens, the metadata and private blocks, one inflate per WOFF2 collection (1.4.0); the 1.2 – 1.4 closeout P(-1) (1.4.1). |
+| **1.5.x – 1.9.x — opens on request** | Each waits for a consumer or a decision and keeps its number: opt-in FreeType fallbacks, settable `GETINFO` and an `hdmx` advance (1.5.x), the default face as an `[embed]` profile (1.6), `COLR` v0 + `CPAL` (1.7), consumer-shaped readers (1.8), CFF hinting and `COLR` v1 (1.9). |
 
 ⛔ **Out of scope, committed:** text shaping and layout (GSUB, GPOS beyond pair kerning, BiDi,
 complex scripts) — a shaping library's job, and rekha is its glyph-data provider; rasterization and

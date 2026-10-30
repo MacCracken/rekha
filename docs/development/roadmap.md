@@ -1,410 +1,404 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-10-30, at **1.1.1**.
+> **Status:** stable — **1.1.1** (cyrius 6.7.18, sadish 0.12.1); the API frozen at 0.9.0 and
+> promised for 1.x. Open filings: **1**, the WOFF2 encoder issue, unblocked and slotted in 1.1.2.
+> **Next: 1.1.2, the P(-1) audit.** Every item of work has a release below. | **Last updated:**
+> 2026-10-30
 >
-> This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
-> leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
-> the measurement each claim rests on; the capability summary is [`README.md`](../../README.md)'s
-> *Scope*.
+> This file is the **forward ladder**: **▶ Next**, then **▶ Scheduled**, every release pinned.
+> Shipped history lives in [`CHANGELOG.md`](../../CHANGELOG.md), with the measurement each claim
+> rests on; the capability summary is [`README.md`](../../README.md)'s *Scope*. Nothing shipped is
+> re-listed here: a finished item leaves.
 >
-> Every item below carries a `path:line` or a grep, because an item nobody can check is a wish.
+> Every item carries a `path:line` or a grep, because an item nobody can check is a wish. Line
+> numbers are as of 1.1.1; the function or message named beside each one is the durable anchor.
 
 ## What 1.x means here
 
 rekha's promise is **"what the glyph is"**: font bytes in, outlines and the numbers that place them
-out, for `sadish` to fill. **1.0.0 shipped it complete, correct and frozen** (CHANGELOG 1.0.0): the
-surface frozen at 0.9.0 was consumed — crab and dhancha build against the `private` 0.9.0 bundle,
-and crab's QEMU face test loaded `/fonts/default.ttf` through it — and held across a release that
-changed nothing on it (`git diff 0.9.0 -- docs/api/surface.txt` is empty over a cyrius 6.6.6 →
-6.6.20 move); refuse-don't-guess was confirmed for the line (ADR 0002). **1.1.0** held it again
-across the move onto cyrius's 6.7 language line (6.7.9) and sadish 0.12.0: the surface
-byte-identical, and every suite's output byte-identical to 1.0.0's (CHANGELOG 1.1.0) — and
-**1.1.1** again at 6.7.18 and sadish 0.12.1 (CHANGELOG 1.1.1).
+out, for `sadish` to fill. 1.0.0 shipped it complete, correct and frozen; 1.1.0 and 1.1.1 held the
+surface byte-identical across the cyrius 6.7.9 and 6.7.18 pins (CHANGELOG). Through 1.x, from the
+stability promise in [`docs/api/README.md`](../api/README.md):
 
-**Through 1.x every change to the surface is an ADDITION** — a new call, a new constant, a new
-reader — and no documented answer moves (`docs/api/README.md`, *Stability promise*). So nothing
-below is scheduled into a numbered milestone: each item is additive, and any of them becomes the
-next minor release when a consumer asks for it or the evidence for it changes.
+- **a new function, constant or enum member** arrives only in a minor, **x.y.0**;
+- **an answer measured wrong** against the font's own tables or against FreeType is a bug, fixed in a
+  **patch**, with the measurement;
+- **a divergence `docs/api/` states** (variable instances hinted off-reference, `hdmx` unread) moves
+  only with a measurement on a real font;
+- **a lenient hinting mode** can arrive only as a new, opt-in call (ADR 0002).
 
-Everything below is **pinned** (real, evidenced, unscheduled), **toolchain follow-up** (unblocked
-by the 6.6.20, 6.7.9 and 6.7.18 pins), **blocked on a sibling**, or an explicit **non-goal**.
+## How the ladder is kept
 
----
-
-## 0.8.x — hinting, closed
-
-⭐ **0.8.0 shipped `src/hint.cyr`**: `cvt ` / `fpgm` / `prep` / `gasp`, the six `maxp` 1.0 limits,
-the stack machine, the rounding engine, flow control, functions, the graphics state, and the FONT
-PROGRAM running to completion — Liberation Sans's real 1,972 bytes, all 71 functions defined.
-⭐ **0.8.1 shipped the two zones, every point instruction but `IUP`, and `prep` running once per
-size** (`rekha_hint_run_prep`, `src/hint.cyr:3517`), measured against **FreeType 2.14.3 itself**
-through `scripts/ftshim.py` — the `ctypes` binding that replaced a second hand-written interpreter
-as the reference.
-⭐ **0.8.2 shipped the hinted glyph**: the loader into zone 1 (simple and composite, in place, no
-per-glyph allocation), the four phantom points, `IUP`, the glyph program under FreeType's
-glyph-range rules, composites assembled FreeType's way, and the calls that answer a hinted outline
-— `rekha_hint_glyph` / `rekha_hint_outline` / `rekha_hint_to_sdpath` / `rekha_hint_advance_px`
-(`src/hint.cyr:4358-4575`). Measured: FreeType's own hinted outlines of Liberation Sans, **233 rows
-/ 31 glyphs / 5,372 points** point for point (`programs/hint_glyph_vectors.cyr`); **167 unit
-programs on 39 synthetic fonts**, every row three times (`programs/hint_unit_vectors.cyr`); the
-whole face at ten ppems, **26,200 loads, 0 differ**; **165 host faces at 12 ppem, 2,593,954 loads,
-and 50 more at 9 / 11 / 13 / 20 ppem, 2,812,516 loads — 0 differ** (`scripts/hint_glyph_diff.py`). Every instruction of the machine runs; the interpreter produces no
-`REKHA_ERR_UNSUPPORTED` (`grep -c UNSUPPORTED src/hint.cyr` → the header's one mention). What is
-left of hinting is the pinned table below — each row a stated divergence with its site.
-
-### Pinned by 0.8.x, and carried into 1.x
-
-Each is a stated divergence from FreeType 2.14.3, said at its site and in CHANGELOG 0.8.1 / 0.8.2.
-The first row's "revisit" trigger has fired and the decision is recorded there.
-
-- ⚠ **rekha refuses what FreeType's default mode reads as 0 or silently skips** — a control value
-  outside the table (`"RCVT index"`, `src/hint.cyr:1994-1996`; `"MIAP cvt"` / `"MIRP cvt"`,
-  `:2651`, `:2920`), a point index outside a zone (`rekha_hint_pt_ok`, `:1184-1188`), a storage
-  index (`rekha_hint_op_mem`, `:1968`), a short stack (`"stack underflow"`, `:601`) — and the refusal
-  reloads the glyph scaled and unhinted, named through `rekha_hint_error`. ⭐ **MEASURED at 0.8.2,
-  and the trigger has fired**: 17,158 of 2,812,516 loads (0.61%) over 50 host faces at 9 / 11 /
-  13 / 20 ppem are glyphs FreeType's default mode hints and its pedantic mode fails — all `RCVT`
-  past the table but five (`IP point` on LiberationMono's '♫', `stack underflow` on DejaVuSansM
-  Bold's 'Д'); **AdwaitaMono-Regular refuses 2,624 of 8,818 glyphs at 9 of 25 ppems**, all
-  non-ASCII; no ASCII glyph on any face. **Decision, kept for 0.8.2 and confirmed for 1.x at
-  1.0.0** (ADR 0002): refuse-don't-guess stands, because the refused glyph is drawn unhinted and
-  never wrong — and in 1.x the alternative can arrive only as an opt-in call, never by changing
-  what `rekha_hint_glyph` answers. **The alternative, named**: mirror
-  FreeType's default-mode fallbacks in the GLYPH RANGE only (`HC_RANGE` 4) — `RCVT` past the table
-  reads 0 (ref2143/ttinterp.c:2861-2868), a short stack reads zeros, a bad point is skipped — so a
-  refused glyph hints as FreeType hints it. A consumer who wants AdwaitaMono's arrows fitted at
-  9 ppem asks for it here.
-- ⚠ **A program refusal unhints the WHOLE glyph** — every component's moves and the composite's —
-  where FreeType outside its pedantic mode keeps the partially hinted component and carries on
-  (`src/hint.cyr:3572-3578`, `rekha_hint_glyph`'s comment `:4370-4378`).
-- ⚠ **`SHZ` in a NESTED composite's own program** walks `first_point` slots past its last contour
-  as FreeType's `Ins_SHZ` does (it never subtracts `first_point`, ref2143/ttinterp.c:5139), and
-  rekha CLAMPS at the sub-zone's end where FreeType writes past its points array — an out-of-bounds
-  write that on the host corrupts `libfreetype`'s heap or the adjacent tag bytes
-  (`rekha_hint_op_shz`, `src/hint.cyr:2444-2465`; `HC_FIRSTPT`, `rekha_hint_first_point`,
-  `:1050-1058`). A SIMPLE component's program runs with `first_point` 0 whatever its base. The unit
-  rows `comp_nested_first_point` (generated inside FreeType's undefined regime, and marked so) and
-  `comp_nested_shz_low` (inside the allocation) pin the visible part.
-- ⚠ **FreeType's composite recursion cap of 100 is not modelled**; rekha's caps are the outline
-  loader's — 64 loads, 16,384 points, depth 5, a cycle (`src/glyf.cyr:118-121`) — plus the zone's
-  own capacity from `maxp` (`REKHA_HINT_MAXZONE`, `src/hint.cyr:294-298`; `"glyph zone cap"` /
-  `"contour cap"`, `:3917`, `:3985-3988`, `:4191`). A glyph past its own `maxp` maxima is refused
-  structurally (empty zone) where FreeType, which sizes nothing from those fields, renders it. A
-  scan of all 1,129 hinted host faces: deepest nesting exactly 5 (AgaveNerdFont gid 1441, loads
-  and agrees), at most 9 direct components and 17 loads per glyph, no understated `maxp` — so the
-  caps refuse nothing on this host.
-- ⚠ **The scan-type bits** FreeType ORs into the first tag byte of every instructed glyph (4 |
-  `scan_type << 5`) are not kept (`rekha_hint_outline`'s comment, `src/hint.cyr:4515-4519`); the
-  oracle masks with 0x19.
-- ⚠ **`hdmx` is not read, and `rekha_hint_advance_px` is where it would matter**
-  (`src/hint.cyr:4558-4563`): on an `hdmx` face at a listed ppem FreeType reports the table's byte
-  as a hinted slot's advance (ref2143/ttgload.c:2302-2313, :1974-1975); rekha answers the hinted
-  phantom distance, equal only when the table is a faithful cache. Measured on a synthetic face
-  (4 of 4 advances differ at the listed ppem); 0 of 1,751 host `glyf` fonts carry one.
-- ⚠ **Variable instances are hinted off-reference** (`rekha_hint_glyph`'s comment,
-  `src/hint.cyr:4389-4395`), the default location bit-exact: no `cvar`; `gvar` deltas rounded per
-  tuple and scaled from whole units (`src/gvar.cyr`) where FreeType rounds once on 16.16; `prep`
-  re-run on EVERY axis change (`rekha_hint_axes_changed`, `:877-891`; `rekha_hint_ctx`'s comment
-  `:824-834`) where FreeType re-runs it only when the face has a `cvar`
-  (ref2143/ttgxvar.c:3993-3997); `GETINFO`'s variation bit and `GETVARIATION`'s gate are an axis
-  actually off its default (`rekha_hint_op_getinfo`, `:2061-2077`; `rekha_hint_op_getvariation`,
-  `:2130-2147`) where FreeType's flag stays set once any variation call was made, even back at the
-  defaults; and the HVAR lsb map applies to `rekha_left_side_bearing` (`src/sfnt.cyr:677-703`,
-  `rekha_hvar_lsb_delta` `src/hvar.cyr:261-271`) and NOT to the hinted pp1
-  (`rekha_hint_hmetrics`, `src/hint.cyr:3601-3614`; FreeType leaves `lsb_adjust` NULL,
-  ref2143/ttdriver.c:559), so on such an instance the metric reader and the hinted outline's
-  origin differ by the delta. No hinted `gvar` face exists on the host to measure any of it.
-- ⚠ **A `REPEAT` flag count past the last point is CLAMPED** by the shared decoder
-  (`src/glyf.cyr:235-241`) — a leniency the other way round: FreeType refuses the glyph as
-  `Invalid_Outline` (ref2143/ttgload.c:451-452) where rekha draws and hints it. Predates 0.8.2.
-- ⚠ **Three `loca` rules FreeType sanitizes and rekha refuses** (`rekha_glyf_span`,
-  `src/sfnt.cyr:740-750`, `:789-790`, against `tt_face_get_location`, ref2143/ttpload.c:183-288):
-  offsets that run backwards (FreeType reads to the end of `glyf`; rekha `"loca order"`), the LAST
-  glyph's end past `glyf` (FreeType clips; rekha `"loca past glyf"`), any other glyph's end or
-  start past `glyf` (FreeType loads an empty glyph with real phantoms; rekha the same refusal).
-  With the `REPEAT` clamp these are the whole of the corpus's `refused` class on a face pedantic
-  FreeType loads — empty on every face measured.
-- ⚠ **An `OS/2` shorter than 78 bytes is absent** to rekha, so `hhea` decides the vertical
-  phantoms (`rekha_hint_vmetrics`, `src/hint.cyr:3648-3652`), where FreeType reads its 78 field
-  bytes from the stream regardless and takes the `OS/2` branch with whatever follows. rekha's gate
-  is the saner rule and is kept.
-- ⚠ **Glyph-only bytecode is not run** (`rekha_hint_present`, `src/hint.cyr:360-379`): a face with
-  no `fpgm` / `prep` / `cvt ` of non-zero length answers `NO_TABLE "hint tables"` and draws
-  unhinted. That is FreeType's DEFAULT load, which autohints a face with no `fpgm` and a `prep` of
-  at most 7 bytes (ref2143/ftobjs.c:1006-1016), not its `NO_AUTOHINT` one; rekha has no
-  autohinter to fall back to.
-- ⚠ A composite's `n_ins` or bytes past the glyph's `loca` span refuse `TRUNCATED "composite
-  instructions"` (`src/hint.cyr:4214-4219`) where FreeType reads on from the stream; the per-run
-  twilight bound has no +4 band and is the running MINIMUM within one load
-  (`rekha_hint_twilight_bound`, `:3447-3460`; `HC_TWCAP`, `:248-250`); org is filled and the
-  phantom tags are 0 when no program runs (`:3969-3972`), which nothing observes.
-- ⚠ **A point, contour or reference index ≥ 65536 is refused** where FreeType's `FT_UShort` cast
-  wraps it onto point k in both modes (`rekha_hint_pt_ok`'s comment, `src/hint.cyr:1179-1183`).
-  Only stack arithmetic reaches it.
-- ⚠ **A backward jump before a function's own start is refused** (`"jump out of range"`,
-  `src/hint.cyr:3222-3233`); FreeType executes the bytes before the body.
-- ⚠ **The twilight zone is zeroed with its tags and font-unit positions** per `prep`, where
-  FreeType zeroes org and cur only (`rekha_hint_run_prep`'s comment, `src/hint.cyr:3509-3512`).
-- ⚠ **A font whose `prep` is absent or empty gets the default graphics state**; 2.14.3 saves a
-  stale execution-context GS there (`src/hint.cyr:3511-3512`) — a FreeType defect, not copied.
-- ⚠ **FreeType's `LOOPCALL` / backward-jump caps and its call depth of 32 are not modelled**: rekha
-  has one instruction budget of 1,000,000 and a depth of 64 (`src/hint.cyr:108-111`,
-  `rekha_hint_exec`, `rekha_hint_call`).
-- ⚠ **`INSTCTRL`'s operand order is unobserved in the corpus**: the one real site pushes `1 1`
-  (`src/hint.cyr:87-88`, `:1886-1898`). Bits 1 and 2 are implemented on the glyph path
-  (`rekha_hint_load_instctrl`, `:4291-4300`) in `tt_loader_init`'s order.
-- ⚠ **`GETINFO` answers are fixed, not settable.** Version 35, no ClearType, not rotated, not
-  stretched, grayscale on — **0 inside `fpgm`**, as FreeType has it (`rekha_hint_op_getinfo`,
-  `src/hint.cyr:2061`; unit font 8 is the measurement). A consumer applying its own transform
-  cannot tell the font about it.
-- ⚠ **CI's FreeType is 2.13.2, the host's 2.14.3**, and the two differ in the move arithmetic, cvt
-  scaling, `ODD` / `EVEN`, the stack margin and `DELTAP`'s pops (the headers of
-  `programs/hint_unit_vectors.cyr` and `programs/hint_glyph_vectors.cyr`; `fv_b1_regime` is a
-  program they disagree on). Neither module is regenerated in CI, none of the six hinting scripts
-  runs there, and `scripts/ftshim.py` refuses any FreeType but 2.14.x.
-
-### ⚠ CFF hinting is a separate question the wording hides
-
-`src/cff.cyr` parses `hstem` / `vstem` / `hintmask` for stem *count* — enough to know how many mask
-bytes follow — and discards the hints themselves. So "hinting" is two jobs, and only the TrueType
-one has ever been named or scheduled.
+- **The order is committed; the numbers are not.** A toolchain or ecosystem release that has to land
+  first takes the next patch number and shifts the rest, as 1.1.0 and 1.1.1 did.
+- **New work does not go into a backlog.** It takes a slot: at the end of the unconditional lines
+  (before the closeout), or ahead of something it outranks, with the reason written down. A 1.1.2
+  finding that needs a new public call takes a slot in the line it fits.
+- **A slot that adds a parser or a table reader ships with its own adversarial review** and rows in
+  `programs/hostile_test.cyr`'s corpus and mutation loop. The full P(-1) recurs as **1.4.1**, the
+  closeout over everything 1.2.0 – 1.4.0 added.
+- **A slot marked *opens on request* waits for its entry condition.** When its turn comes without
+  one, the next slot goes first and it keeps its number.
 
 ---
 
-## Pinned — real, evidenced, unscheduled
+## ▶ Next — 1.1.2, the P(-1) audit (patch)
 
-Each is genuine deferred work with a pointer, and each is additive — a new call or a new reader
-beside the frozen ones. Any of them could be the next minor release when a consumer asks.
+**Why now.** The last full audit was **0.3.11** (2026-09-15; CHANGELOG [0.3.11]: eight lenses, 88 raw
+findings, every P0 / P1 reproduced by a running PoC before it was fixed, then a fresh review and
+mutation testing). It covered **4 modules, 1,331 lines** — `error`, `sfnt`, `glyf`, `cmap`. `src/` is
+now **13,175 lines**, and **16 modules arrived after it**: `hint.cyr` 4,680, `woff2.cyr` 1,605,
+`cff.cyr` 1,436, `var.cyr` 478, `gvar.cyr` 456, `gpos.cyr` 366, `hvar.cyr` 320, `name.cyr` 290,
+`vert.cyr` 249, `stat.cyr` 245, `kern.cyr` 226, `woff.cyr` 195, `cff2.cyr` 188, `os2.cyr` 149,
+`post.cyr` 91, `freeze.cyr` 19 (`wc -l src/*.cyr`; `git show 0.3.11:cyrius.cyml`). Each shipped with
+its suite, its refusals and, for hinting, FreeType's own outlines as the oracle — but no release since
+has run a multi-lens adversarial review, and **the hostile suite's mutation loop mutates only the
+embedded TrueType face** (the directory, `head` / `maxp` / `hhea`, `hmtx`, `loca`, `glyf`, `cmap`:
+`programs/hostile_test.cyr`'s header). CFF, CFF2, the variation tables, GPOS / `kern`, and both web
+containers — the two inputs most likely to arrive off a network — have never had a mutation sweep
+(`grep -cin woff programs/hostile_test.cyr` → **0**).
 
-| item | evidence | note |
+A patch: it changes no surface. A fix that refuses an input a release accepted is named in the
+CHANGELOG ([`SECURITY.md`](../../SECURITY.md)).
+
+The P(-1), as sankoch and kashi run it (their `CLAUDE.md` § P(-1)), with 0.3.11's standard of proof:
+
+0. **Read** CHANGELOG 0.3.11 → 1.1.1 and this file.
+1. **Cleanliness** — CI's gates green at the pinned toolchain (they are at 1.1.1): `lint --strict`,
+   formatting in place, `vet`, `distlib --check`, the API-surface gate and the private-bundle probes,
+   zero-warning builds under both DCE modes, the aarch64 and AGNOS links.
+2. **Baseline** — `programs/bench_hotpath.cyr` (medians of interleaved runs) and binary sizes, into
+   the dossier.
+3. **Internal deep review** — one read-only adversarial lens per surface; every finding reproduced by
+   a probe before it is fixed (a sentinel differential or a guard page, as 0.3.11 proved its four
+   overreads):
+   - the hint interpreter (`src/hint.cyr`): stack, zone, storage and `cvt ` bounds; the 1,000,000
+     instruction budget and call depth 64 (`:110-111`); twilight sizing; composites; the glyph-range
+     rules;
+   - CFF and CFF2 charstrings (`src/cff.cyr`, `src/cff2.cyr`): INDEX offsets, the argument stacks
+     (48 / 513), subroutine recursion, `seac`, `blend`, FDSelect, the Private DICTs;
+   - the containers (`src/woff.cyr`, `src/woff2.cyr`): the table directories, the size and ratio
+     caps, the `glyf` / `loca` and `hmtx` transforms, the triplets, the `loca` rebuild, collections;
+   - variations (`src/var.cyr`, `src/gvar.cyr`, `src/hvar.cyr`): `fvar` / `avar`, the
+     ItemVariationStore and DeltaSetIndexMap readers, packed points and deltas, tuple counts, MVAR;
+   - layout, metrics and names (`src/gpos.cyr`, `kern.cyr`, `vert.cyr`, `os2.cyr`, `name.cyr`,
+     `post.cyr`, `stat.cyr`): coverage and class tables, offset chains, the UTF-16 and Mac Roman
+     decoders;
+   - the boundary: the `private` bundle against `docs/api/`, the sidecars, and 0.3.11's classes
+     re-checked against today's `sfnt` / `glyf` / `cmap`.
+4. **External research** — OpenType specification revisions, and FreeType's and google/woff2's
+   security fixes since each module was written, checked class by class against rekha's code.
+5. **The dossier** — `docs/audit/<date>-1.1.2-p-1.md`, rekha's first audit directory (0.3.11's record
+   is its CHANGELOG entry): findings graded HIGH / MEDIUM / LOW / INFO, each with its resolution or a
+   slot below; linked from `SECURITY.md`.
+6. **Tests from findings, and the tools the review needs** — each mutation-checked (the fix removed,
+   the test seen to fail):
+   - the mutation loop extended past the TrueType face: a CFF face, a CFF2 variable face, a `gvar` /
+     HVAR face, a WOFF and a WOFF2, built in code as the suites build them;
+   - **a genuinely compressed WOFF2** through `programs/woff2_test.cyr`: sankoch 2.8.9's
+     `brotli_compress` / `brotli_compress_level` are in the pinned stdlib's `lib/sankoch.cyr`
+     ([the WOFF2 encoder issue](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md),
+     unblocked at 1.1.1). ⚠ sankoch's encoder through sankoch's decoder is a round trip, not an
+     independent check; the issue names the reference-encoder fixture as the maintainer's call;
+   - **`poison_alloc` through the `sd_alloc` seam** (cyrius 6.6.18, P6): `lib/poison.cyr`'s leading
+     and trailing redzones and A/B differential, installed with sadish's `sd_alloc_set` around the
+     mutation loop (an overwrite stops the harness with exit 86), beside the hand-built 4,096-byte
+     redzone differential it complements;
+   - **the bounds-checked mode** (cyrius 6.7.8, `--bounds` / `[build] bounds`) counted against
+     `src/`: it checks subscripts of typed arrays, `*T` and slices, and rekha's reads are
+     overwhelmingly `load8` .. `load64` on computed addresses (1,448 sites) beside a few dozen
+     fixed-size typed-array locals (`var m: i64[6]`, `src/cff.cyr:468`). Decide whether it earns a
+     CI leg.
+7. **Post-review benchmarks** — the fixes cost what the dossier says they cost.
+8. **Documentation audit** — README, CONTRIBUTING, SECURITY, `docs/api/`, the ADRs, and the source
+   comments that cite this file.
+9. **Scaffold** — the same pass's cleanup:
+   - **the nine internals with no call site** (execution coverage, 1.1.1): the seven table-directory
+     accessors `rekha_w2_ent_tag` .. `rekha_w2_ent_ooff` (`src/woff2.cyr:182-188`),
+     `rekha_hint_trig_atan` (`src/hint.cyr:3834`; `rekha_hint_vlen` keeps no angle, `:3849`) and
+     `rekha_cff2_regions` (`src/cff2.cyr:74`) — each removed or given the caller it was written for.
+     None is public;
+   - **the harness's eight leaves into a `[test] stdlib`** (cyrius 6.7.6): today they resolve partly
+     from `lib/` (`syscalls`, `alloc`, `string`) and partly from the toolchain snapshot, recorded only
+     in `programs/prelude.cyr`. CI's leaf pin proves nothing leaks into a sidecar either way.
+
+**Known going in** — found while writing this ladder, each checked:
+
+- ⛔ **A CFF / CFF2 charstring refusal answers `REKHA_OK`.** `rekha_cff_load` returns
+  `rekha_outline_empty()` on `RC_BAD` without recording a code (`src/cff.cyr:1406`, the sites at
+  `:765`, `:850`-`:985`), so `rekha_load_glyph` hands back a blank and a clean error slot — where
+  `docs/api/outline.md` (`rekha_load_glyph`) and `src/glyf.cyr:613` promise *"REKHA_OK then means the
+  blank was real"*. A documented answer measured wrong: a fix, here.
+- **The sadish floor is stated two ways**: `docs/api/README.md:116` says 0.11.2; `README.md:309` and
+  `cyrius.cyml:123` say 0.9.0. One is the fact.
+- **Two stale citations of this file**: `src/var.cyr:12` says HVAR and MVAR *"are not read"*
+  (`rekha_mvar_delta` is `src/hvar.cyr:293`, shipped 0.6.0); `scripts/metrics_var_diff.py:198` says
+  rekha does not read `name` (shipped 0.6.2).
+
+**Exit:** every HIGH and MEDIUM fixed here with a regression test; each LOW and INFO fixed or given a
+slot below; the dossier committed and linked.
+
+---
+
+## ▶ Scheduled — the 1.x ladder
+
+### 1.2.x — the formats still refused or skipped
+
+#### 1.2.0 — variation selectors (minor)
+
+- **`rekha_char_variant_to_glyph`** — `cmap` format 14, default and non-default UVS, as the supplement
+  beside the primary map. Excluding format 14 as a PRIMARY map is correct and stays
+  (`src/cmap.cyr:39`, `:95` — `enc == 5` ranks −1). Without the supplement, U+FE0E / U+FE0F
+  presentation selectors and CJK ideographic variation sequences resolve as base + `.notdef`.
+
+#### 1.2.1 — the reference differentials in CI (patch)
+
+First in the line so that every format slot after it is measured by a standing oracle, not a dev-host
+one-off.
+
+- **The three self-building sweeps** already committed need fontTools and nothing else —
+  `scripts/cff2_wide_diff.py` (550 points over 100 glyph instances), `scripts/cff_fontmatrix_diff.py`
+  (12 matrices), `scripts/metrics_var_diff.py` (88 metric values over two axes): a scheduled workflow
+  runs them.
+- **The hinting oracle**: CI's Ubuntu ships FreeType 2.13.2, the vectors were recorded on 2.14.3, and
+  `scripts/ftshim.py` refuses anything but 2.14.x — so `programs/hint_unit_vectors.cyr` and
+  `programs/hint_glyph_vectors.cyr` are transcriptions regenerated by hand, and the whole-face sweep
+  (`scripts/hint_glyph_diff.py sweep`, 26,200 loads, 0 differ) never runs in CI. A pinned 2.14.x build
+  in the scheduled job turns both into regenerate-and-diff gates.
+- **The corpus sweeps** — CFF (405 faces, 5,093,070 glyphs), WOFF2 (280 files, 111,732 glyphs),
+  `cmap` (92 faces), the 165 + 50 hinted host faces — need fonts that are not committed (size,
+  licensing). Decide on a licence-clean mini-corpus with committed digests, or record why not.
+
+#### 1.2.2 — `cmap` formats 2, 8 and 10 (patch)
+
+- Candidates ranked **below every current one** (`src/cmap.cyr`, the candidate validator), so no
+  font's chosen subtable moves. A font carrying only one maps nothing today. Format 2 is legacy CJK
+  multi-byte; 8 and 10 are near-extinct.
+
+#### 1.2.3 — the last CFF refusals about missing data (patch)
+
+- **The Expert and ExpertSubset charsets**: a `seac` on a font that uses one is refused because rekha
+  does not carry the two tables (`src/cff.cyr:629`), not because the font is malformed.
+- **CFF2 FDSelect format 4**, the 32-bit-gid form, refused today (`src/cff2.cyr:32`, *"an FDSelect in
+  a format other than 0 or 3"*). No observed font needs it.
+
+#### 1.2.4 — `kern` format 2 (patch)
+
+- The two-dimensional class array (`src/kern.cyr:31-32`: *"Format 2's two-dimensional class array is
+  rare and is not read"*). A font with
+  one beside a format 0 kerns from the format 0 today; none of the 16 host `kern` fonts needed it.
+
+1.2.2 – 1.2.4 each turn a refusal or a skip into the font's own answer — fixes, measured against the
+font's tables (fontTools) and against FreeType, in patches.
+
+### 1.3.x — what a composite and a variable font mean for metrics
+
+#### 1.3.0 — the resolvers beside the O(1) readers (minor)
+
+- **An advance resolver** that decodes the glyph when it must: `USE_MY_METRICS` (0x0200) on a
+  composite, and `gvar`'s phantom-point advances on a face with no HVAR / VVAR (FreeType's rule).
+  `rekha_advance_width` (`src/sfnt.cyr:661`) stays the frozen `hmtx` index measured at 47 ns (0.3.11);
+  the hinted path already answers both (`src/hint.cyr:4125`; `rekha_gvar_apply_n`,
+  `src/gvar.cyr:275`, notes `:25-35`).
+- **A right-side-bearing accessor** that applies HVAR's rsb map, which rekha reads past today
+  (`src/hvar.cyr:37`).
+- **GPOS kerning that follows the axes**, as a NEW call: Device and VariationIndex deltas through
+  GDEF's ItemVariationStore (`rekha_ivs_delta`, `src/hvar.cyr:90`, exists since 0.6.0; GDEF is the
+  missing reader, `src/gpos.cyr:37-40`). The frozen `rekha_gpos_kern` documents them unapplied
+  (`docs/api/kern.md`).
+
+#### 1.3.1 — `avar` 2.0's variation store (patch)
+
+- The DeltaSetIndexMap reader 0.6.0 built for HVAR, wired into `avar` 2.0's mapping
+  (`src/var.cyr:21-27`; the segment maps already apply). An `avar` 2.0 font's normalised coordinates
+  are wrong against its own tables until then — a fix, measured with fontTools as
+  `scripts/metrics_var_diff.py` measures the rest.
+
+### 1.4.x — the web containers, completed
+
+#### 1.4.0 — the opens say why; metadata; one inflate per collection (minor)
+
+- **`_why` twins for the container opens** — `rekha_font_open_woff` (`src/woff.cyr:183`),
+  `rekha_font_open_woff2` / `_index` / `rekha_font_open_any` (`src/woff2.cyr:1571-1597`) — as 0.7.0
+  gave `rekha_font_open` and `_index` theirs (`src/sfnt.cyr:294`, `:343`). They are the deepest
+  pipeline in the library and answer a bare 0 (ADR 0004, ADR 0006).
+- **Accessors for the metadata and private blocks**, which both readers validate for position only
+  (`src/woff.cyr:35`, *"validated for position only and not copied"*; `src/woff2.cyr:46`) and the
+  rebuilt SFNT never carries.
+- **A cached decoded-collection handle**: `rekha_font_open_woff2_index` rebuilds the whole file per
+  call (`src/woff2.cyr:1565`), so opening every face of an *n*-face collection inflates it *n* times,
+  and `sd_alloc` has no free. The documented two-step (decode once, then `rekha_font_open_index`)
+  stays.
+
+#### 1.4.1 — the 1.2 – 1.4 closeout P(-1) (patch)
+
+- 1.1.2's P(-1) over everything 1.2.0 – 1.4.0 added: `cmap` 2 / 8 / 10 / 14, the Expert charsets and
+  FDSelect 4, `kern` format 2, the GDEF reader, the resolvers, `avar` 2.0, the container accessors and
+  the collection cache — each new reader in the mutation loop, its dossier beside 1.1.2's.
+
+### Opens on request — 1.5.x onward
+
+Each line below waits for its entry condition and keeps its number while it waits.
+
+#### 1.5.0 — hinting the way a consumer asks (minor) — *opens when a consumer needs a glyph rekha draws unhinted fitted the way FreeType fits it*
+
+- **FreeType's default-mode fallbacks in the glyph range only** (`HC_RANGE` 4, `src/hint.cyr:220`):
+  `RCVT` past the table reads 0 (ref2143/ttinterp.c:2861-2868), a short stack reads zeros, a bad point
+  is skipped, and a refusing component keeps its partial hinting instead of unhinting the whole glyph.
+  A NEW opt-in call on the hinting context; `rekha_hint_glyph`'s answer stays (ADR 0002). The measured
+  case: 17,158 of 2,812,516 loads (0.61%) over 50 host faces, none ASCII; AdwaitaMono-Regular refuses
+  2,624 of 8,818 glyphs at 9 of 25 ppems (its arrows at 9 ppem).
+- **`GETINFO` answers a consumer can set** — rotated, stretched, ClearType, the version — fixed today
+  (`rekha_hint_op_getinfo`, `src/hint.cyr:2074`), so a consumer applying its own transform cannot tell
+  the font.
+- **An `hdmx`-aware hinted advance**, as a new call beside `rekha_hint_advance_px` (`src/hint.cyr:4571`,
+  `:4577`; ref2143/ttgload.c:2302-2313): on a synthetic face 4 of 4 advances differ at the listed
+  ppem; 0 of 1,751 host `glyf` fonts carry the table.
+- **Raisable load ceilings** — the five composite caps are internal constants (`src/glyf.cyr:125-129`).
+  A trip already reports `REKHA_ERR_OOM` named `"point cap"` / `"contour cap"` / `"glyph load cap"`
+  (`docs/api/errors.md:19`, `docs/api/outline.md`); a consumer cannot raise them, and no host face
+  trips them (1,129 hinted faces: deepest nesting 5, at most 17 loads per glyph).
+
+#### 1.5.1 — variable instances hinted on reference (patch) — *opens with a hinted `gvar` face to measure (none on the host)*
+
+- `cvar`; `gvar` deltas rounded once on 16.16 instead of per tuple from whole units (`src/gvar.cyr`);
+  `prep` re-run only when the face has `cvar` (`rekha_hint_axes_changed`, `src/hint.cyr:895`;
+  ref2143/ttgxvar.c:3993-3997); `GETINFO`'s variation bit and `GETVARIATION`'s gate as FreeType keeps
+  them (`:2074`, `:2151`); the HVAR lsb delta on the hinted pp1 (`rekha_hint_hmetrics`, `:3627`;
+  FreeType leaves `lsb_adjust` NULL, ref2143/ttdriver.c:559). `docs/api/hint.md` states the instance
+  off-reference; it moves with the measurement, as a fix.
+
+#### 1.6.0 — the default face as a profile (minor) — *opens with a consumer that would rather not vendor a generated `.cyr`*
+
+- cyrius 6.6.19's `[embed]` (P2): `[embed] REKHA_FACE = "fonts/<face>.ttf"` and a `[lib.face]` profile
+  producing `dist/rekha-face.cyr`, re-exporting the same ten names from an accessor module. ⛔ ADDED
+  beside `fonts/face_data.cyr`, which stays — its path and ten accessors are frozen
+  (`docs/api/open.md`, *The embedded default face*; agnos consumes it by path) — and so does
+  `scripts/face2cyr.py`. ⚠ Measure first: a plain `[embed]` rides in every binary of this project
+  (the 410,820 B face in each test binary) and shares cycc's 2 MiB string pool; cyrius refuses an
+  `[embed]` name any stdlib leaf already declares (sankoch 2.8.3's notes).
+
+#### 1.7.0 — colour, version 0 (minor) — *opens when a consumer asks (emoji in a UI toolkit)*
+
+- **`COLR` v0 + `CPAL`**: a base glyph's layer list and palette entries, emitted as several `SdPath`s
+  with an RGBA each — *N* of the outlines rekha already produces, through the existing seam.
+
+#### 1.8.0 — readers shaped by a consumer (minor) — *each row opens when a consumer writes the loop itself*
+
+- **GPOS script and language selection**: rekha takes the union of every `kern` feature's lookups
+  (`src/gpos.cyr`'s header). Doing it properly puts a script and a language on the API — a design
+  question before it is a walk.
+- **`STAT` style-name synthesis**: which values apply, the `axisOrdering` sort, the elidable names
+  (`src/stat.cyr`'s header) — the consumer's, like `rekha_use_typo_metrics`, until two consumers
+  write the same loop.
+- **`post` glyph names**: format 2.0's index and the 258-name Macintosh standard order
+  (`src/post.cyr:23`) — for tooling (PDF export, a debugger naming the glyph that failed); nothing
+  rekha draws needs one.
+- **A vertical origin derived when a font states none**: with no `VORG` the convention derives one
+  from the bounding box and the top side bearing; rekha answers 0 and says so
+  (`rekha_vorg_present`, `src/vert.cyr:191`), because a derived origin is a plausible wrong height for
+  every glyph in a run. Wants a bbox accessor beside it.
+
+#### 1.9.0 — the two questions that need a decision first — *opens with the decision*
+
+- **CFF hinting**: `src/cff.cyr` parses `hstem` / `vstem` / `hintmask` for stem COUNT — enough to know
+  how many mask bytes follow — and discards the hints, so "hinting" is two jobs and only TrueType's has
+  been done. An ADR first (whether rekha hints CFF at all, and against which reference), then the
+  slot.
+- **`COLR` v1**: gradients, composites and transforms need paint capability sadish does not have. When
+  a consumer asks, it is filed as a proposal in sadish (`docs/development/proposals/`) and this slot
+  waits on it under *Blocked on a sibling*.
+
+---
+
+## Standing divergences from FreeType 2.14.3 — recorded decisions
+
+Stated at each site, in CHANGELOG 0.8.1 / 0.8.2, and in `docs/api/hint.md`. They are decisions, not
+work: kept for 1.x unless a slot above names them. The source comments that say *"pinned in
+docs/development/roadmap.md"* point here. `src/hint.cyr` unless another file is named.
+
+| divergence | where | stands as |
 |---|---|---|
-| **cmap format 14 / UVS lookup** | `src/cmap.cyr:39`, `:88` (`enc == 5` → rank −1) | Excluding format 14 as a *primary* map is correct and permanent. What is missing is the supplement: no `rekha_char_variant_to_glyph`, so U+FE0E/FE0F presentation selectors and CJK IVS resolve as base + `.notdef`. |
-| **`USE_MY_METRICS` (0x0200) on the O(1) advance reader** | `src/hint.cyr:4112` honours it on the HINTED path (`rekha_hint_advance_px` answers the component's phantoms, FreeType's rule, pinned by é and Å in `programs/hint_glyph_vectors.cyr`); `rekha_advance_width` (`src/sfnt.cyr:651`) still indexes `hmtx` by the composite's own gid | Honouring it in the unhinted reader puts a glyph decode behind an advance query that 0.3.11 measured at 47 ns, so the honest fix is a separate resolver, not a change to the O(1) reader. A consumer on the hinted path already has the right answer. |
-| **Expert / ExpertSubset charsets** | `src/cff.cyr`, the `seac` refusal list (0.4.7) | Refused rather than guessed. Carrying the two tables would close the last `seac` refusal that is about missing data rather than a malformed font. |
-| **CFF2 FDSelect format 4** | `src/cff2.cyr`, formats 0 and 3 only | Format 4 is the 32-bit-gid form; no observed font needs it. |
-| **cmap formats 2, 8, 10** | `src/cmap.cyr` candidate validator | Format 2 is legacy CJK multi-byte; 8 and 10 are near-extinct. Silently non-candidates today — a font carrying *only* one maps nothing. |
-| **Load caps are compile-time and silent** | `src/glyf.cyr:118-122` | 4,096 points / 128 contours / depth 5 / 64 loads / 16,384 points. A trip yields an EMPTY glyph with no way for the consumer to raise the ceiling or learn it was hit — which is `RekhaErr` again. |
-| **WOFF / WOFF2 metadata and private blocks discarded** | `src/woff.cyr:36`; `src/woff2.cyr:46` | Bounds-checked, then dropped. Consistent with rekha's scope, but a named W3C container feature no accessor reaches. |
-| **WOFF2 collections re-inflate per face** | `src/woff2.cyr:1565` (the warning is at the call site) | Opening every face of an *n*-face collection rebuilds the file *n* times, and `sd_alloc` has no free. The two-step escape hatch is public and documented; a cached handle would remove the trap. |
-| **`gvar` phantom-point advances are decoded and discarded by the O(1) reader** | `src/gvar.cyr:23-31`; `rekha_gvar_apply_n` (`:275`) lands them for the hinted loader, on a face without HVAR / VVAR only, FreeType's rule | A TrueType variable font with `gvar` and no HVAR varies its advances through the four phantom points per glyph. The hinted path carries them since 0.8.2 (`rekha_hint_advance_px`); honouring them in `rekha_advance_width` puts a full glyph decode behind an advance query measured at 47 ns, so the honest shape is a separate resolver, not a change to the O(1) reader. No hinted `gvar` face on the host measures it. |
-| **HVAR's rsb map is read past; its lsb map reaches one reader of two** | `src/hvar.cyr:37-39`, `rekha_hvar_lsb_delta` (`:261-271`); `rekha_left_side_bearing` (`src/sfnt.cyr:677-703`) applies it, the hinted pp1 (`rekha_hint_hmetrics`, `src/hint.cyr:3601-3614`) does not | 0.8.2 added the lsb accessor and its delta. FreeType's TrueType driver never adjusts the lsb (ref2143/ttdriver.c:559), so the hinted outline's origin follows FreeType and the metric reader follows `rekha_advance_width`'s frozen semantics — on a variation instance with an lsb map the two differ by the delta (the 0.8.x pin above). No right-side-bearing accessor exists for the rsb map. |
-| **A vertical origin is not derived when a font states none** | `src/vert.cyr`, the header note | With no `VORG`, the convention is to derive one from the bounding box and the top side bearing. rekha answers 0 and says so through `rekha_vorg_present`, because a derived origin is a plausible wrong height for every glyph in a run. Wants a bbox accessor and a consumer that needs it. |
-| **GPOS kerning does not follow the axes** | `src/gpos.cyr`, the header note | A GPOS ValueRecord can carry a Device table or a VariationIndex into GDEF's ItemVariationStore. The store reader exists (`rekha_ivs_delta`, 0.6.0); GDEF is what is missing, so a variable font's GPOS kerning is read at its default. |
-| **GPOS script and language selection** | `src/gpos.cyr`, the header note | rekha takes the union of every `kern` feature's lookups. Doing it properly needs a script and a language on the API, which is a bigger question than the walk. |
-| **The WOFF / WOFF2 opens do not say why** | `src/woff.cyr`, `src/woff2.cyr` | 0.7.0 gave `rekha_font_open` and `_index` their `_why` twins; the container opens still answer a bare 0, and they are the deepest pipeline in the library and the least diagnosable. |
-| **The CFF interpreter's own refusals are silent** | `src/cff.cyr`, the `RC_BAD` sites | An OTTO glyph a charstring rule refused reports the same nothing a TrueType one used to. The handle slot is there; those sites are not wired. |
-| **`kern` format 2** | `src/kern.cyr`, the skip list | The two-dimensional class array. Rare, and a font carrying one alongside a format 0 still kerns from the format 0; none of the 16 host `kern` fonts has one rekha needed. |
-| **`post` glyph names** | `src/post.cyr`, the header note | Format 2.0's per-glyph name index, and the 258-name Macintosh standard order it indexes into — a table the size of everything else in that file. Glyph names serve tooling (PDF export, a debugger naming the glyph that failed); nothing rekha draws depends on one. |
-| **STAT style-name synthesis** | `src/stat.cyr`, the header note | rekha reads every field and joins none of them: which values apply, the `axisOrdering` sort, dropping the elidable names. Deliberately the consumer's, like `rekha_use_typo_metrics` — but if two consumers write the same loop it belongs here after all. |
-| **`avar` 2.0's variation store** | `src/var.cyr`, the avar note | 0.6.0 built the `DeltaSetIndexMap` reader that `avar` 2.0's mapping needs; wiring the two together is what is left. Its segment maps already apply. |
-
----
-
-## Coverage — what the gates cannot see
-
-Not defects. Places where the evidence is real but unreproducible, written down so the gap does not
-quietly become permanent.
-
-- ⚠ **Every headline ⭐ differential is a dev-host one-off.** CFF (405 faces / 5,093,070 glyphs),
-  WOFF2 (280 files / 111,732 glyphs), cmap (92 faces), CFF2 and `gvar` — none of it runs in CI.
-  ⭐ Three sweeps are the exception and the model: `scripts/cff2_wide_diff.py` (550 points over 100
-  glyph instances), `scripts/cff_fontmatrix_diff.py` (12 matrices) and `scripts/metrics_var_diff.py`
-  (88 metric values over two axes) each build their own font, so they need fontTools and nothing
-  else, and all three are committed. The remaining sweeps need corpora that are not. fontTools is not a dependency, the corpora are not committed (size and licensing), and the
-  in-repo fixtures are narrower by construction. A regression after 0.4.12 in any of those decoders
-  would be caught only by the synthetic suites. Worth having: a scheduled workflow that installs
-  fontTools and re-runs the sweeps, or a licence-clean mini-corpus with committed digests.
-- ⭐ **The hinting evidence is the exception to the whole bullet above**: `scripts/hint_vectors.py`
-  reads `fonts/LiberationSans-Regular.ttf`, which is COMMITTED, and the suite drives the same bytes
-  through the embedded face module — so the font program, the 71 function numbers, the `gasp`
-  ranges, the six per-size control-value digests, `prep`'s post-run digests, the 167
-  FreeType-recorded unit programs on 39 fonts (every row three times) and, since 0.8.2, **FreeType's
-  own hinted outlines of 31 glyphs of the face — 233 rows, 5,372 points** — all re-run in CI with
-  no corpus at all: **109,221 checks** in `programs/hint_test.cyr`, and the hinted path inside
-  `programs/hostile_test.cyr`'s sentinel sweep and mutation loop (240,908 hinted loads over 120
-  mutants). ⚠ What is NOT in CI is the oracle side: `scripts/hint_vectors.py` needs fontTools, and
-  the six hinting scripts (`scripts/ftshim.py`, `hint_unit_vectors.py`, `hint_glyph_vectors.py`,
-  `hint_glyph_diff.py`, `hint_prep_xcheck.py`; `hint_prep_vectors.py` is the one written from the
-  sources) reach the installed `libfreetype` through `ctypes` — **FreeType 2.14.3 on the dev
-  host, where CI's Ubuntu ships 2.13.2**, whose interpreter differs in ways one recorded program
-  shows. So `programs/hint_unit_vectors.cyr` and `programs/hint_glyph_vectors.cyr` are
-  transcriptions like `programs/face_test.cyr`'s constants: regenerated by hand on a 2.14.x host
-  and reviewed as a diff, never rebuilt by a gate. Nor does the whole-face sweep run there:
-  `scripts/hint_glyph_diff.py sweep` (26,200 loads, 0 differ) and its `corpus` mode (165 host
-  faces at 12 ppem, 50 more at 9 / 11 / 13 / 20, 0 differ) are dev-host one-offs recorded in
-  CHANGELOG 0.8.2, and the host has no hinted `gvar` or `hdmx` face at all, so those two pins are
-  unmeasured on any real font. Worth having: a CI runner with a 2.14.x FreeType, or a pinned build
-  of one, and the sweep on a schedule.
-- ⚠ **The hostile corpus never touches the container parsers.** `grep -cin woff
-  programs/hostile_test.cyr` → **0**. The seeded mutation sweep and the A/B sentinel differential
-  cover the bare-SFNT reader; `.woff` and `.woff2` — the two inputs most likely to arrive off a
-  network — get per-rule refusals and a guard differential, but never a mutation sweep, and they
-  reach a much deeper decode path (substream walks, triplet decoding, `loca` rebuild, checksum
-  recomputation).
-- ⚠ **The coverage number is TEXT coverage.** cyrius 6.6.17 (rekha's filing) takes the RUN programs
-  as a corpus, and CI prints it as a visibility step: **202 of 465 functions** referenced by name,
-  and **176 of the 178 public ones** — `rekha_hint_error_clear` and `rekha_hvar_lsb_delta` run only
-  inside other public calls (`src/hint.cyr:876` and six more; `src/sfnt.cyr:712`), never by a
-  suite directly. An internal reached only through another function does not count, so it is a
-  floor, not a gate. EXECUTION coverage is cyrius 6.7.10 (P5-B) and needs a 6.7.x pin.
-- ⚠ **WOFF2 CI sees only STORED Brotli blocks** — see *Blocked on a sibling*; the issue file names
-  the alternative that would not wait (a committed reference-encoder fixture) as the
-  maintainer's call.
-- ⚠ **No harness runs under `poison_alloc` yet** — see *Toolchain follow-ups*.
+| **Refuses** what FreeType's default mode reads as 0 or skips: a control value past the table, a point outside its zone, a storage index, a short stack — the glyph reloads scaled and unhinted, named through `rekha_hint_error` | `"RCVT index"` `:2007`; `"MIAP cvt"` / `"MIRP cvt"` `:2664`, `:2933`; `rekha_hint_pt_ok` `:1197`; `rekha_hint_op_mem` `:1981`; `"stack underflow"` `:613` | kept (ADR 0002, confirmed for 1.x at 1.0.0); opt-in alternative → **1.5.0** |
+| A program refusal unhints the **whole** glyph, where FreeType keeps a partially hinted component | `:3587-3589`; the file header, `:26-27` | kept; → **1.5.0**'s opt-in mode |
+| `SHZ` in a NESTED composite's program: FreeType walks `first_point` slots past its contours and writes past its points array; rekha **clamps** at the sub-zone's end | `rekha_hint_op_shz` `:2479`; `rekha_hint_first_point` `:1069`; unit rows `comp_nested_first_point`, `comp_nested_shz_low` | kept — FreeType's is an out-of-bounds write |
+| FreeType's composite recursion cap of 100 is not modelled; the outline loader's caps apply and the zone is sized from `maxp` | `src/glyf.cyr:125-129`; `REKHA_HINT_MAXZONE` `:305`; `"glyph zone cap"` / `"contour cap"` `:937-938` | kept; on 1,129 hinted host faces they refuse nothing |
+| The **scan-type bits** FreeType ORs into an instructed glyph's first tag byte are not kept | `rekha_hint_outline`'s header, `:4532` | kept; the oracle masks with 0x19 |
+| **`hdmx` is not read** | `:4571`, `rekha_hint_advance_px` `:4577` | → **1.5.0** (a new call) |
+| **Variable instances are hinted off-reference** (no `cvar`, per-tuple rounding, `prep` re-run on every axis change, the variation bit, the lsb delta on pp1) | `rekha_hint_glyph`'s header `:4402`; `rekha_hint_axes_changed` `:895`; `:2074`, `:2151`, `:3627` | → **1.5.1** |
+| A `REPEAT` count past the last point is **clamped** — a leniency: FreeType refuses the glyph (ref2143/ttgload.c:451-452) | `src/glyf.cyr:242-246` | kept |
+| Three `loca` rules FreeType sanitizes are **refused**: offsets running backwards, the last glyph's end past `glyf`, any other end or start past it | `rekha_glyf_span`, `src/sfnt.cyr:768`; refusals `:755-760` | kept; empty on every face measured |
+| An `OS/2` shorter than 78 bytes is absent to rekha, so `hhea` decides the vertical phantoms | `rekha_hint_vmetrics` `:3666` | kept — the saner rule |
+| **Glyph-only bytecode is not run**: no non-empty `fpgm` / `prep` / `cvt ` answers `NO_TABLE "hint tables"`, where FreeType's default load autohints (ref2143/ftobjs.c:1006-1016) | `rekha_hint_present` `:380` | kept — rekha has no autohinter |
+| A composite's `n_ins` or bytes past its `loca` span refuse `TRUNCATED "composite instructions"`; the twilight bound has no +4 band and is the running minimum in one load; org is filled and the phantom tags are 0 when no program runs | `:4227`; `rekha_hint_twilight_bound` `:3465`; `HC_TWCAP` `:251` | kept; the last is observed by nothing |
+| A point, contour or reference index ≥ 65536 is **refused**, where FreeType's `FT_UShort` cast wraps it | `rekha_hint_pt_ok`'s comment, `:1192` | kept; only stack arithmetic reaches it |
+| A backward jump before a function's own start is **refused** | `"jump out of range"` `:3243` | kept |
+| The twilight zone is zeroed with its tags and font-unit positions per `prep`; a face whose `prep` is absent gets the default graphics state where 2.14.3 saves a stale one | `rekha_hint_run_prep` `:3530` (comment `:3524`) | kept — the second is a FreeType defect |
+| FreeType's `LOOPCALL` / backward-jump caps and call depth 32 are not modelled: one budget of 1,000,000 instructions and a depth of 64 | `:110-111`; `rekha_hint_exec` `:3155`; `rekha_hint_call` `:3392` | kept |
+| `INSTCTRL`'s operand order is unobserved in the corpus (the one real site pushes `1 1`); bits 1 and 2 follow `tt_loader_init`'s order on the glyph path | `:87`, `:1899-1908`; `rekha_hint_load_instctrl` `:4309` | kept |
+| `GETINFO`'s answers are fixed: version 35, no ClearType, not rotated, not stretched, grayscale — 0 inside `fpgm`, as FreeType has it | `rekha_hint_op_getinfo` `:2074` | → **1.5.0** |
+| CI's FreeType is 2.13.2, the vectors' 2.14.3 | the headers of `programs/hint_unit_vectors.cyr` and `programs/hint_glyph_vectors.cyr` | → **1.2.1** |
 
 ---
 
 ## Blocked on a sibling
 
-The rule: a missing sibling capability gets a filed proposal plus a line here. Never "off the list".
+The rule: a missing sibling capability gets a filed proposal plus a line here — never "off the list".
 
 | waiting on | filing | status |
 |---|---|---|
 | *(none open)* | | |
 
-⭐ **Unblocked at 1.1.1:** the WOFF2 encoder filing ([`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md)). sankoch
-shipped the encoder in 2.8.4 and the 6.7.18 stdlib rekha pins carries it (2.8.9), so the item moved
-to *Toolchain follow-ups — unblocked by the cyrius 6.7.18 pin*.
+`COLR` v1 (1.9.0) files its sadish proposal the day a consumer asks for it.
 
-⭐ **Closed, for the record:** both earlier rekha filings against sankoch shipped in **2.8.0** — the
-WOFF2 Brotli decoder, and the profile bundles that could not link. All three rekha filings against
-cyrius shipped and are archived upstream: the test-only-leaf channel as **6.6.18 option 2** (the
-sidecar is the compile-verify fixpoint alone — adopted at 1.0.0, ADR 0010), RUN programs as a
-coverage corpus in **6.6.17** (adopted at 1.0.0 as a CI visibility step), and `fuzz --poison`
-following a custom allocator seam in **6.6.18** (unblocked; see *Toolchain follow-ups*).
-
----
+⭐ **Closed, for the record:** the WOFF2 encoder filing was unblocked at 1.1.1 (sankoch 2.8.4 shipped
+the encoder; the 6.7.18 stdlib carries 2.8.9) and is slotted in 1.1.2. Both earlier rekha filings
+against sankoch shipped in 2.8.0 — the Brotli decoder and the profile bundles that could not link —
+and all three against cyrius shipped: the test-only-leaf channel (6.6.18 option 2, ADR 0010), RUN
+programs as a coverage corpus (6.6.17), and `fuzz --poison` following a custom allocator seam
+(6.6.18; adopted in 1.1.2).
 
 ## Out of scope — committed
 
 Non-goals. Taking one on would change what rekha is.
 
-- **Text shaping and layout** — GSUB, GPOS beyond pair kerning, BiDi, complex-script reordering,
-  line breaking. rekha hands back outlines and advances; a shaping library consumes them.
-  ⚠ **No such repo exists in the AGNOS stack yet**, and no slot is reserved for one — the siblings
-  are a rasterizer, a bitmap-font provider, two tokenizers, a language corpus and a TTS
-  grapheme-to-phoneme engine. That is a stack gap worth its own proposal when a consumer needs it,
-  not a rekha item.
+- **Text shaping and layout** — GSUB, GPOS beyond pair kerning, BiDi, complex-script reordering, line
+  breaking. rekha hands back outlines and advances; a shaping library consumes them. ⚠ **No such repo
+  exists in the AGNOS stack yet**, and no slot is reserved for one — the siblings are a rasterizer, a
+  bitmap-font provider, two tokenizers, a language corpus and a TTS grapheme-to-phoneme engine. That
+  is a stack gap worth its own proposal when a consumer needs it, not a rekha item.
 - **Rasterization, anti-aliasing, subpixel** — `sadish`. rekha owns *what the glyph is*, sadish owns
   *how it becomes pixels*, and the seam is the whole design.
-- **Bitmap glyph sources** — `kashi` (PSF1/PSF2, VGA-ROM, BDF, PCF). This includes the strikes
-  embedded in OpenType files (`EBDT`/`EBLC`/`EBSC`, `CBDT`/`CBLC`, `sbix`): they are PNG and bitmap
-  data, not outlines, and rekha is the *outline* half of the pair.
+- **Bitmap glyph sources** — `kashi` (PSF1 / PSF2, VGA-ROM, BDF, PCF). This includes the strikes
+  embedded in OpenType files (`EBDT` / `EBLC` / `EBSC`, `CBDT` / `CBLC`, `sbix`): they are PNG and
+  bitmap data, not outlines, and rekha is the *outline* half of the pair.
 - **The `SVG ` table** — needs an SVG renderer, which is neither rekha nor sadish.
 - **`MATH`** — math typesetting is a document engine's capability, with no AGNOS consumer.
 - **PostScript Type 1 (`.pfa` / `.pfb`) and bare CFF files** — Type 1 is a dead format; a bare CFF
   has no `cmap`, no `hmtx` and no `head`, so it cannot drive rekha's own API.
-- **Subsetting and font writing** — rekha is a reader. It emits SFNT bytes only to rebuild a
-  container it was handed (`rekha_woff_decode`, `rekha_woff2_decode`).
+- **Subsetting and font writing** — rekha is a reader. It emits SFNT bytes only to rebuild a container
+  it was handed (`rekha_woff_decode`, `rekha_woff2_decode`).
 - **A glyph → Unicode reverse map** — the forward direction answers the question consumers actually
   ask; reverse mapping serves text extraction, which nothing here does.
 
-## Out of scope — unbooked
+## What moves the ladder
 
-Additive, understood, and waiting on a consumer to ask.
-
-- **`COLR` v0 + `CPAL`** — the one colour format that is genuinely rekha-shaped: a base glyph maps
-  to a list of layer glyphs, each with a palette index. That is *N* of the outlines rekha already
-  produces plus an RGBA each, and it fits the existing seam by emitting several `SdPath`s instead of
-  one. The gap is real (no emoji in a UI toolkit) and the work is honest outline work.
-- **`COLR` v1** — gradients, composites and transforms need paint capability sadish does not have
-  today. A joint item with sadish, not a rekha one.
-- **A cached decoded-collection handle** — the fix for the WOFF2 re-inflate pin above, if anyone
-  opens more than one face in a hot path.
-
-## What would legitimately reopen this file
-
-- A consumer hits one of the pinned items in a real font and can show it.
-- A consumer asks for FreeType's default-mode fallbacks in the glyph range — a control value past
-  the `cvt ` read as 0, a short stack read as zeros, a bad point skipped — because a glyph rekha
-  draws unhinted (AdwaitaMono's arrows at 9 ppem) has to be fitted the way FreeType fits it. In
-  1.x that is a NEW opt-in call on the hinting context; `rekha_hint_glyph`'s default stays.
-- A hinted `hdmx` face or a hinted `gvar` face turns up in the wild: neither exists on the host, so
-  the two pins on them were stated from the sources and a synthetic font, never measured on a
-  real one.
-- A CVE or an audit finding lands against a format rekha parses.
-- sankoch ships **2.8.4** and a cyrius pin folds it into the stdlib rekha's tests include.
-- `sadish` grows paint capability that makes `COLR` v1 tractable.
-- A shaping library appears in the stack and needs something from rekha that is not here.
+- **A consumer hits a pinned item in a real font and can show it** — its slot moves up, with the
+  reason written here.
+- **A CVE or an audit finding** against a format rekha parses — it takes the next patch number.
+- **A toolchain or ecosystem release that has to land first** — the next patch number, the rest shift.
+- **An entry condition is met** — a consumer for 1.5.0 – 1.8.0; a hinted `gvar` face for 1.5.1; the
+  ADR for CFF hinting or a consumer for `COLR` v1 (1.9.0).
+- **A hinted `hdmx` or `gvar` face turns up in the wild** — neither exists on the host, so 1.5.0's
+  `hdmx` row and 1.5.1 were stated from the sources and a synthetic font, never measured on a real
+  one.
+- **A shaping library appears in the stack** and needs something from rekha that is not here.
 
 ## Where to look for…
 
 - **Release history, with the measurements** → [`../../CHANGELOG.md`](../../CHANGELOG.md)
 - **What rekha reads today** → [`../../README.md`](../../README.md), *Scope*
+- **The API and its promise** → [`../api/README.md`](../api/README.md)
+- **The threat model and supported versions** → [`../../SECURITY.md`](../../SECURITY.md)
 - **Open filings** → [`issues/`](issues/)
 - **The dependency floors and why** → [`../../README.md`](../../README.md), *Dependencies*
-
-## Toolchain follow-ups — unblocked by the cyrius 6.6.20 pin (1.0.0)
-
-The notes cyrius recorded here for "the next pin move" (6.6.17, 6.6.19, and the 2026-10-08 move from
-cyrius's roadmap) apply now. What 1.0.0 took and what it left:
-
-- ✅ **Adopted — P4 (6.6.18): a sidecar names what the compile-verify proves, and a bundle carries
-  its requires block.** `dist/rekha.deps` is gone (the base bundle needs no leaf), the WOFF bundle
-  opens with `string` + `sankoch`, `scripts/api_surface.py` accepts exactly that block before
-  `private`, and CI's leaf pin reads base `[]` / WOFF `[string sankoch]` (ADR 0010). ⚠ The note
-  said *"`programs/prelude.cyr` and the CI sidecar pin can go"*. The pin STAYS — it is what makes
-  the fixpoint's answer a deliberate one, and a cyrius change could move it. The prelude's reason
-  (keep harness leaves out of the union) is gone; it remains as the harness's include list, and
-  folding it is cleanup, not a fix (`programs/prelude.cyr`'s header).
-- ✅ **Adopted — P5-A (6.6.17): `cyrius coverage --programs 'programs/*_test.cyr'`**, as a CI step that
-  prints and never gates (*Coverage*, above). The CI comment that called coverage blind is revised.
-- 🟡 **Open — P6 (6.6.18): `poison_alloc` through the `sd_alloc` seam.** `lib/poison.cyr` (vendored
-  since this pin, through `lib/alloc.cyr`) gives leading and trailing redzones and an A/B
-  differential; an overwrite stops the harness with exit 86. To adopt: install `poison_alloc` as
-  sadish's hook (`sd_alloc_set`) around `programs/hostile_test.cyr`'s mutation loop, or in a
-  `cyrius fuzz --poison` harness, and record what it finds beside the hand-built 4,096-byte
-  redzone differential it would complement.
-- 🟡 **Open — P2 (6.6.19): `[embed]` for the default face.** `[embed] REKHA_FACE = "fonts/<face>.ttf"`
-  and a `[lib.face]` profile would produce `dist/rekha-face.cyr` with no generated `.cyr` and no
-  `scripts/face2cyr.py`. ⛔ **In 1.x it can only be ADDED beside `fonts/face_data.cyr`**: that
-  path and its ten accessors are frozen surface (`docs/api/open.md`, *The embedded default face*;
-  agnos consumes it by path), so the generator and the 1.65 MB module stay through 1.x; a face
-  profile would re-export the same ten names from an accessor module listed under
-  `[lib.face] modules`. ⚠ A plain `[embed]` entry rides in EVERY binary of rekha's own project (the
-  410,820 B face in each test binary) and shares cycc's 2 MiB string pool; measure both first.
-- ✅ **Taken at 1.1.0 — the 6.7.9 pin.** cyrius's 6.7.0–6.7.9 migration notes were checked against
-  the source, not only the build (CHANGELOG 1.1.0 lists the zero-site counts), and CI's lock gate
-  runs `cyrius deps --locked` (6.7.6). sankoch 2.8.3 arrived with it: no codec change for rekha.
-  ⚠ sankoch's 2.8.3 notes record that cyrius refuses an `[embed]` name any stdlib leaf already
-  declares (the Brotli dictionary is now `_brotli_dict_bin`) — rekha embeds nothing today, so that
-  applies only if P2 above lands.
-
-## Toolchain follow-ups — unblocked by the cyrius 6.7.9 pin (1.1.0)
-
-All test-side or cleanup; none touches the surface.
-
-- 🟡 **Open — the test scope (6.7.6).** A `[test]` section with its own `stdlib` (and
-  `[deps.X] scope = "test"`) applies to test / bench / fuzz compiles only and stays out of
-  `dist/*.deps`. `programs/prelude.cyr`'s eight harness leaves are the candidates — today they
-  resolve partly from `lib/` (`syscalls`, `alloc`, `string`) and partly from the toolchain snapshot
-  (the other five, since sadish 0.12.0's sidecar stopped naming them). Moving them would make the
-  harness's leaves manifest configuration instead of an include list; CI's leaf pin is what proves
-  nothing leaks either way. Not done at 1.1.0, which changed only the pin.
-- 🟡 **Open — the bounds-checked mode (6.7.8)**, `--bounds` / `[build] bounds`. Unmeasured here.
-  The mode checks subscripts of typed arrays, `*T` and slices; rekha's reads are overwhelmingly
-  `load8` .. `load64` on computed addresses (1,448 call sites in `src/`), which it does not check,
-  beside a few dozen fixed-size typed-array locals (`var m: i64[6]`, `src/cff.cyr:468`). What it
-  would cover has to be counted before it is worth a CI leg.
-- ✅ **Taken at 1.1.1 — the next pin**, cyrius 6.7.18 (below).
-
-## Toolchain follow-ups — unblocked by the cyrius 6.7.18 pin (1.1.1)
-
-- ✅ **Adopted — execution coverage (6.7.10, cyrius P5-B)**, as `--exec` on CI's coverage step,
-  which still never gates: **456 of 465** functions entered, 35 runs, 0 failed, 27 s. MEASURED: a
-  suite with one check broken fails the step by name (`FAIL: programs/error_test.cyr (exit 1)`).
-- ✅ **Adopted — the superseded-pin note (6.7.12)** is a CI failure: the lock gate fails when
-  `cyrius deps` prints `cyrius.lock keeps <dep>@<tag>'s pin`, which neither `--locked` nor the
-  lock diff catches (CHANGELOG 1.1.0 found one by eye).
-- 🟡 **Open — nine internal functions have no call site**, found by execution coverage: the seven
-  table-directory accessors `rekha_w2_ent_tag` .. `rekha_w2_ent_ooff` (`src/woff2.cyr:182-188`),
-  `rekha_hint_trig_atan` (`src/hint.cyr:3834`, the CORDIC's arctangent table — `rekha_hint_vlen`
-  keeps only the length: "the angle … is not needed and not kept", `src/hint.cyr:3849`), and
-  `rekha_cff2_regions`
-  (`src/cff2.cyr:74`). `grep -rn '<name>(' src programs` finds only each definition. None is
-  public, so the `private` bundle already hides them and removing them changes no surface; each
-  either goes or gets the caller it was written for. Not done at 1.1.1, which changed only the pin.
-- 🟡 **Open, and unblocked — the WOFF2 suite with a real Brotli encoder** ([`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md)).
-  `brotli_compress` / `brotli_compress_level` are in the pinned stdlib's `lib/sankoch.cyr` (2.8.9);
-  the filing's four steps can be taken. ⚠ sankoch's encoder against sankoch's decoder is a
-  round trip, not an independent check — the filing names the reference-encoder alternative.
