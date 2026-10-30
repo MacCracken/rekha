@@ -1,6 +1,7 @@
 # 0010 — The zero-leaf sidecar: a bundle's leaves are what the compile-verify proves
 
-**Status**: Accepted (supersedes the sidecar half of [0003](0003-the-one-leaf-sidecar.md))
+**Status**: Accepted (supersedes the sidecar half of [0003](0003-the-one-leaf-sidecar.md));
+amended at 1.1.0 (below)
 **Date**: 2026-10-13 (1.0.0, at the cyrius 6.6.20 pin)
 
 ## Context
@@ -46,3 +47,16 @@ ADR 0003's other half stands: stdlib includes live only in `src/lib.cyr`, domain
   stale on every run, and it would go on taxing every consumer for a leaf nothing calls. Rejected.
 - **Drop `string` from `[deps] stdlib`**: the WOFF modules' `memcpy` would then resolve only
   through auto-prepend in rekha's own tree. It changes nothing a consumer sees. Not taken.
+
+## Amendment — 1.1.0 (2026-10-29)
+
+The *Negative* consequence above happened, from a sibling rather than from cyrius:
+**`dist/rekha-woff.deps` is `sankoch` alone.** sadish 0.11.3 began opening `dist/sadish.cyr` with
+its own requires block (`syscalls`, `alloc`, `string`), so in the compile-verify unit `memcpy` is in
+scope before the fixpoint starts, and the fixpoint no longer names `string`. MEASURED at the 1.1.0
+bump, holding the toolchain fixed at 6.7.9: sadish 0.11.2 gives `string sankoch`, 0.11.3 and 0.12.0
+give `sankoch`; 6.6.20 + 0.11.2 reproduces 1.0.0's answer. A consumer is not left short:
+`lib/sankoch.cyr` includes `lib/string.cyr` itself on every supported toolchain (sankoch 2.8.0 at
+6.6.6, 2.8.1 at 6.6.20, 2.8.3 at 6.7.9). CI's leaf pin now reads base `[]`, WOFF `[sankoch]`, and
+the bundle's requires block is the one line `include "lib/sankoch.cyr"`. `[deps] stdlib =
+["string"]` stays, for the reason given above.

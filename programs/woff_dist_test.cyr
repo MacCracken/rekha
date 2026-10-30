@@ -9,9 +9,10 @@
 # zlib_compress and opens it through the bundle's public API, and measures what that open
 # allocates.
 #
-# The leaf list below is dist/rekha-woff.deps, by hand — `string` + `sankoch` — so the file
-# documents the chain a WOFF consumer actually compiles. Since cyrius 6.6.18 the bundle also
-# opens with those two as its own compile-verified requires block, so a consumer that includes
+# The leaf list below is dist/rekha-woff.deps, by hand — `sankoch` (1.1.0; it was `string` +
+# `sankoch` through 1.0.0) — so the file documents the chain a WOFF consumer actually compiles.
+# Since cyrius 6.6.18 the bundle also opens with that leaf as its own compile-verified requires
+# block, so a consumer that includes
 # only sadish and the bundle compiles too (measured at 1.0.0 on a cyrius 6.6.6 consumer); the
 # lines stay here as the documentation. It does NOT enforce it:
 # cyrius auto-prepends every resolved leaf inside rekha's tree, so the suite builds whichever
@@ -20,10 +21,11 @@
 # ⚠ The bundle must be CURRENT for this to mean anything: `cyrius distlib --check` (every profile) is
 # the companion gate. Exit code = failed checks; each failure prints its check number to fd 2.
 
-# ---- a WOFF consumer's include chain: dist/rekha-woff.deps, then sadish and sync ----
+# ---- harness-only, NOT in dist/rekha-woff.deps: strlen / memset / memcpy for the corpus builder
+# and the failure lines, fmt_int_fd for the failure lines. ----
 include "lib/string.cyr"
-# harness-only, NOT in dist/rekha-woff.deps: fmt_int_fd for the failure lines.
 include "lib/fmt.cyr"
+# ---- a WOFF consumer's include chain: sadish, sync, then dist/rekha-woff.deps (sankoch) ----
 include "lib/sadish.cyr"
 # `sync` is not in the sidecar either — it is the sankoch LEAF's own requirement, which a
 # consumer picks up from sankoch's sidecar, not from rekha's.

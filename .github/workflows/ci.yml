@@ -46,8 +46,16 @@ jobs:
         # ⛔ A live `path =` in a [deps*] section WINS over `tag` and skips the commit-pin verify,
         # so the manifest is refused before resolving. Comment lines (the [deps.rekha] consumer
         # example) are skipped.
+        # ⚠ From cyrius 6.7.6 a `path` beside `git` / `tag` is a dev override used only under
+        # CYRIUS_LOCAL, so it no longer wins on a default build. The guard stays anyway: the
+        # committed manifest names no local checkout.
         # ⛔ The committed cyrius.lock must equal a clean resolve. A lock regenerated over a stale
         # local lib/ carries entries no manifest asks for; `rm -rf lib && cyrius deps` and commit.
+        # `cyrius deps --locked` (6.7.6) is that check: it resolves, writes NOTHING, and fails
+        # naming each difference. MEASURED at the 6.7.9 pin (1.1.0): rc 0 on the committed lock,
+        # rc 1 with 23 named differences on 1.0.0's 6.6.20 lock, which it left byte-identical.
+        # ⚠ It vendors nothing either (rc 0 with no lib/ at all), so `cyrius deps` still runs after
+        # it, and the git diff stays as a backstop on what that resolve wrote.
         run: |
           # Whole-file, not per-section: cbt keeps reading a [deps.X] section across a following
           # `[d…]` or `[[…]]` header, which a section-tracking guard would treat as closed.
@@ -57,6 +65,7 @@ jobs:
           fi
           rm -rf lib
           mkdir lib
+          cyrius deps --locked
           cyrius deps
           if ! git diff --exit-code -- cyrius.lock; then
             echo "ERROR: cyrius.lock does not match a clean resolve. Run 'rm -rf lib && cyrius deps' and commit cyrius.lock."
@@ -94,7 +103,9 @@ jobs:
         # formatter, and `--check` agrees on all 33. This is the gate being repaired, not the tree.
         # Re-measured at the 6.6.20 pin (1.0.0): `--check` exits 1 on a deliberately mis-indented
         # copy of src/error.cyr and agrees with sadish's file, so the false negative does not
-        # reproduce there. The in-place form stays: it cannot silently agree, on any toolchain.
+        # reproduce there. Re-measured at the 6.7.9 pin (1.1.0): `--check` exits 1 on the same
+        # mis-indented copy and 0 on the original, and formatting the copy in place restores it
+        # byte for byte. The in-place form stays: it cannot silently agree, on any toolchain.
         run: |
           for f in src/*.cyr programs/*.cyr; do
             [ -e "$f" ] || continue
@@ -167,9 +178,10 @@ jobs:
             fi
           }
           # The consumer's chain: dist/rekha.deps is empty (1.0.0), so the base bundle takes sadish
-          # alone; the WOFF bundle's requires block brings string + sankoch, sync is sankoch's.
+          # alone; the WOFF bundle's requires block brings sankoch (1.1.0: no longer `string`, which
+          # sadish >= 0.11.3 and sankoch each include themselves), sync is sankoch's.
           probe dist/rekha.cyr lib/sadish.cyr
-          probe dist/rekha-woff.cyr lib/string.cyr lib/sadish.cyr lib/sync.cyr lib/sankoch.cyr
+          probe dist/rekha-woff.cyr lib/sadish.cyr lib/sync.cyr lib/sankoch.cyr
           git checkout -- cyrius.lock
           exit $fail
 
@@ -182,13 +194,20 @@ jobs:
         # From cyrius 6.6.18 a sidecar is the compile-verify fixpoint ALONE (six targets) — no
         # longer the include scan of src/lib.cyr unioned with `[deps] stdlib` — and the base modules
         # have called nothing in the stdlib since 0.5.0 removed the last strlen, so from 0.5.0 to
-        # 0.9.0 `string` was the union's doing (ADR 0010). The WOFF modules call memcpy, so
-        # dist/rekha-woff.deps is `string` + `sankoch`, also the bundle's own requires block.
+        # 0.9.0 `string` was the union's doing (ADR 0010). The WOFF modules call memcpy, which
+        # 1.0.0's dist/rekha-woff.deps took from `string` beside `sankoch`.
+        # ⭐ 1.1.0: dist/rekha-woff.deps is `sankoch` ALONE, and the cause is sadish, not cyrius.
+        # MEASURED at the 1.1.0 bump, holding the toolchain fixed: sadish 0.11.2 gives
+        # `string sankoch`, 0.11.3 and 0.12.0 give `sankoch` (and 6.6.20 + 0.11.2 reproduces
+        # 1.0.0's answer). From 0.11.3 dist/sadish.cyr opens with its own requires block, which
+        # includes lib/string.cyr, so memcpy is in scope before the fixpoint starts. A consumer is
+        # covered either way: lib/sankoch.cyr includes lib/string.cyr itself on 6.6.6 (2.8.0),
+        # 6.6.20 (2.8.1) and 6.7.9 (2.8.3). A consumer that still vendors `string` loses nothing.
         # CHANGING THIS LIST IS A DELIBERATE ACT — a consumer-visible change that belongs in its
         # own release with a CHANGELOG line, not a drive-by. Update it here when you mean it.
         run: |
           expect_base=""
-          expect_woff="string sankoch"
+          expect_woff="sankoch"
           leaves() { [ -e "$1" ] || return 0; grep -v '^#' "$1" | tr -s '\n' ' ' | sed 's/ *$//'; }
           got_base="$(leaves dist/rekha.deps)"
           got_woff="$(leaves dist/rekha-woff.deps)"
@@ -355,6 +374,7 @@ jobs:
         # a function counts if a corpus file names it, so an internal reached only through another
         # function does not. Measured at 1.0.0: 202 of 465 functions, and 176 of the 178 public
         # ones (rekha_hint_error_clear and rekha_hvar_lsb_delta run only inside other public calls).
+        # 202 of 465 again at 1.1.0 (6.7.9). Execution coverage (cyrius P5-B) is not in 6.7.9.
         continue-on-error: true
         timeout-minutes: 5
         run: cyrius coverage --programs 'programs/*_test.cyr'

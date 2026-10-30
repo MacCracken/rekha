@@ -1,6 +1,6 @@
 # rekha — Roadmap
 
-> **Last updated:** 2026-10-13, at **1.0.0**.
+> **Last updated:** 2026-10-29, at **1.1.0**.
 >
 > This file tracks **forward-facing work only**. Nothing struck through lives here: a finished item
 > leaves. What already shipped is in [`CHANGELOG.md`](../../CHANGELOG.md), release by release, with
@@ -16,7 +16,9 @@ out, for `sadish` to fill. **1.0.0 shipped it complete, correct and frozen** (CH
 surface frozen at 0.9.0 was consumed — crab and dhancha build against the `private` 0.9.0 bundle,
 and crab's QEMU face test loaded `/fonts/default.ttf` through it — and held across a release that
 changed nothing on it (`git diff 0.9.0 -- docs/api/surface.txt` is empty over a cyrius 6.6.6 →
-6.6.20 move); refuse-don't-guess was confirmed for the line (ADR 0002).
+6.6.20 move); refuse-don't-guess was confirmed for the line (ADR 0002). **1.1.0** held it again
+across the move onto cyrius's 6.7 language line (6.7.9) and sadish 0.12.0: the surface
+byte-identical, and every suite's output byte-identical to 1.0.0's (CHANGELOG 1.1.0).
 
 **Through 1.x every change to the surface is an ADDITION** — a new call, a new constant, a new
 reader — and no documented answer moves (`docs/api/README.md`, *Stability promise*). So nothing
@@ -24,7 +26,7 @@ below is scheduled into a numbered milestone: each item is additive, and any of 
 next minor release when a consumer asks for it or the evidence for it changes.
 
 Everything below is **pinned** (real, evidenced, unscheduled), **toolchain follow-up** (unblocked
-by the 6.6.20 pin), **blocked on a sibling**, or an explicit **non-goal**.
+by the 6.6.20 and 6.7.9 pins), **blocked on a sibling**, or an explicit **non-goal**.
 
 ---
 
@@ -257,7 +259,7 @@ The rule: a missing sibling capability gets a filed proposal plus a line here. N
 
 | waiting on | filing | status |
 |---|---|---|
-| **sankoch 2.8.4** — the Brotli **encoder** (renumbered from 2.8.1, which shipped as a toolchain release with no source change), and a **cyrius pin whose stdlib folds it**, so CI can build a genuinely compressed WOFF2 instead of a hand-emitted stored one | [`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md) | 🟡 open — reviewed at 1.0.0; sankoch is at **2.8.3**, the 6.6.20 stdlib carries **2.8.1**, and 2.8.3 reached the stdlib only through cyrius 6.7.6's refold |
+| **sankoch 2.8.4** — the Brotli **encoder** (renumbered from 2.8.1, which shipped as a toolchain release with no source change), and a **cyrius pin whose stdlib folds it**, so CI can build a genuinely compressed WOFF2 instead of a hand-emitted stored one | [`issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md`](issues/2026-09-20-revisit-woff2-test-with-a-real-brotli-encoder-when-sankoch-2-8-1-lands.md) | 🟡 open — reviewed at 1.1.0. The sibling half is DONE: sankoch **2.8.4** shipped the encoder (`src/brotli_enc.cyr`, 2026-10-13). What is left is rekha's: the 6.7.9 stdlib carries **2.8.3** (no `brotli_compress`), and the first cyrius whose stdlib folds the encoder is **6.7.11** (sankoch 2.8.7) — so the next pin move to 6.7.11 or later unblocks it |
 
 ⭐ **Closed, for the record:** both earlier rekha filings against sankoch shipped in **2.8.0** — the
 WOFF2 Brotli decoder, and the profile bundles that could not link. All three rekha filings against
@@ -356,7 +358,29 @@ cyrius's roadmap) apply now. What 1.0.0 took and what it left:
   profile would re-export the same ten names from an accessor module listed under
   `[lib.face] modules`. ⚠ A plain `[embed]` entry rides in EVERY binary of rekha's own project (the
   410,820 B face in each test binary) and shares cycc's 2 MiB string pool; measure both first.
-- ⚠ **Beyond 6.6.20**: sankoch 2.8.3 and execution coverage (P5-B) are cyrius 6.7.x. A 6.7.x pin
-  move reads cyrius's `CHANGELOG.md` and its 6.7.x migration notes first. ⚠ sankoch's 2.8.3 notes
-  record that cyrius refuses an `[embed]` name any stdlib leaf already declares — rekha embeds
-  nothing today, so that applies only if P2 above lands.
+- ✅ **Taken at 1.1.0 — the 6.7.9 pin.** cyrius's 6.7.0–6.7.9 migration notes were checked against
+  the source, not only the build (CHANGELOG 1.1.0 lists the zero-site counts), and CI's lock gate
+  runs `cyrius deps --locked` (6.7.6). sankoch 2.8.3 arrived with it: no codec change for rekha.
+  ⚠ sankoch's 2.8.3 notes record that cyrius refuses an `[embed]` name any stdlib leaf already
+  declares (the Brotli dictionary is now `_brotli_dict_bin`) — rekha embeds nothing today, so that
+  applies only if P2 above lands.
+
+## Toolchain follow-ups — unblocked by the cyrius 6.7.9 pin (1.1.0)
+
+All test-side or cleanup; none touches the surface.
+
+- 🟡 **Open — the test scope (6.7.6).** A `[test]` section with its own `stdlib` (and
+  `[deps.X] scope = "test"`) applies to test / bench / fuzz compiles only and stays out of
+  `dist/*.deps`. `programs/prelude.cyr`'s eight harness leaves are the candidates — today they
+  resolve partly from `lib/` (`syscalls`, `alloc`, `string`) and partly from the toolchain snapshot
+  (the other five, since sadish 0.12.0's sidecar stopped naming them). Moving them would make the
+  harness's leaves manifest configuration instead of an include list; CI's leaf pin is what proves
+  nothing leaks either way. Not done at 1.1.0, which changed only the pin.
+- 🟡 **Open — the bounds-checked mode (6.7.8)**, `--bounds` / `[build] bounds`. Unmeasured here.
+  The mode checks subscripts of typed arrays, `*T` and slices; rekha's reads are overwhelmingly
+  `load8` .. `load64` on computed addresses (1,448 call sites in `src/`), which it does not check,
+  beside a few dozen fixed-size typed-array locals (`var m: i64[6]`, `src/cff.cyr:468`). What it
+  would cover has to be counted before it is worth a CI leg.
+- ⏳ **Next pin: cyrius >= 6.7.11** folds sankoch's Brotli encoder (2.8.7), which unblocks the
+  WOFF2 filing in *Blocked on a sibling*. Execution coverage (P5-B) is not in 6.7.9
+  (`cyrius coverage --help`: "not execution coverage (that is v6.7.x)").

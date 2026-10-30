@@ -21,8 +21,10 @@
 #
 # ⚠ WHERE THESE EIGHT COME FROM NOW, MEASURED (0.4.4). They are no longer in
 # rekha's `[deps] stdlib`, so whether `cyrius deps` vendors them into lib/ is
-# not up to rekha: today it does, because sadish's own sidecar requires all
-# nine. That does NOT matter here. An include resolves from vendored lib/
+# not up to rekha: through 1.0.0 it did, because sadish's own sidecar required
+# all nine. From 1.1.0 it does not — sadish 0.12.0's sidecar names syscalls,
+# alloc and string, so lib/ holds 17 files and fmt/vec/str/io/assert/bench
+# come from the toolchain snapshot. That does NOT matter here. An include resolves from vendored lib/
 # first and from the PINNED TOOLCHAIN SNAPSHOT (~/.cyrius/versions/6.6.4/lib)
 # otherwise — proven two ways: rekha's lib/ has never contained sync.cyr or
 # sankoch.cyr, yet programs/woff_test.cyr includes both and passes; and

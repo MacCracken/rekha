@@ -64,6 +64,7 @@ jobs:
         run: |
           rm -rf lib
           mkdir lib
+          cyrius deps --locked
           cyrius deps
           if ! git diff --exit-code -- cyrius.lock; then
             echo "ERROR: cyrius.lock does not match a clean resolve."

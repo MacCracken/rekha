@@ -20,8 +20,10 @@
 # src/woff2.cyr), which follow this chain in their tests. Since cyrius 6.6.18
 # this include no longer reaches a consumer: distlib writes each `.deps`
 # sidecar from its compile-verify fixpoint alone, so dist/rekha.deps is not
-# written at all (1.0.0, ADR 0010) and dist/rekha-woff.deps names `string` +
-# `sankoch` because the WOFF modules need them, not because this line says so.
+# written at all (1.0.0, ADR 0010) and dist/rekha-woff.deps names `sankoch`
+# because the WOFF modules need it, not because this line says so. (Through
+# 1.0.0 it named `string` too; from sadish 0.11.3 the sadish bundle includes
+# this leaf itself, and so does lib/sankoch.cyr — CHANGELOG 1.1.0.)
 #
 # rekha's own harness wants fmt/alloc/vec/str/io/syscalls/assert/bench —
 # those are in programs/prelude.cyr. .github/workflows/ci.yml pins both

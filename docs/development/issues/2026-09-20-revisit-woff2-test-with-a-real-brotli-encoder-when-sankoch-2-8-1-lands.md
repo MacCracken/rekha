@@ -1,12 +1,15 @@
 # Revisit the WOFF2 suite with a REAL Brotli encoder once sankoch's encoder lands (now 2.8.4)
 
-**Status:** 🟡 **OPEN — still waiting on a dependency, not on a decision.** Reviewed 2026-10-13 at
-rekha 1.0.0: the trigger this file was filed against fired by NUMBER and not by CONTENT (below).
+**Status:** 🟡 **OPEN — the sibling half is done; what is left is a rekha pin move.** Reviewed
+2026-10-29 at rekha 1.1.0: sankoch 2.8.4 shipped the encoder, and the first cyrius stdlib that folds
+it is 6.7.11 — rekha pins 6.7.9 (below). Reviewed 2026-10-13 at 1.0.0: the trigger this file was
+filed against fired by NUMBER and not by CONTENT.
 **Filed:** 2026-09-20, by rekha, at the close of **0.4.6 (WOFF2)**. The filename keeps the original
 `2-8-1` slug so links stay stable; the trigger is **2.8.4**.
-**Blocked on:** sankoch's Brotli encoder, **renumbered 2.8.4**, AND a cyrius pin whose stdlib
-snapshot folds it — rekha's suites take `lib/sankoch.cyr` from the toolchain pin, never from a
-git dep. sankoch's roadmap: *"Nothing preempts 2.8.4"*, with fuzz round-trips (encode → both
+**Blocked on:** sankoch's Brotli encoder, **renumbered 2.8.4** (✅ shipped 2026-10-13), AND a
+cyrius pin whose stdlib snapshot folds it (⏳ cyrius >= 6.7.11; rekha pins 6.7.9 at 1.1.0) —
+rekha's suites take `lib/sankoch.cyr` from the toolchain pin, never from a git dep. sankoch's
+roadmap: *"Nothing preempts 2.8.4"*, with fuzz round-trips (encode → both
 decoders) in its own test plan; ADR `0001-brotli-decoder-placement.md` reserves the encode side as
 *"its own decision about profiles"*. Nothing is asked of sankoch here — this is rekha's own
 follow-up, recorded so the gap does not quietly become permanent.
@@ -15,7 +18,23 @@ follow-up, recorded so the gap does not quietly become permanent.
 and every step of the plan below is additive. Every claim 0.4.6 makes is true; one class of input
 is reached today only by a measurement that CI cannot run.
 
-## Reviewed 2026-10-13 (rekha 1.0.0, cyrius 6.6.20) — why this stays open
+## Reviewed 2026-10-29 (rekha 1.1.0, cyrius 6.7.9) — unblocked upstream, not yet here
+
+- **sankoch 2.8.4 shipped the Brotli encoder** (2026-10-13, `src/brotli_enc.cyr`, sankoch ADR
+  `0002-brotli-encoder-placement-and-quality.md`), listed in its `[lib]` — the full bundle rekha's
+  suites take as the stdlib's `lib/sankoch.cyr`.
+- **The cyrius 6.7.9 stdlib rekha now pins carries `# Version: 2.8.3`**, with no `brotli_compress`
+  (`grep -c '^fn brotli_compress' ~/.cyrius/versions/6.7.9/lib/sankoch.cyr` is 0). 6.7.10 also
+  carries 2.8.3; **6.7.11 is the first that folds the encoder** (sankoch 2.8.7: `brotli_compress`,
+  `brotli_compress_level`, `brotli_compress_bound`), and 6.7.18 carries 2.8.9.
+- rekha's suites pass against 2.8.3 unchanged: `woff2_test` 186 checks, `woff_test` 124, both DCE
+  modes, output byte-identical to 1.0.0's on 6.6.20.
+- **So the steps below wait on rekha's next pin move, to cyrius >= 6.7.11**, which will carry its
+  own migration notes (cyrius `docs/development/ecosystem-migration.md`, 6.7.10 onward). Nothing is
+  asked of sankoch any more. The alternative below (a committed reference-encoder WOFF2) stays the
+  maintainer's call.
+
+## Reviewed 2026-10-13 (rekha 1.0.0, cyrius 6.6.20) — why this stayed open
 
 - **sankoch 2.8.1 shipped (2026-10-06) as a TOOLCHAIN release with no source change** — the cyrius
   6.6.18 regeneration wave (sankoch CHANGELOG [2.8.1]: *"every codec compiles and behaves exactly
