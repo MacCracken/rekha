@@ -428,7 +428,7 @@ fn rekha_hint_glyph(ctx, gid): i64
 
 Loads glyph `gid` into the glyph zone at the context's size and hints it: outline in font units (gvar applied) scaled to F26Dot6, the four phantom points appended from the header bbox and hmtx (vmtx, else OS/2, else hhea) and rounded to the grid, the glyph program run under FreeType's glyph-range rules with IUP (a composite: each component on its own, then the composite's program at scale 1.0), then every x translated so the left phantom is the origin. 1 when zone 1 holds what the bytecode intends (a glyph with no program, an empty glyph, a program-less composite and a size whose `prep` disabled programs through INSTCTRL bit 1 all count); 0 for a null context or when rekha REFUSED in one of three ways rekha_hint_error distinguishes: a standing `fpgm` / `prep` refusal re-raised (zone 1 EMPTY); a PROGRAM refusal (REKHA_ERR_BAD_HINT naming the instruction, or a truncated program) after which zone 1 holds the glyph RELOADED UNHINTED so rekha_hint_outline / _to_sdpath / _advance_px still answer; anything else — bad gid, truncated or malformed glyph or component record (REKHA_ERR_TRUNCATED / REKHA_ERR_BAD_GLYF), a cyclic or over-cap composite or a glyph past the zone's maxp capacity (REKHA_ERR_OOM "glyph load cap" / "glyph zone cap" / "contour cap"), a load past the gvar work budget rekha_load_glyph keeps (REKHA_ERR_OOM "gvar budget") or a refused gvar scratch (REKHA_ERR_OOM "gvar scratch"; through 1.1.1 the default instance was hinted in the varied one's place), a point-matching index past the assembled points (REKHA_ERR_BAD_GLYF "composite point") — with zone 1 EMPTY, rekha_hint_gid -1, the outline 0 and the path call refusing. rekha_font_error(font) mirrors the code either way. Allocates nothing: the gvar scratch it uses is rekha_var_set_axis's (since 1.1.2; through 1.1.1 the first varied glyph allocated it here), so setting the axes outside a scoped hook is the whole warm-up. ⛔ EVERY CALL INVALIDATES THE PREVIOUS GLYPH, success or not, as do rekha_hint_run_prep and a size change through rekha_hint_ctx. ⚠ `gasp` is not consulted (rekha_should_gridfit is the consumer's question); the advance of a hinted run is rekha_hint_advance_px's, not rekha_glyph_advance_px's; variation instances are hinted OFF-REFERENCE and after an axis change rekha_hint_ctx must be called again.
 
-<!-- src/hint.cyr:4445 -->
+<!-- src/hint.cyr:4436 -->
 
 ### `rekha_hint_outline(ctx)`
 
@@ -438,7 +438,7 @@ fn rekha_hint_outline(ctx): i64
 
 Answers the loaded glyph as a RekhaOutline VIEW into zone 1: n_points EXCLUDING the four phantoms, n_contours, end_pts absolute (phantoms never inside), xs / ys = the zone's cur in F26Dot6 with x translated so that the left phantom is the origin, on_curve one byte per point (the tag's bit 0 alone; the touch bits a program left are only on rekha_hint_point's REKHA_PT_TAGS). 0 for a null context or when no glyph is loaded (rekha_hint_gid is -1). The record lives in the context and is REWRITTEN BY EVERY rekha_hint_glyph, rekha_hint_run_prep and size change: read it before the next, never keep it. Allocates nothing; it goes through rekha_outline_to_sdpath with scale 1024 (F26Dot6 times 1024 IS 16.16), which is what rekha_hint_to_sdpath does.
 
-<!-- src/hint.cyr:4568 -->
+<!-- src/hint.cyr:4559 -->
 
 ### `rekha_hint_gid(ctx)`
 
@@ -448,7 +448,7 @@ fn rekha_hint_gid(ctx): i64
 
 Answers the gid zone 1 holds, or -1 when it holds no glyph; -1 for a null context too. Allocates nothing.
 
-<!-- src/hint.cyr:4575 -->
+<!-- src/hint.cyr:4566 -->
 
 ### `rekha_hint_to_sdpath(ctx, ox, oy)`
 
@@ -458,7 +458,7 @@ fn rekha_hint_to_sdpath(ctx, ox, oy): i64
 
 Answers the loaded glyph as a positioned sadish SdPath: sd_x = ox + cur_x * 1024, sd_y = oy - cur_y * 1024 (F26Dot6 to 16.16, y flipped). ⛔ Pass ox / oy on WHOLE PIXELS (n << 16) or the fit the program made is lost. A fresh path each call, exactly sized (allocated through sd_alloc); an empty glyph gives an empty path with its advance still on rekha_hint_advance_px. 0 for a null context, for no glyph loaded (REKHA_ERR_OTHER "no glyph" on the context AND the font, nothing allocated) and when an allocation is refused (REKHA_ERR_OOM "sdpath", on both) — never a truncated path.
 
-<!-- src/hint.cyr:4586 -->
+<!-- src/hint.cyr:4577 -->
 
 ### `rekha_hint_advance_px(ctx)`
 
@@ -468,7 +468,7 @@ fn rekha_hint_advance_px(ctx): i64
 
 Answers the advance the loaded glyph was fitted to, in WHOLE PIXELS: the right phantom minus the left, rounded with FT_PIX_ROUND `(v + 32) & -64` then divided by 64. THIS is what a hinted run adds to its pen for every glyph, not rekha_glyph_advance_px: a program may have moved the right phantom (Liberation Sans 'H' at 16 ppem is 12 px unhinted and 11 hinted), a USE_MY_METRICS composite carries its component's, an empty glyph and a program-less composite are whole only through this rounding. 0 for a null context or no glyph loaded. Allocates nothing. ⚠ `hdmx` IS NOT READ (a roadmap pin): on a face with an hdmx FreeType reports the table's byte instead.
 
-<!-- src/hint.cyr:4613 -->
+<!-- src/hint.cyr:4604 -->
 
 ### `rekha_hint_gs(ctx, field)`
 
@@ -478,7 +478,7 @@ fn rekha_hint_gs(ctx, field): i64
 
 Answers one graphics-state field by its REKHA_GS_* index (0..26; REKHA_GS_COUNT = 27): projection / freedom / dual vectors in F2Dot14, the three reference points, the three zone pointers (0 twilight, 1 glyph), loop, the round state (one of REKHA_RND_*), SROUND's period / phase / threshold, minimum distance, the two cut-ins and the single width in F26Dot6, auto-flip, delta base (unsigned 16-bit) and shift, INSTCTRL, SCANCTRL, SCANTYPE. 0 for a null context or an index outside the set, which is also a legal value for most fields. After rekha_hint_ctx it shows the defaults plus the ten fields `prep` left — what a glyph program starts from. Allocates nothing.
 
-<!-- src/hint.cyr:4666 -->
+<!-- src/hint.cyr:4657 -->
 
 ### `rekha_hint_point(ctx, zone, i, field)`
 
@@ -488,7 +488,7 @@ fn rekha_hint_point(ctx, zone, i, field): i64
 
 Answers one field of point `i` of zone `zone` (0 twilight, 1 glyph) by its REKHA_PT_* index: ORUSX / ORUSY in FONT UNITS (twilight: 0), ORGX / ORGY and CURX / CURY in F26Dot6, TAGS the byte (REKHA_TAG_ONCURVE | TOUCHX | TOUCHY). 0 for a null context, a zone other than 0 or 1, a point the zone does not have, or a field outside REKHA_PT_* (REKHA_PT_COUNT = 7); 0 is also a legal value for every field. The glyph zone holds nothing until rekha_hint_glyph (or rekha_hint_load_simple) loads a glyph, then its n real points followed by the four phantom points, cur x already translated so the left phantom is the origin after rekha_hint_glyph. Allocates nothing.
 
-<!-- src/hint.cyr:4686 -->
+<!-- src/hint.cyr:4677 -->
 
 ### `rekha_hint_zone_points(ctx, zone)`
 
@@ -498,7 +498,7 @@ fn rekha_hint_zone_points(ctx, zone): i64
 
 Answers how many points a zone holds. For the twilight zone (0) it is the per-run bound — 2 * (glyph points + control values), floored at 30 and capped at the font's maxTwilightPoints (rekha_hint_twilight_bound); for the glyph zone (1) it is 0 until a glyph is loaded, then n + 4 with the four phantom points included (an empty glyph holds exactly four). 0 for a null context or a zone other than 0 or 1. Allocates nothing.
 
-<!-- src/hint.cyr:4703 -->
+<!-- src/hint.cyr:4694 -->
 
 ### `rekha_hint_zone_contours(ctx, zone)`
 
@@ -508,4 +508,4 @@ fn rekha_hint_zone_contours(ctx, zone): i64
 
 Answers how many contours a zone holds: 0 for the twilight zone, and for the glyph zone 0 until a glyph is loaded, then the loaded glyph's contour count (the phantoms are never inside a contour). 0 for a null context or a zone other than 0 or 1. Allocates nothing.
 
-<!-- src/hint.cyr:4711 -->
+<!-- src/hint.cyr:4702 -->

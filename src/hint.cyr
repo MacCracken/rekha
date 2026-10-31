@@ -3854,17 +3854,8 @@ fn rekha_hint_run_glyph(ctx, off, len, base, cbase, n, nc, mscale, first): i64 {
 # vectors a 2x2 can hold, and the one that differs moves an offset by a 1/64. FT_Hypot (ref2143/
 # ftcalc.c:143-152) is this on (x, y).
 
-# The CORDIC's arctangent table (ref/fttrigon.c:47-52), in 16.16 degrees.
-fn rekha_hint_trig_atan(i): i64 {
-    if (i == 0) { return 1740967; }   if (i == 1) { return 919879; }   if (i == 2) { return 466945; }
-    if (i == 3) { return 234379; }    if (i == 4) { return 117304; }   if (i == 5) { return 58666; }
-    if (i == 6) { return 29335; }     if (i == 7) { return 14668; }    if (i == 8) { return 7334; }
-    if (i == 9) { return 3667; }      if (i == 10) { return 1833; }    if (i == 11) { return 917; }
-    if (i == 12) { return 458; }      if (i == 13) { return 229; }     if (i == 14) { return 115; }
-    if (i == 15) { return 57; }       if (i == 16) { return 29; }      if (i == 17) { return 14; }
-    if (i == 18) { return 7; }        if (i == 19) { return 4; }       if (i == 20) { return 2; }
-    return 1;
-}
+# (The CORDIC's arctangent table, ref/fttrigon.c:47-52, is not ported: it computes the ANGLE, which
+# rekha_hint_vlen does not keep. The function that held it had no caller and went in 1.1.2.)
 
 # The length of (x, y) with the rounding FreeType's is measured with. An axis-aligned vector is
 # exact; the general case normalises the vector into the CORDIC's safe range (the highest set bit

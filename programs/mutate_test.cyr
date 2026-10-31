@@ -1,0 +1,1843 @@
+# programs/mutate_test.cyr — RUN test: the mutation loop past the TrueType face (1.1.2, P(-1) step 6).
+#
+# ⭐ WHAT THIS ADDS. hostile_test.cyr's mutation loop mutates the embedded LiberationSans face: the
+# directory, head / maxp / hhea, hmtx, loca, glyf and cmap. Everything rekha reads that the face does
+# not carry had never been mutated — CFF and CFF2 charstrings and their DICTs and INDEXes, the
+# variation tables (fvar, avar, gvar, HVAR, MVAR and the ItemVariationStore), GPOS and legacy kern,
+# name / post / OS/2, the hinting tables' programs, and both web containers, the inputs most likely
+# to arrive off a network. Seven seeds, each BUILT HERE in code as the suites build them:
+#
+#   cff     an 'OTTO' face: hint operators, every curve operator, local and global subroutines,
+#           all four flexes, seac, a width; legacy kern, name, post, OS/2
+#   cff2    a CFF2 variable face: blend, vsindex, subroutines, hint masks; fvar, avar, HVAR, MVAR
+#   gvar    a TrueType variable face: simple glyphs in every coordinate encoding, composites (offset,
+#           scale, 2x2, point matching, instructions), gvar (shared / private / all points,
+#           intermediate regions, phantoms), HVAR, MVAR, GPOS kern, fpgm / prep / cvt
+#   woff    the gvar face in WOFF 1.0, its tables stored
+#   woffz   the same, zlib-compressed by sankoch
+#   woff2x  the gvar face in WOFF2 with glyf / loca AND hmtx transformed, in a stored Brotli stream
+#   woff2z  the cff face in WOFF2 (null transforms), Brotli-compressed by sankoch
+#
+# Each mutant is swept under sentinel A and sentinel B (programs/hb_harness.cyr) — at the axes'
+# default, minimum and maximum for a variable seed — and must digest equal, decode only valid
+# outlines and stay inside the stated work bounds; the seed is restored after every mutant and its
+# digest re-checked at the end. The seeds are fixed, so the run is deterministic: 1,000 mutants a
+# seed, about 5 s.
+#
+# ⭐ WHAT IT SEES THAT THE FACE LOOP COULD NOT: a 64-byte sentinel GAP after every table of an SFNT
+# seed (mt_gaps), so a read past a table's declared end shows; a 64-byte sentinel gap after every
+# pool block (HB_BLOCK_GAP), so a read past a block's end shows; and mutants aimed at the fields the
+# builders marked (hot). MEASURED, each bound check removed by hand: an INDEX object past the CFF
+# table (fault), an ItemVariationStore row past the store (A/B), a WOFF table past the file
+# (fault), a name string past the table (A/B) — caught. It found a real one on its first run: a
+# 685-byte WOFF2 that asked the allocator for 21 MB, now capped (REKHA_WOFF2_MAXSIZE).
+# ⚠ WHAT IT CANNOT SEE, MEASURED the same way: a read that stays inside bytes rekha owns (a gvar
+# delta run into the next tuple, a WOFF2 triplet into the next substream), and a sentinel read
+# whose value changes no answer (a PairSet probe past the table compares 0xA5A5 and 0x5A5A to a
+# small glyph id the same way). The per-format suites' exact-outcome tests are what cover those.
+#
+# Exit code = failed checks (capped at 255).
+
+include "programs/prelude.cyr"
+include "lib/sync.cyr"
+include "lib/sankoch.cyr"
+include "src/woff.cyr"
+include "src/woff2.cyr"
+include "fonts/face_data.cyr"
+include "programs/hb_harness.cyr"
+
+var MT_TAG_HEAD = 0x68656164;
+var MT_TAG_HHEA = 0x68686561;
+var MT_TAG_MAXP = 0x6D617870;
+var MT_TAG_HMTX = 0x686D7478;
+var MT_TAG_CMAP = 0x636D6170;
+var MT_TAG_OS2  = 0x4F532F32;
+var MT_TAG_POST = 0x706F7374;
+var MT_TAG_NAME = 0x6E616D65;
+var MT_TAG_KERN = 0x6B65726E;
+var MT_TAG_CFF  = 0x43464620;
+var MT_TAG_CFF2 = 0x43464632;
+var MT_TAG_FVAR = 0x66766172;
+var MT_TAG_AVAR = 0x61766172;
+var MT_TAG_HVAR = 0x48564152;
+var MT_TAG_MVAR = 0x4D564152;
+var MT_TAG_GLYF = 0x676C7966;
+var MT_TAG_LOCA = 0x6C6F6361;
+var MT_TAG_GVAR = 0x67766172;
+var MT_TAG_CVT  = 0x63767420;
+var MT_TAG_FPGM = 0x6670676D;
+var MT_TAG_PREP = 0x70726570;
+var MT_TAG_GPOS = 0x47504F53;
+
+# ================================================================
+# An SFNT writer: table bodies are staged in g_sb, each between mt_begin and mt_end; mt_write lays
+# the directory out in tag order and the tables after it, each 4-aligned and followed by a GAP of
+# MT_GAP bytes that no table owns.
+# ⭐ THE GAPS ARE WHAT MAKE A TABLE-BOUNDS BUG VISIBLE. Back to back, a read past one table's
+# declared end lands in the next table — bytes the font owns, the same under both sentinels — and
+# the differential cannot see it; hostile_test.cyr puts glyf last for exactly this reason. Before
+# each sweep mt_gaps fills every byte that lies outside the directory AND outside every table the
+# (mutated) directory declares with the current sentinel. rekha reads nothing else of a font, so a
+# read of one is a bounds bug, and digest(A) != digest(B) says so.
+# ================================================================
+var MT_GAP = 64;
+# ⭐ HOT SPOTS. The builders mark every structural field — counts, offsets, lengths, formats, flags —
+# by its staging position (hot()); mt_write maps each to its file offset. A mutant aims there 40%
+# of the time, the way hostile_test.cyr aims at head / maxp / loca: a random byte of a 2 KB face
+# rarely lands on the one count that drives a reader past its table.
+var g_hot = 0;                         # staging positions, then file offsets
+var g_nhot = 0;
+var g_hotf = 0;                        # the seed's hot file offsets, as mt_loop mutates them
+var g_nhotf = 0;
+fn hot(): i64 {
+    if (g_nhot < 4096) {
+        store64(g_hot + g_nhot * 8, g_sbn);
+        g_nhot = g_nhot + 1;
+    }
+    return 0;
+}
+var g_sb = 0;
+var g_sbn = 0;
+var g_tt = 0;                          # i64[3 x 32]: tag, start, length
+var g_ntt = 0;
+var g_tstart = 0;
+
+fn w8(v): i64 {
+    store8(g_sb + g_sbn, v & 255);
+    g_sbn = g_sbn + 1;
+    return 0;
+}
+fn w16(v): i64 {
+    w8(v >> 8);
+    return w8(v);
+}
+fn w32(v): i64 {
+    w16(v >> 16);
+    return w16(v);
+}
+fn hw8(v): i64 { hot(); return w8(v); }
+fn hw16(v): i64 { hot(); return w16(v); }
+fn hw32(v): i64 { hot(); return w32(v); }
+fn wn(n): i64 {
+    var i = 0;
+    while (i < n) { w8(0); i = i + 1; }
+    return 0;
+}
+fn wp16(at, v): i64 { return put_u16(g_sb, at, v & 65535); }
+fn wp32(at, v): i64 { return put_u32(g_sb, at, v); }
+
+fn mt_reset(): i64 {
+    g_sbn = 0;
+    g_ntt = 0;
+    g_nhot = 0;
+    return 0;
+}
+fn mt_begin(tag): i64 {
+    store64(g_tt + g_ntt * 24, tag);
+    store64(g_tt + g_ntt * 24 + 8, g_sbn);
+    g_tstart = g_sbn;
+    return g_sbn;
+}
+fn mt_end(): i64 {
+    store64(g_tt + g_ntt * 24 + 16, g_sbn - g_tstart);
+    g_ntt = g_ntt + 1;
+    while ((g_sbn & 3) != 0) { w8(0); }
+    return 0;
+}
+
+fn mt_write(dst, ver): i64 {
+    var n = g_ntt;
+    # tag order, a plain insertion sort over the (tag, start, length) triples
+    var i = 1;
+    while (i < n) {
+        var j = i;
+        while (j > 0 && load64(g_tt + (j - 1) * 24) > load64(g_tt + j * 24)) {
+            var k = 0;
+            while (k < 3) {
+                var a = load64(g_tt + (j - 1) * 24 + k * 8);
+                store64(g_tt + (j - 1) * 24 + k * 8, load64(g_tt + j * 24 + k * 8));
+                store64(g_tt + j * 24 + k * 8, a);
+                k = k + 1;
+            }
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    var sr = 1;
+    var es = 0;
+    while (sr * 2 <= n) {
+        sr = sr * 2;
+        es = es + 1;
+    }
+    put_u32(dst, 0, ver);
+    put_u16(dst, 4, n);
+    put_u16(dst, 6, sr * 16);
+    put_u16(dst, 8, es);
+    put_u16(dst, 10, n * 16 - sr * 16);
+    var at = 12 + n * 16;
+    i = 0;
+    while (i < n) {
+        var e = 12 + i * 16;
+        var len = load64(g_tt + i * 24 + 16);
+        put_u32(dst, e, load64(g_tt + i * 24));
+        put_u32(dst, e + 4, 0);
+        put_u32(dst, e + 8, at);
+        put_u32(dst, e + 12, len);
+        memcpy(dst + at, g_sb + load64(g_tt + i * 24 + 8), len);
+        var st = load64(g_tt + i * 24 + 8);
+        var h = 0;
+        while (h < g_nhot) {
+            var hp = load64(g_hot + h * 8);
+            if (hp >= st && hp < st + len) { store64(g_hotf + h * 8, at + hp - st); }
+            h = h + 1;
+        }
+        at = at + len;
+        while ((at & 3) != 0) {
+            store8(dst + at, 0);
+            at = at + 1;
+        }
+        memset(dst + at, 0, MT_GAP);
+        at = at + MT_GAP;
+        i = i + 1;
+    }
+    g_nhotf = g_nhot;
+    return at;
+}
+
+# Fill every byte of the SFNT at (buf, len) that is past the directory and inside no table its
+# CURRENT directory declares with `b`. A mutant that shortens a table makes its tail such a byte,
+# and that is right: rekha may not read past a table's declared length either. The loop puts the
+# whole seed back after each mutant, so nothing here needs undoing.
+fn mt_gaps(buf, len, b): i64 {
+    var n = rekha_rd_u16(buf, 4);
+    var dir_end = 12 + n * 16;
+    var p = dir_end;
+    while (p < len) {
+        var owned = 0;
+        var i = 0;
+        while (i < n && owned == 0) {
+            var e = 12 + i * 16;
+            if (e + 16 <= len) {
+                var o = rekha_rd_u32(buf, e + 8);
+                var l = rekha_rd_u32(buf, e + 12);
+                if (p >= o && p - o < l) { owned = 1; }
+            }
+            i = i + 1;
+        }
+        if (owned == 0) { store8(buf + p, b); }
+        p = p + 1;
+    }
+    return 0;
+}
+
+# ================================================================
+# The tables every seed shares.
+# ================================================================
+fn tb_head(lfmt): i64 {
+    mt_begin(MT_TAG_HEAD);
+    w32(0x00010000); w32(0x00010000); w32(0); w32(0x5F0F3CF5);
+    w16(3); hw16(1000);                                 # flags, unitsPerEm
+    wn(16);                                            # created, modified
+    w16(0); w16(0 - 200); w16(1000); w16(900);         # the font bbox
+    w16(0); w16(8); w16(2); hw16(lfmt); w16(0);
+    return mt_end();
+}
+
+fn tb_hhea(nhm): i64 {
+    mt_begin(MT_TAG_HHEA);
+    w32(0x00010000); w16(800); w16(0 - 200); w16(90);
+    w16(1200); w16(0); w16(0); w16(1000);
+    w16(1); w16(0); w16(0);                            # caret slope rise / run, offset
+    wn(8); w16(0); hw16(nhm);
+    return mt_end();
+}
+
+fn tb_maxp05(ng): i64 {
+    mt_begin(MT_TAG_MAXP);
+    w32(0x00005000); hw16(ng);
+    return mt_end();
+}
+
+fn tb_maxp10(ng): i64 {
+    mt_begin(MT_TAG_MAXP);
+    w32(0x00010000); hw16(ng);
+    hw16(16); hw16(4); hw16(32); hw16(6);                  # points / contours, simple and composite
+    hw16(2); hw16(4); hw16(4); hw16(2); hw16(0);            # zones, twilight, storage, fdefs, idefs
+    hw16(32); hw16(16); hw16(3); hw16(1);                  # stack, instruction size, components, depth
+    return mt_end();
+}
+
+# gid i advances 500 + 10 i and bears i, every one a long metric
+fn tb_hmtx(ng): i64 {
+    mt_begin(MT_TAG_HMTX);
+    var i = 0;
+    while (i < ng) {
+        w16(500 + i * 10);
+        w16(i);
+        i = i + 1;
+    }
+    return mt_end();
+}
+
+# one (3,1) format 4 segment, 'A' + k -> gid 1 + k for `count` characters, and the terminator
+fn tb_cmap(count): i64 {
+    mt_begin(MT_TAG_CMAP);
+    hw16(0); hw16(1);
+    hw16(3); hw16(1); hw32(12);
+    hw16(4); hw16(32); hw16(0);
+    hw16(4); hw16(4); hw16(1); hw16(0);                    # segCountX2 4, search fields
+    hw16(64 + count); hw16(0xFFFF);                      # endCode
+    hw16(0);                                            # reservedPad
+    hw16(65); hw16(0xFFFF);                              # startCode
+    hw16(0 - 64); hw16(1);                               # idDelta
+    hw16(0); hw16(0);                                    # idRangeOffset
+    return mt_end();
+}
+
+fn tb_os2(): i64 {
+    mt_begin(MT_TAG_OS2);
+    w16(4); w16(500); w16(400); w16(5); w16(0);
+    w16(650); w16(600); w16(0); w16(75);               # subscript
+    w16(650); w16(600); w16(0); w16(350);              # superscript
+    w16(50); w16(260); w16(0);                         # strikeout, family class
+    wn(10); wn(16); w32(0x4D555420);                   # PANOSE, unicode ranges, vendor
+    w16(0x40); w16(32); w16(90);                       # fsSelection, first / last char
+    w16(800); w16(0 - 200); w16(90); w16(900); w16(250);
+    w32(1); w32(0);                                    # code page ranges
+    w16(500); w16(700); w16(0); w16(32); w16(2);       # xHeight, capHeight, default, break, context
+    return mt_end();
+}
+
+fn tb_post(): i64 {
+    mt_begin(MT_TAG_POST);
+    w32(0x00030000); w32(0); w16(0 - 100); w16(50); w32(0);
+    wn(16);
+    return mt_end();
+}
+
+fn tb_name(): i64 {
+    mt_begin(MT_TAG_NAME);
+    hw16(0); hw16(2); hw16(30);
+    w16(3); w16(1); w16(0x409); w16(1); hw16(6); hw16(0);
+    w16(3); w16(1); w16(0x409); w16(4); hw16(16); hw16(6);
+    w16(77); w16(117); w16(116);                       # "Mut"
+    w16(77); w16(117); w16(116); w16(32); w16(83); w16(101); w16(101); w16(100);   # "Mut Seed"
+    return mt_end();
+}
+
+# legacy kern, one format 0 subtable: (1, 2) -40, (2, 3) +25, (3, 1) -10, sorted
+fn tb_kern(): i64 {
+    mt_begin(MT_TAG_KERN);
+    hw16(0); hw16(1);
+    hw16(0); hw16(14 + 18); hw16(1);
+    hw16(3); hw16(12); hw16(1); hw16(6);
+    hw16(1); hw16(2); hw16(0 - 40);
+    hw16(2); hw16(3); hw16(25);
+    hw16(3); hw16(1); hw16(0 - 10);
+    return mt_end();
+}
+
+fn tb_fvar(): i64 {
+    mt_begin(MT_TAG_FVAR);
+    hw16(1); hw16(0); hw16(16); hw16(2); hw16(1); hw16(20); hw16(2); hw16(8);
+    hw32(0x77676874); hw32(100 * 65536); hw32(400 * 65536); hw32(900 * 65536); hw16(0); hw16(256);
+    hw16(257); hw16(0); hw32(100 * 65536);
+    hw16(258); hw16(0); hw32(900 * 65536);
+    return mt_end();
+}
+
+fn tb_avar(): i64 {
+    mt_begin(MT_TAG_AVAR);
+    hw16(1); hw16(0); hw16(0); hw16(1);
+    hw16(4);
+    hw16(0xC000); hw16(0xC000);                          # -1 -> -1
+    hw16(0); hw16(0);                                    #  0 ->  0
+    hw16(0x2000); hw16(0x2CCD);                          #  0.5 -> 0.7
+    hw16(0x4000); hw16(0x4000);                          #  1 ->  1
+    return mt_end();
+}
+
+# An ItemVariationStore at the staging position: one subtable of `nitems` rows over two regions,
+# (0, +1, +1) and (-1, -1, 0); row i is (10 + 10 i) as a word, then -(5 + i) as a byte.
+fn tb_ivs(nitems): i64 {
+    var s = g_sbn;
+    var ivd = 12;
+    var ivdlen = 10 + nitems * 3;
+    hw16(1); hw32(ivd + ivdlen); hw16(1); hw32(ivd);
+    hw16(nitems); hw16(1); hw16(2); hw16(0); hw16(1);
+    var i = 0;
+    while (i < nitems) {
+        w16(10 + i * 10);
+        w8(0 - 5 - i);
+        i = i + 1;
+    }
+    hw16(1); hw16(2);
+    w16(0); w16(0x4000); w16(0x4000);
+    w16(0xC000); w16(0xC000); w16(0);
+    return g_sbn - s;
+}
+
+# HVAR over the store; with `map`, an explicit advance map (format 0, one-byte entries, four inner
+# bits) sending gid g to row g, so the DeltaSetIndexMap reader is under mutation too
+fn tb_hvar(ng, map): i64 {
+    mt_begin(MT_TAG_HVAR);
+    var so = 20;
+    if (map != 0) { so = 24 + ng; }
+    hw16(1); w16(0); hw32(so); hw32(20 * map); hw32(0); hw32(0);
+    if (map != 0) {
+        hw8(0); hw8(0x03); hw16(ng);
+        var g = 0;
+        while (g < ng) { hw8(g); g = g + 1; }
+    }
+    tb_ivs(ng);
+    return mt_end();
+}
+
+fn tb_mvar(): i64 {
+    mt_begin(MT_TAG_MVAR);
+    hw16(1); w16(0); w16(0); hw16(8); hw16(3); hw16(36);
+    w32(0x68617363); hw16(0); hw16(0);                 # hasc
+    w32(0x7374726F); w16(0); w16(1);                   # stro
+    w32(0x78686774); w16(0); w16(2);                   # xhgt
+    tb_ivs(3);
+    return mt_end();
+}
+
+# ================================================================
+# Charstrings and CFF INDEXes.
+# ================================================================
+var g_cs = 0;
+var g_csn = 0;
+
+fn cs_b(v): i64 {
+    store8(g_cs + g_csn, v & 255);
+    g_csn = g_csn + 1;
+    return 0;
+}
+fn cs_n(v): i64 {
+    if (v >= 0 - 107 && v <= 107) { return cs_b(v + 139); }
+    if (v >= 108 && v <= 1131) {
+        var w = v - 108;
+        cs_b(247 + w / 256);
+        return cs_b(w % 256);
+    }
+    if (v <= 0 - 108 && v >= 0 - 1131) {
+        var u = 0 - v - 108;
+        cs_b(251 + u / 256);
+        return cs_b(u % 256);
+    }
+    cs_b(28);
+    cs_b(v >> 8);
+    return cs_b(v);
+}
+fn cs_op(op): i64 { return cs_b(op); }
+fn cs_op12(op): i64 {
+    cs_b(12);
+    return cs_b(op);
+}
+fn cs_ns(a, b): i64 {                                  # the numbers a, a + 10, ... below b
+    var v = a;
+    while (v < b) {
+        cs_n(v);
+        v = v + 10;
+    }
+    return 0;
+}
+
+# An object list: t+0 the bytes, t+8 the count, t+16.. the starts (count + 1 of them).
+fn ol_new(): i64 {
+    var t = alloc(16 + 129 * 8);
+    store64(t, alloc(65536));
+    store64(t + 8, 0);
+    store64(t + 16, 0);
+    return t;
+}
+fn ol_add(t): i64 {
+    var n = load64(t + 8);
+    var st = load64(t + 16 + n * 8);
+    memcpy(load64(t) + st, g_cs, g_csn);
+    store64(t + 16 + (n + 1) * 8, st + g_csn);
+    store64(t + 8, n + 1);
+    g_csn = 0;
+    return n;
+}
+
+# Stage list `t` as a CFF INDEX (a u16 count, or a u32 one for CFF2 when `wide`), 4-byte offsets.
+fn idx_write(t, wide): i64 {
+    var n = load64(t + 8);
+    if (wide != 0) { hw32(n); } else { hw16(n); }
+    if (n == 0) { return 0; }
+    hw8(4);
+    var i = 0;
+    while (i <= n) {
+        hw32(load64(t + 16 + i * 8) + 1);
+        i = i + 1;
+    }
+    var len = load64(t + 16 + n * 8);
+    memcpy(g_sb + g_sbn, load64(t), len);
+    g_sbn = g_sbn + len;
+    return 0;
+}
+
+# a 5-byte DICT integer whose value is patched later: returns the staging position of its i32
+fn d_slot(): i64 {
+    w8(29);
+    var at = g_sbn;
+    hot();
+    w32(0);
+    return at;
+}
+
+# ── seed 1: the 'OTTO' face ──────────────────────────
+var MT_CFF_NG = 40;
+
+fn cs_box(x, y, s): i64 {
+    cs_n(x); cs_n(y); cs_op(21);
+    cs_n(s); cs_n(0); cs_op(5);
+    cs_n(0); cs_n(s); cs_op(5);
+    cs_n(0 - s); cs_n(0); cs_op(5);
+    return 0;
+}
+
+fn seed_cff(dst): i64 {
+    mt_reset();
+    var ng = MT_CFF_NG;
+    tb_head(0);
+    tb_hhea(ng);
+    tb_maxp05(ng);
+    tb_hmtx(ng);
+    tb_cmap(26);
+    tb_os2();
+    tb_post();
+    tb_name();
+    tb_kern();
+    var cs = ol_new();
+    var gs = ol_new();
+    var ls = ol_new();
+    var g = 0;
+    while (g < ng) {
+        if (g == 1) {                                  # hinted box: two hstems, a vstem, a mask
+            cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_op(18); cs_n(50); cs_n(60); cs_op(23);
+            cs_op(19); cs_b(0xE0);
+            cs_box(100, 100, 400);
+        } elif (g == 2) {                              # every curve operator
+            cs_n(100); cs_n(0); cs_op(21);
+            cs_n(50); cs_n(0); cs_n(50); cs_n(100); cs_n(0); cs_n(100); cs_op(8);
+            cs_n(0); cs_n(50); cs_n(0 - 50); cs_n(50); cs_op(31);
+            cs_n(50); cs_n(0 - 50); cs_n(0 - 50); cs_n(0); cs_op(30);
+            cs_n(0 - 30); cs_n(0 - 20); cs_n(10); cs_n(0 - 40); cs_op(27);
+            cs_n(10); cs_n(20); cs_n(30); cs_n(40); cs_op(26);
+            cs_n(10); cs_n(10); cs_n(20); cs_n(20); cs_n(30); cs_n(30); cs_n(5); cs_n(5); cs_op(24);
+            cs_n(5); cs_n(5); cs_n(10); cs_n(10); cs_n(20); cs_n(20); cs_n(30); cs_n(30); cs_op(25);
+            cs_n(30); cs_n(20); cs_op(6);
+            cs_n(30); cs_n(20); cs_op(7);
+        } elif (g == 3) {                              # a local and a global subroutine
+            cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_n(0 - 107); cs_op(29);
+        } elif (g == 4) {                              # the four flexes
+            cs_n(0); cs_n(0); cs_op(21);
+            cs_ns(10, 130); cs_n(50); cs_op12(35);
+            cs_ns(10, 80); cs_op12(34);
+            cs_ns(10, 100); cs_op12(36);
+            cs_ns(10, 120); cs_op12(37);
+        } elif (g == 5) {                              # seac: 'A' (gid 34) and 'B' (gid 35)
+            cs_n(0); cs_n(0); cs_n(65); cs_n(66);
+        } elif (g == 6) {                              # a width, then a counter mask
+            cs_n(500); cs_n(10); cs_n(20); cs_op(1); cs_n(30); cs_n(40); cs_op(3);
+            cs_op(20); cs_b(0xC0);
+            cs_n(0); cs_n(0); cs_op(21); cs_n(100); cs_op(6); cs_n(100); cs_op(7);
+        } elif (g == 34) {
+            cs_box(0, 0, 200);
+        } elif (g == 35) {
+            cs_n(50); cs_n(300); cs_op(21); cs_n(50); cs_n(50); cs_op(5); cs_n(50); cs_n(0 - 50); cs_op(5);
+        }
+        cs_op(14);
+        ol_add(cs);
+        g = g + 1;
+    }
+    cs_n(0); cs_n(100); cs_op(5); cs_op(11); ol_add(gs);
+    cs_n(100); cs_n(0); cs_op(5); cs_op(11); ol_add(ls);
+
+    var c0 = mt_begin(MT_TAG_CFF);
+    w8(1); w8(0); w8(4); w8(4);
+    w16(1); w8(1); w8(1); w8(2); w8(84);               # Name INDEX: "T"
+    w16(1); w8(1); w8(1); w8(18);                      # Top DICT INDEX: one 17-byte DICT
+    var pcs = d_slot(); w8(17);
+    var ppsz = d_slot();
+    var ppoff = d_slot(); w8(18);
+    w16(0);                                            # String INDEX
+    idx_write(gs, 0);
+    var cs_at = g_sbn - c0;
+    idx_write(cs, 0);
+    var priv = g_sbn - c0;
+    var psub = d_slot(); w8(19);                       # Private: Subrs, 6 bytes on
+    idx_write(ls, 0);
+    wp32(pcs, cs_at);
+    wp32(ppsz, 6);
+    wp32(ppoff, priv);
+    wp32(psub, 6);
+    mt_end();
+    return mt_write(dst, 0x4F54544F);
+}
+
+# ── seed 2: the CFF2 variable face ──────────────────────────
+var MT_CFF2_NG = 6;
+
+fn seed_cff2(dst): i64 {
+    mt_reset();
+    var ng = MT_CFF2_NG;
+    tb_head(0);
+    tb_hhea(ng);
+    tb_maxp05(ng);
+    tb_hmtx(ng);
+    tb_cmap(5);
+    tb_os2();
+    tb_fvar();
+    tb_avar();
+    tb_hvar(ng, 0);
+    tb_mvar();
+    var cs = ol_new();
+    var gs = ol_new();
+    var ls = ol_new();
+    ol_add(cs);                                        # 0: empty
+    cs_n(100); cs_n(200); cs_n(10); cs_n(0 - 10); cs_n(20); cs_n(0 - 20); cs_n(2); cs_op(16); cs_op(21);
+    cs_n(300); cs_n(0); cs_op(5);
+    cs_n(0); cs_n(300); cs_n(30); cs_n(0 - 30); cs_n(0); cs_n(0); cs_n(2); cs_op(16); cs_op(5);
+    cs_n(0 - 300); cs_n(0); cs_op(5);
+    ol_add(cs);                                        # 1: blended
+    cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_n(0 - 107); cs_op(29);
+    ol_add(cs);                                        # 2: subroutines
+    cs_n(0); cs_op(15); cs_n(50); cs_n(0); cs_op(21);
+    cs_n(50); cs_n(0); cs_n(50); cs_n(100); cs_n(0); cs_n(100); cs_op(8);
+    cs_n(10); cs_n(5); cs_n(0 - 5); cs_n(1); cs_op(16); cs_n(0); cs_op(5);
+    ol_add(cs);                                        # 3: vsindex, then a blend
+    cs_n(10); cs_n(20); cs_op(18); cs_n(30); cs_n(40); cs_op(23); cs_op(19); cs_b(0xC0);
+    cs_n(0); cs_n(0); cs_op(21); cs_n(100); cs_n(0); cs_op(5); cs_n(0); cs_n(100); cs_op(5);
+    ol_add(cs);                                        # 4: hint mask
+    cs_n(0); cs_n(0); cs_op(21); cs_ns(10, 130); cs_n(50); cs_op12(35);
+    ol_add(cs);                                        # 5: flex
+    cs_n(0); cs_n(100); cs_op(5); ol_add(gs);
+    cs_n(100); cs_n(0); cs_op(5); ol_add(ls);
+
+    var c0 = mt_begin(MT_TAG_CFF2);
+    w8(2); w8(0); w8(5); w16(19);
+    var pcs = d_slot(); w8(17);
+    var pfd = d_slot(); w8(12); w8(36);
+    var pvs = d_slot(); w8(24);
+    idx_write(gs, 1);
+    var cs_at = g_sbn - c0;
+    idx_write(cs, 1);
+    var fda = g_sbn - c0;
+    w32(1); w8(1); w8(1); w8(12);                      # FDArray: one 11-byte Font DICT
+    var fpsz = d_slot();
+    var fpoff = d_slot(); w8(18);
+    var priv = g_sbn - c0;
+    w8(139); w8(22);                                   # 0 vsindex
+    var psub = d_slot(); w8(19);                       # Subrs, 8 bytes on
+    idx_write(ls, 1);
+    var vs = g_sbn - c0;
+    var vlen = g_sbn;
+    w16(0);
+    var ivl = tb_ivs(0);
+    wp16(vlen, ivl);
+    wp32(pcs, cs_at);
+    wp32(pfd, fda);
+    wp32(pvs, vs);
+    wp32(fpsz, 8);
+    wp32(fpoff, priv);
+    wp32(psub, 8);
+    mt_end();
+    return mt_write(dst, 0x4F54544F);
+}
+
+# ================================================================
+# glyf: points staged as (x, y, on) with contour ends, written in the narrowest encodings.
+# ================================================================
+var g_px = 0;
+var g_py = 0;
+var g_pon = 0;
+var g_pe = 0;
+var g_np = 0;
+var g_nce = 0;
+var g_fl = 0;
+
+fn pt(x, y, on): i64 {
+    store64(g_px + g_np * 8, x);
+    store64(g_py + g_np * 8, y);
+    store64(g_pon + g_np * 8, on);
+    g_np = g_np + 1;
+    return 0;
+}
+fn ep(): i64 {
+    store64(g_pe + g_nce * 8, g_np - 1);
+    g_nce = g_nce + 1;
+    return 0;
+}
+
+# The staged simple glyph, with `ilen` instruction bytes from `ins`. Coordinates are delta-encoded
+# in the narrowest form (zero, one byte with its sign flag, or a word); runs of equal flags REPEAT.
+fn tg_simple(ins, ilen): i64 {
+    var s = g_sbn;
+    var x0 = load64(g_px);
+    var x1 = x0;
+    var y0 = load64(g_py);
+    var y1 = y0;
+    var i = 0;
+    while (i < g_np) {
+        var x = load64(g_px + i * 8);
+        var y = load64(g_py + i * 8);
+        if (x < x0) { x0 = x; }
+        if (x > x1) { x1 = x; }
+        if (y < y0) { y0 = y; }
+        if (y > y1) { y1 = y; }
+        i = i + 1;
+    }
+    hw16(g_nce); w16(x0); w16(y0); w16(x1); w16(y1);
+    i = 0;
+    while (i < g_nce) { hw16(load64(g_pe + i * 8)); i = i + 1; }
+    hw16(ilen);
+    i = 0;
+    while (i < ilen) { w8(load8(ins + i)); i = i + 1; }
+    var px = 0;
+    var py = 0;
+    i = 0;
+    while (i < g_np) {
+        var dx = load64(g_px + i * 8) - px;
+        var dy = load64(g_py + i * 8) - py;
+        px = px + dx;
+        py = py + dy;
+        var f = load64(g_pon + i * 8);
+        if (dx == 0) { f = f | 16; } elif (dx > 0 - 256 && dx < 256) { f = f | 2; if (dx > 0) { f = f | 16; } }
+        if (dy == 0) { f = f | 32; } elif (dy > 0 - 256 && dy < 256) { f = f | 4; if (dy > 0) { f = f | 32; } }
+        store8(g_fl + i, f);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < g_np) {
+        var r = 0;
+        while (i + r + 1 < g_np && r < 255 && load8(g_fl + i + r + 1) == load8(g_fl + i)) { r = r + 1; }
+        if (r > 0) {
+            hw8(load8(g_fl + i) | 8);
+            hw8(r);
+        } else {
+            hw8(load8(g_fl + i));
+        }
+        i = i + r + 1;
+    }
+    var k = 0;
+    while (k < 2) {
+        var arr = g_px;
+        var sbit = 2;
+        var pbit = 16;
+        if (k == 1) {
+            arr = g_py;
+            sbit = 4;
+            pbit = 32;
+        }
+        var prev = 0;
+        i = 0;
+        while (i < g_np) {
+            var d = load64(arr + i * 8) - prev;
+            prev = prev + d;
+            var fl = load8(g_fl + i);
+            if ((fl & sbit) != 0) {
+                if (d < 0) { w8(0 - d); } else { w8(d); }
+            } elif ((fl & pbit) == 0) {
+                w16(d);
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    g_np = 0;
+    g_nce = 0;
+    return g_sbn - s;
+}
+
+var g_ins = 0;
+
+# ── seed 3: the TrueType variable face ──────────────────────────
+var MT_TT_NG = 6;
+
+fn seed_tt(dst): i64 {
+    mt_reset();
+    var ng = MT_TT_NG;
+    tb_head(1);
+    tb_hhea(ng);
+    tb_maxp10(ng);
+    tb_hmtx(ng);
+    tb_cmap(5);
+    tb_os2();
+    tb_fvar();
+    tb_avar();
+    tb_hvar(ng, 1);
+    tb_mvar();
+    mt_begin(MT_TAG_CVT); w16(0); w16(100); mt_end();
+    mt_begin(MT_TAG_FPGM); w8(0xB0); w8(0); w8(0x2C); w8(0x18); w8(0x2D); mt_end();
+    mt_begin(MT_TAG_PREP); w8(0xB0); w8(0); w8(0x2B); mt_end();
+    # the glyphs, their spans recorded for loca
+    var lo: i64[8];
+    var g0 = mt_begin(MT_TAG_GLYF);
+    store64(&lo, 0);
+    store64(&lo + 8, 0);                               # 0: empty
+    pt(0, 0, 1); pt(100, 0, 1); pt(100, 100, 1); pt(0, 100, 1); ep();
+    pt(200, 0, 1); pt(300, 0, 0); pt(300, 100, 1); pt(200, 100, 0); ep();
+    store8(g_ins, 0xB0); store8(g_ins + 1, 0); store8(g_ins + 2, 0x2F); store8(g_ins + 3, 0x31);
+    store8(g_ins + 4, 0x30);
+    tg_simple(g_ins, 5);
+    store64(&lo + 16, g_sbn - g0);                     # 1: two contours, a hinting program
+    pt(0, 0, 1); pt(50, 300, 0); pt(400, 0, 1); pt(200, 0 - 60, 0); ep();
+    tg_simple(g_ins, 0);
+    store64(&lo + 24, g_sbn - g0);                     # 2: words and bytes, off-curve points
+    hw16(0xFFFF); w16(0); w16(0); w16(700); w16(300);
+    hw16(0x0022); hw16(1); w8(0); w8(0);                 # [1] at (0, 0)
+    hw16(0x0109); hw16(2); w16(300); w16(50); w16(0x2000);   # [2] at (300, 50), scale 0.5, instructions
+    hw16(3); w8(0xB0); w8(0); w8(0x2F); w8(0);
+    store64(&lo + 32, g_sbn - g0);                     # 3: offset, scale, instructions
+    hw16(0xFFFF); w16(0); w16(0); w16(400); w16(300);
+    hw16(0x0022); hw16(1); w8(0); w8(0);                 # [1] at (0, 0)
+    hw16(0x0000); hw16(2); w8(2); w8(0);                 # [2] point-matched: its 0 onto point 2
+    store64(&lo + 40, g_sbn - g0);                     # 4: point matching
+    hw16(0xFFFF); w16(0); w16(0); w16(400); w16(300);
+    hw16(0x0082); hw16(2); w8(10); w8(20);
+    w16(0x2CCD); w16(0x1333); w16(0xED00); w16(0x2CCD);   # 2x2: 0.7 0.3 -0.3 0.7
+    store64(&lo + 48, g_sbn - g0);                     # 5: a two-by-two
+    mt_end();
+    mt_begin(MT_TAG_LOCA);
+    var i = 0;
+    while (i <= ng) {
+        w32(load64(&lo + i * 8));
+        i = i + 1;
+    }
+    mt_end();
+    tb_gvar(ng);
+    tb_gpos();
+    return mt_write(dst, 0x00010000);
+}
+
+# gvar: one shared tuple (peak +1). gid 1 shares "all points" between a shared-tuple tuple and a
+# private {0, 2} tuple at -1; gid 2 one intermediate private tuple; gid 3 deltas on its components
+# through a private "all"; gid 5 shared points {0}; gids 0 and 4 do not vary. Long offsets.
+fn tb_gvar(ng): i64 {
+    var g = mt_begin(MT_TAG_GVAR);
+    var sh = 20 + (ng + 1) * 4;
+    hw16(1); hw16(0); hw16(1); hw16(1); hw32(sh); hw16(ng); hw16(1); hw32(sh + 2);
+    var offs = g_sbn;
+    wn((ng + 1) * 4);
+    hw16(0x4000);
+    var da = g_sbn;
+    var gid = 0;
+    while (gid < ng) {
+        wp32(offs + gid * 4, g_sbn - da);
+        if (gid == 1) {
+            hw16(0x8002); hw16(4 + 4 + 6);
+            hw16(26); hw16(0);
+            hw16(8); hw16(0xA000); hw16(0xC000);
+            w8(0);                                     # shared points: all
+            w8(11); var k = 0; while (k < 12) { w8(10); k = k + 1; }
+            w8(11); k = 0; while (k < 12) { w8(5); k = k + 1; }
+            w8(2); w8(1); w8(0); w8(2);                # private {0, 2}
+            w8(1); w8(0xF6); w8(10);
+            w8(0x81);
+        } elif (gid == 2) {
+            hw16(1); hw16(4 + 10);
+            hw16(10); hw16(0xE000); hw16(0x2000); hw16(0); hw16(0x4000);
+            w8(2); w8(1); w8(1); w8(2);                # private {1, 3}
+            w8(1); w8(20); w8(0xEC);
+            w8(1); w8(15); w8(15);
+        } elif (gid == 3) {
+            hw16(1); hw16(4 + 4);
+            hw16(9); hw16(0x2000);
+            w8(0);                                     # private: all six (2 components + 4)
+            w8(5); w8(5); w8(30); w8(0); w8(0); w8(0); w8(0);
+            w8(0x85);
+        } elif (gid == 5) {
+            hw16(0x8001); hw16(4 + 4);
+            hw16(3); hw16(0);
+            w8(1); w8(0); w8(0);                       # shared points {0}
+            w8(0); w8(7);
+            w8(0x80);
+        }
+        gid = gid + 1;
+    }
+    wp32(offs + ng * 4, g_sbn - da);
+    return mt_end();
+}
+
+# GPOS: a `kern` feature, one PairPos format 1 lookup: (1, 2) -40, (1, 3) +25
+fn tb_gpos(): i64 {
+    var g = mt_begin(MT_TAG_GPOS);
+    hw16(1); hw16(0); hw16(10); hw16(12); hw16(26);
+    hw16(0);                                            # ScriptList: none
+    hw16(1); hw32(0x6B65726E); hw16(8);                   # FeatureList at 12: kern -> +8
+    hw16(0); hw16(1); hw16(0);                            # its Feature: lookup 0
+    hw16(1); hw16(4);                                    # LookupList at 26: one, at +4
+    hw16(2); hw16(0); hw16(1); hw16(8);                    # Lookup: PairPos, one subtable at +8
+    hw16(1); hw16(20); hw16(4); hw16(0); hw16(1); hw16(12);  # format 1, coverage at +20, xAdvance
+    hw16(2); hw16(2); hw16(0 - 40); hw16(3); hw16(25);      # PairSet for gid 1
+    hw16(1); hw16(1); hw16(1);                            # Coverage: { 1 }
+    return mt_end();
+}
+
+# ================================================================
+# The containers.
+# ================================================================
+var WCAP = 1048576;
+
+fn woff_build(s, out, compress): i64 {
+    var n = rekha_rd_u16(s, 4);
+    memset(out, 0, WCAP);
+    var at = REKHA_WOFF_HDR_LEN + n * REKHA_WOFF_DIR_LEN;
+    var total = 12 + n * 16;
+    var i = 0;
+    while (i < n) {
+        var d = 12 + i * 16;
+        var off = rekha_rd_u32(s, d + 8);
+        var olen = rekha_rd_u32(s, d + 12);
+        var e = REKHA_WOFF_HDR_LEN + i * REKHA_WOFF_DIR_LEN;
+        rekha_wr_u32(out, e, rekha_rd_u32(s, d));
+        rekha_wr_u32(out, e + 4, at);
+        rekha_wr_u32(out, e + 12, olen);
+        rekha_wr_u32(out, e + 16, rekha_rd_u32(s, d + 4));
+        var clen = olen;
+        if (compress != 0) {
+            var c = zlib_compress(s + off, olen, out + at, WCAP - at);
+            if (c > 0) {
+                if (c < olen) { clen = c; }
+            }
+        }
+        if (clen == olen) { memcpy(out + at, s + off, olen); }
+        rekha_wr_u32(out, e + 8, clen);
+        at = at + rekha_pad4(clen);
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    rekha_wr_u32(out, 0, REKHA_WOFF_SIG);
+    rekha_wr_u32(out, 4, rekha_rd_u32(s, 0));
+    rekha_wr_u32(out, 8, at);
+    rekha_wr_u16(out, 12, n);
+    rekha_wr_u32(out, 16, total);
+    rekha_wr_u16(out, 20, 1);
+    return at;
+}
+
+# ── WOFF2, after programs/woff2_test.cyr's encoder, Brotli-compressed by sankoch ──
+fn put128(out, at, v): i64 {
+    var n = 1;
+    var t = v >> 7;
+    while (t != 0) {
+        n = n + 1;
+        t = t >> 7;
+    }
+    var i = 0;
+    while (i < n) {
+        var b = (v >> (7 * (n - 1 - i))) & 127;
+        if (i != n - 1) { b = b | 128; }
+        store8(out + at + i, b);
+        i = i + 1;
+    }
+    return at + n;
+}
+
+fn put255(out, at, v): i64 {
+    if (v < 253) {
+        store8(out + at, v);
+        return at + 1;
+    }
+    if (v <= 508) {
+        store8(out + at, 255);
+        store8(out + at + 1, v - 253);
+        return at + 2;
+    }
+    if (v <= 761) {
+        store8(out + at, 254);
+        store8(out + at + 1, v - 506);
+        return at + 2;
+    }
+    store8(out + at, 253);
+    store8(out + at + 1, (v >> 8) & 255);
+    store8(out + at + 2, v & 255);
+    return at + 3;
+}
+
+fn known_index(tag): i64 {
+    var i = 0;
+    while (i < 63) {
+        if (rekha_w2_known_tag(i) == tag) { return i; }
+        i = i + 1;
+    }
+    return 63;
+}
+
+var g_blk = 0;
+var g_tmp = 0;
+var g_desc = 0;
+# 1 = sankoch's encoder; 0 = a STORED stream, so a mutated byte reaches the table data and the
+# transform decoder intact
+var g_brotli = 1;
+
+var g_w2bw_buf = 0;
+var g_w2bw_at = 0;
+var g_w2bw_bit = 0;
+
+fn w2bw_bits(v, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (((v >> i) & 1) != 0) {
+            store8(g_w2bw_buf + g_w2bw_at, load8(g_w2bw_buf + g_w2bw_at) | (1 << g_w2bw_bit));
+        }
+        g_w2bw_bit = g_w2bw_bit + 1;
+        if (g_w2bw_bit == 8) {
+            g_w2bw_bit = 0;
+            g_w2bw_at = g_w2bw_at + 1;
+            store8(g_w2bw_buf + g_w2bw_at, 0);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn w2bw_align(): i64 {
+    if (g_w2bw_bit != 0) {
+        g_w2bw_bit = 0;
+        g_w2bw_at = g_w2bw_at + 1;
+        store8(g_w2bw_buf + g_w2bw_at, 0);
+    }
+    return 0;
+}
+
+# programs/woff2_test.cyr's RFC 7932 stored stream: (src, slen) verbatim, then an empty last block
+fn brotli_store(src, slen, out): i64 {
+    g_w2bw_buf = out;
+    g_w2bw_at = 0;
+    g_w2bw_bit = 0;
+    store8(out, 0);
+    w2bw_bits(0, 1);
+    var done = 0;
+    while (done < slen) {
+        var chunk = slen - done;
+        if (chunk > 16777216) { chunk = 16777216; }
+        w2bw_bits(0, 1);
+        var nnib = 4;
+        if (chunk - 1 > 65535) { nnib = 5; }
+        if (chunk - 1 > 1048575) { nnib = 6; }
+        w2bw_bits(nnib - 4, 2);
+        w2bw_bits(chunk - 1, nnib * 4);
+        w2bw_bits(1, 1);
+        w2bw_align();
+        memcpy(out + g_w2bw_at, src + done, chunk);
+        g_w2bw_at = g_w2bw_at + chunk;
+        store8(out + g_w2bw_at, 0);
+        done = done + chunk;
+    }
+    w2bw_bits(1, 1);
+    w2bw_bits(1, 1);
+    w2bw_align();
+    return g_w2bw_at;
+}
+
+fn w2_assemble(s, out, ntab, desc, blklen, total_sfnt): i64 {
+    memset(out, 0, WCAP);
+    rekha_wr_u32(out, 0, REKHA_WOFF2_SIG);
+    rekha_wr_u32(out, 4, rekha_rd_u32(s, 0));
+    rekha_wr_u16(out, 12, ntab);
+    rekha_wr_u32(out, 16, total_sfnt);
+    rekha_wr_u16(out, 24, 1);
+    var at = REKHA_WOFF2_HDR_LEN;
+    var i = 0;
+    while (i < ntab) {
+        var d = desc + i * 32;
+        var tag = load64(d);
+        var xf = load64(d + 8);
+        var idx = known_index(tag);
+        store8(out + at, (idx & 63) | ((xf & 3) << 6));
+        at = at + 1;
+        if (idx == 63) {
+            rekha_wr_u32(out, at, tag);
+            at = at + 4;
+        }
+        at = put128(out, at, load64(d + 16));
+        if (rekha_w2_has_tlen(tag, xf) == 1) { at = put128(out, at, load64(d + 24)); }
+        i = i + 1;
+    }
+    var clen = 0;
+    if (g_brotli != 0) {
+        clen = brotli_compress(g_blk, blklen, out + at, WCAP - at);
+    } else {
+        clen = brotli_store(g_blk, blklen, out + at);
+    }
+    if (clen <= 0) { return 0; }
+    rekha_wr_u32(out, 20, clen);
+    rekha_wr_u32(out, 8, at + clen);
+    return at + clen;
+}
+
+fn w2_build_null(s, out, desc): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var blk = 0;
+    var total = 12 + n * 16;
+    var i = 0;
+    while (i < n) {
+        var e = 12 + i * 16;
+        var tag = rekha_rd_u32(s, e);
+        var off = rekha_rd_u32(s, e + 8);
+        var olen = rekha_rd_u32(s, e + 12);
+        var xf = 0;
+        if (tag == MT_TAG_GLYF || tag == MT_TAG_LOCA) { xf = 3; }
+        var d = desc + i * 32;
+        store64(d, tag);
+        store64(d + 8, xf);
+        store64(d + 16, olen);
+        store64(d + 24, olen);
+        memcpy(g_blk + blk, s + off, olen);
+        blk = blk + olen;
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    return w2_assemble(s, out, n, desc, blk, total);
+}
+
+var g_snc = 0;
+var g_snp = 0;
+var g_sfl = 0;
+var g_sgl = 0;
+var g_scm = 0;
+var g_sbb = 0;
+var g_sin = 0;
+var g_sbm = 0;
+var g_sov = 0;
+var g_gx = 0;
+var g_hx = 0;
+var g_nc_at = 0;
+var g_np_at = 0;
+var g_fl_at = 0;
+var g_gl_at = 0;
+var g_cm_at = 0;
+var g_bb_at = 0;
+var g_in_at = 0;
+
+fn setbit(p, i): i64 {
+    store8(p + (i >> 3), load8(p + (i >> 3)) | (128 >> (i & 7)));
+    return 0;
+}
+
+fn tri_encode(dx, dy, oc, fl, bl): i64 {
+    var ax = dx;
+    if (ax < 0) { ax = 0 - ax; }
+    var ay = dy;
+    if (ay < 0) { ay = 0 - ay; }
+    var sx = 0;
+    if (dx >= 0) { sx = 1; }
+    var sy = 0;
+    if (dy >= 0) { sy = 1; }
+    var hi = 0;
+    if (oc != 0) { hi = 128; }
+    if (dx == 0 && ay <= 1279) {
+        var k = ay >> 8;
+        store8(fl, hi | (2 * k + sy));
+        store8(bl, ay - 256 * k);
+        return 1;
+    }
+    if (dy == 0 && ax <= 1279) {
+        var k2 = ax >> 8;
+        store8(fl, hi | (10 + 2 * k2 + sx));
+        store8(bl, ax - 256 * k2);
+        return 1;
+    }
+    if (ax >= 1 && ax <= 64 && ay >= 1 && ay <= 64) {
+        var a = (ax - 1) >> 4;
+        var b = (ay - 1) >> 4;
+        store8(fl, hi | (20 + a * 16 + b * 4 + sy * 2 + sx));
+        store8(bl, (((ax - 1) & 15) << 4) | ((ay - 1) & 15));
+        return 1;
+    }
+    if (ax >= 1 && ax <= 768 && ay >= 1 && ay <= 768) {
+        var a2 = (ax - 1) >> 8;
+        var b2 = (ay - 1) >> 8;
+        store8(fl, hi | (84 + (a2 * 3 + b2) * 4 + sy * 2 + sx));
+        store8(bl, ax - 1 - 256 * a2);
+        store8(bl + 1, ay - 1 - 256 * b2);
+        return 2;
+    }
+    if (ax <= 4095 && ay <= 4095) {
+        store8(fl, hi | (120 + sy * 2 + sx));
+        store8(bl, (ax >> 4) & 255);
+        store8(bl + 1, ((ax & 15) << 4) | ((ay >> 8) & 15));
+        store8(bl + 2, ay & 255);
+        return 3;
+    }
+    store8(fl, hi | (124 + sy * 2 + sx));
+    store8(bl, (ax >> 8) & 255);
+    store8(bl + 1, ax & 255);
+    store8(bl + 2, (ay >> 8) & 255);
+    store8(bl + 3, ay & 255);
+    return 4;
+}
+
+fn loca_at(s, loca_off, ifmt, i): i64 {
+    if (ifmt == 0) { return rekha_rd_u16(s, loca_off + i * 2) * 2; }
+    return rekha_rd_u32(s, loca_off + i * 4);
+}
+
+# programs/woff2_test.cyr's glyf transform, unchanged in what it emits: the seven substreams, the
+# bbox bitmap (explicit only where the outline does not imply the stored box; always for a
+# composite) and no overlap bitmap.
+fn glyf_transform(s, ng, ifmt, glyf_off, loca_off): i64 {
+    g_nc_at = 0;
+    g_np_at = 0;
+    g_fl_at = 0;
+    g_gl_at = 0;
+    g_cm_at = 0;
+    g_bb_at = 0;
+    g_in_at = 0;
+    var bmpn = 4 * ((ng + 31) / 32);
+    memset(g_sbm, 0, bmpn);
+    var gid = 0;
+    while (gid < ng) {
+        var a = glyf_off + loca_at(s, loca_off, ifmt, gid);
+        var b = glyf_off + loca_at(s, loca_off, ifmt, gid + 1);
+        var nc = 0;
+        if (b > a) { nc = rekha_rd_i16(s, a); }
+        rekha_wr_u16(g_snc, g_nc_at, nc);
+        g_nc_at = g_nc_at + 2;
+        if (b > a && nc > 0) {
+            var eps = a + 10;
+            var np = rekha_rd_u16(s, eps + (nc - 1) * 2) + 1;
+            var prev = 0 - 1;
+            var j = 0;
+            while (j < nc) {
+                var e = rekha_rd_u16(s, eps + j * 2);
+                g_np_at = put255(g_snp, g_np_at, e - prev);
+                prev = e;
+                j = j + 1;
+            }
+            var q = eps + nc * 2;
+            var ilen = rekha_rd_u16(s, q);
+            q = q + 2;
+            memcpy(g_sin + g_in_at, s + q, ilen);
+            g_in_at = g_in_at + ilen;
+            q = q + ilen;
+            var fi = 0;
+            while (fi < np) {
+                var f0 = load8(s + q);
+                q = q + 1;
+                store8(g_tmp + fi, f0);
+                fi = fi + 1;
+                if ((f0 & 8) != 0) {
+                    var rep = load8(s + q);
+                    q = q + 1;
+                    var r0 = 0;
+                    while (r0 < rep) {
+                        store8(g_tmp + fi, f0);
+                        fi = fi + 1;
+                        r0 = r0 + 1;
+                    }
+                }
+            }
+            var xs = g_tmp + 70000;
+            var ys = xs + 70000 * 8;
+            var xi = 0;
+            while (xi < np) {
+                var fx = load8(g_tmp + xi);
+                var dxv = 0;
+                if ((fx & 2) != 0) {
+                    dxv = load8(s + q);
+                    q = q + 1;
+                    if ((fx & 16) == 0) { dxv = 0 - dxv; }
+                } elif ((fx & 16) == 0) {
+                    dxv = rekha_rd_i16(s, q);
+                    q = q + 2;
+                }
+                store64(xs + xi * 8, dxv);
+                xi = xi + 1;
+            }
+            var yi = 0;
+            while (yi < np) {
+                var fy = load8(g_tmp + yi);
+                var dyv = 0;
+                if ((fy & 4) != 0) {
+                    dyv = load8(s + q);
+                    q = q + 1;
+                    if ((fy & 32) == 0) { dyv = 0 - dyv; }
+                } elif ((fy & 32) == 0) {
+                    dyv = rekha_rd_i16(s, q);
+                    q = q + 2;
+                }
+                store64(ys + yi * 8, dyv);
+                yi = yi + 1;
+            }
+            var cx = 0;
+            var cy = 0;
+            var x0 = 0;
+            var y0 = 0;
+            var x1 = 0;
+            var y1 = 0;
+            var k = 0;
+            while (k < np) {
+                var ddx = load64(xs + k * 8);
+                var ddy = load64(ys + k * 8);
+                var oc = 0;
+                if ((load8(g_tmp + k) & 1) == 0) { oc = 1; }
+                store8(g_sfl + g_fl_at, 0);
+                g_gl_at = g_gl_at + tri_encode(ddx, ddy, oc, g_sfl + g_fl_at, g_sgl + g_gl_at);
+                g_fl_at = g_fl_at + 1;
+                cx = cx + ddx;
+                cy = cy + ddy;
+                if (k == 0) {
+                    x0 = cx;
+                    x1 = cx;
+                    y0 = cy;
+                    y1 = cy;
+                }
+                if (cx < x0) { x0 = cx; }
+                if (cx > x1) { x1 = cx; }
+                if (cy < y0) { y0 = cy; }
+                if (cy > y1) { y1 = cy; }
+                k = k + 1;
+            }
+            g_gl_at = put255(g_sgl, g_gl_at, ilen);
+            if (rekha_rd_i16(s, a + 2) != x0 || rekha_rd_i16(s, a + 4) != y0 ||
+              rekha_rd_i16(s, a + 6) != x1 || rekha_rd_i16(s, a + 8) != y1) {
+                setbit(g_sbm, gid);
+                memcpy(g_sbb + g_bb_at, s + a + 2, 8);
+                g_bb_at = g_bb_at + 8;
+            }
+        }
+        if (b > a && nc < 0) {
+            setbit(g_sbm, gid);
+            memcpy(g_sbb + g_bb_at, s + a + 2, 8);
+            g_bb_at = g_bb_at + 8;
+            var cq = a + 10;
+            var more = 1;
+            var wants = 0;
+            while (more != 0) {
+                var cf = rekha_rd_u16(s, cq);
+                cq = cq + 2;
+                var argb = 2;
+                if ((cf & 1) != 0) { argb = 4; }
+                var trb = 0;
+                if ((cf & 8) != 0) { trb = 2; }
+                if ((cf & 64) != 0) { trb = 4; }
+                if ((cf & 128) != 0) { trb = 8; }
+                cq = cq + 2 + argb + trb;
+                if ((cf & 256) != 0) { wants = 1; }
+                more = cf & 32;
+            }
+            memcpy(g_scm + g_cm_at, s + a + 10, cq - (a + 10));
+            g_cm_at = g_cm_at + cq - (a + 10);
+            if (wants != 0) {
+                var cil = rekha_rd_u16(s, cq);
+                cq = cq + 2;
+                g_gl_at = put255(g_sgl, g_gl_at, cil);
+                memcpy(g_sin + g_in_at, s + cq, cil);
+                g_in_at = g_in_at + cil;
+            }
+        }
+        gid = gid + 1;
+    }
+    rekha_wr_u16(g_gx, 0, 0);
+    rekha_wr_u16(g_gx, 2, 0);
+    rekha_wr_u16(g_gx, 4, ng);
+    rekha_wr_u16(g_gx, 6, ifmt);
+    rekha_wr_u32(g_gx, 8, g_nc_at);
+    rekha_wr_u32(g_gx, 12, g_np_at);
+    rekha_wr_u32(g_gx, 16, g_fl_at);
+    rekha_wr_u32(g_gx, 20, g_gl_at);
+    rekha_wr_u32(g_gx, 24, g_cm_at);
+    rekha_wr_u32(g_gx, 28, bmpn + g_bb_at);
+    rekha_wr_u32(g_gx, 32, g_in_at);
+    var w = REKHA_W2_GLYFHDR;
+    memcpy(g_gx + w, g_snc, g_nc_at);   w = w + g_nc_at;
+    memcpy(g_gx + w, g_snp, g_np_at);   w = w + g_np_at;
+    memcpy(g_gx + w, g_sfl, g_fl_at);   w = w + g_fl_at;
+    memcpy(g_gx + w, g_sgl, g_gl_at);   w = w + g_gl_at;
+    memcpy(g_gx + w, g_scm, g_cm_at);   w = w + g_cm_at;
+    memcpy(g_gx + w, g_sbm, bmpn);      w = w + bmpn;
+    memcpy(g_gx + w, g_sbb, g_bb_at);   w = w + g_bb_at;
+    memcpy(g_gx + w, g_sin, g_in_at);   w = w + g_in_at;
+    return w;
+}
+
+fn face_table(s, tag, want_len): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var i = 0;
+    while (i < n) {
+        var d = 12 + i * 16;
+        if (rekha_rd_u32(s, d) == tag) {
+            if (want_len != 0) { return rekha_rd_u32(s, d + 12); }
+            return rekha_rd_u32(s, d + 8);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# glyf / loca transformed, and hmtx too — every left side bearing first made its glyph's xMin, which
+# is what the hmtx transform requires (programs/woff2_test.cyr, hmtx_align)
+fn w2_build_xform(s, out, desc): i64 {
+    var n = rekha_rd_u16(s, 4);
+    var glyf_off = face_table(s, MT_TAG_GLYF, 0);
+    var loca_off = face_table(s, MT_TAG_LOCA, 0);
+    var head_off = face_table(s, MT_TAG_HEAD, 0);
+    var maxp_off = face_table(s, MT_TAG_MAXP, 0);
+    var hhea_off = face_table(s, MT_TAG_HHEA, 0);
+    var hmtx_off = face_table(s, MT_TAG_HMTX, 0);
+    var ng = rekha_rd_u16(s, maxp_off + 4);
+    var ifmt = rekha_rd_u16(s, head_off + 50);
+    var nhm = rekha_rd_u16(s, hhea_off + 34);
+    var i = 0;
+    while (i < ng) {
+        var a = loca_at(s, loca_off, ifmt, i);
+        var b = loca_at(s, loca_off, ifmt, i + 1);
+        var xmin = 0;
+        if (b > a) { xmin = rekha_rd_i16(s, glyf_off + a + 2); }
+        rekha_wr_u16(s, hmtx_off + i * 4 + 2, xmin);
+        i = i + 1;
+    }
+    var gxlen = glyf_transform(s, ng, ifmt, glyf_off, loca_off);
+    store8(g_hx, 3);
+    i = 0;
+    while (i < nhm) {
+        rekha_wr_u16(g_hx, 1 + i * 2, rekha_rd_u16(s, hmtx_off + i * 4));
+        i = i + 1;
+    }
+    var hxlen = 1 + nhm * 2;
+    var blk = 0;
+    var total = 12 + n * 16;
+    i = 0;
+    while (i < n) {
+        var e = 12 + i * 16;
+        var tag = rekha_rd_u32(s, e);
+        var off = rekha_rd_u32(s, e + 8);
+        var olen = rekha_rd_u32(s, e + 12);
+        var xf = 0;
+        var dlen = olen;
+        var src = s + off;
+        if (tag == MT_TAG_GLYF) {
+            dlen = gxlen;
+            src = g_gx;
+        }
+        if (tag == MT_TAG_LOCA) { dlen = 0; }
+        if (tag == MT_TAG_HMTX) {
+            xf = 1;
+            dlen = hxlen;
+            src = g_hx;
+        }
+        var d = desc + i * 32;
+        store64(d, tag);
+        store64(d + 8, xf);
+        store64(d + 16, olen);
+        store64(d + 24, dlen);
+        if (dlen > 0) { memcpy(g_blk + blk, src, dlen); }
+        blk = blk + dlen;
+        total = total + rekha_pad4(olen);
+        i = i + 1;
+    }
+    return w2_assemble(s, out, n, desc, blk, total);
+}
+
+# ================================================================
+# The sweep: open as the seed's container, warm every lazy per-face block below the pool's base,
+# then the harness's whole-font sweep, the readers it does not reach, and — for a variable seed —
+# the glyphs and metrics again at the axes' minimum and maximum.
+# ================================================================
+var MT_SFNT = 0;
+var MT_WOFF = 1;
+var MT_WOFF2 = 2;
+
+fn mt_open(kind, buf, len): i64 {
+    if (kind == MT_WOFF) { return rekha_font_open_woff(buf, len); }
+    if (kind == MT_WOFF2) { return rekha_font_open_woff2(buf, len); }
+    return rekha_font_open(buf, len);
+}
+
+var g_nb = 0;                          # a name-decode buffer, global so it is not in the pool
+
+fn mt_extras(f): i64 {
+    var l = 0 - 1;
+    while (l < 5) {
+        var r = 0 - 1;
+        while (r < 5) {
+            hb_fold(rekha_kern_pair(f, l, r));
+            hb_fold(rekha_kern_pair_px(f, l, r, 16));
+            r = r + 1;
+        }
+        l = l + 1;
+    }
+    hb_fold(rekha_kern_source(f));
+    hb_fold(rekha_char_kern(f, 65, 66));
+    var nn = rekha_name_count(f);
+    hb_fold(nn);
+    var i = 0;
+    while (i < nn && i < 8) {
+        hb_fold(rekha_name_id_at(f, i));
+        hb_fold(rekha_name_platform_at(f, i));
+        var nb = rekha_name_at_utf8(f, i, g_nb, 64);
+        hb_fold(nb);
+        var k = 0;
+        while (k < nb && k < 64) {
+            hb_fold(load8(g_nb + k));
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    hb_fold(rekha_name_utf8(f, 4, g_nb, 64));
+    hb_fold(rekha_post_version(f));
+    hb_fold(rekha_underline_position(f));
+    hb_fold(rekha_underline_thickness(f));
+    hb_fold(rekha_os2_version(f));
+    hb_fold(rekha_typo_ascender(f));
+    hb_fold(rekha_win_descent(f));
+    hb_fold(rekha_x_height(f));
+    hb_fold(rekha_cap_height(f));
+    hb_fold(rekha_strikeout_position(f));
+    hb_fold(rekha_var_axis_count(f));
+    hb_fold(rekha_var_instance_count(f));
+    i = 0;
+    while (i < 3) {
+        hb_fold(rekha_var_instance_coord(f, i, 0));
+        hb_fold(rekha_var_axis_max(f, i));
+        i = i + 1;
+    }
+    hb_fold(rekha_mvar_delta(f, 0x68617363));
+    hb_fold(rekha_mvar_delta(f, 0x78686774));
+    return 0;
+}
+
+# the glyphs and metrics of a variable face at the location now set
+fn mt_varied(f, hc): i64 {
+    hb_fold(rekha_var_coord(f, 0));
+    var hc2 = 0;
+    if (hc != 0) { hc2 = rekha_hint_ctx(f, 12); }          # cached: re-runs prep, allocates nothing
+    hb_fold(hc2 == hc);
+    var gid = 0 - 1;
+    while (gid < 42) {
+        hb_gid(f, hc2, gid);
+        hb_fold(rekha_hvar_advance_delta(f, gid));
+        gid = gid + 1;
+    }
+    hb_fold(rekha_x_height(f));
+    hb_fold(rekha_typo_ascender(f));
+    hb_fold(rekha_strikeout_position(f));
+    return 0;
+}
+
+fn mt_sweep(kind, buf, len): i64 {
+    g_h = 0xcbf29ce484222325;
+    var f = mt_open(kind, buf, len);
+    var hc = rekha_hint_ctx(f, 12);
+    var na = rekha_var_axis_count(f);
+    if (na > 0) { rekha_var_set_axis(f, 0, rekha_var_axis_default(f, 0)); }
+    rekha_kern_pair(f, 1, 2);
+    g_pool_base = g_pool_bump;
+    hb_sweep_font(f, hc, 64, 128, 211);
+    mt_extras(f);
+    if (na > 0) {
+        var a = 0;
+        while (a < na) {
+            rekha_var_set_axis(f, a, rekha_var_axis_max(f, a));
+            a = a + 1;
+        }
+        mt_varied(f, hc);
+        a = 0;
+        while (a < na) {
+            rekha_var_set_axis(f, a, rekha_var_axis_min(f, a));
+            a = a + 1;
+        }
+        mt_varied(f, hc);
+        hb_fold(rekha_var_set_instance(f, 1));
+        mt_varied(f, hc);
+        hb_fold(rekha_var_reset(f));
+    }
+    return g_h;
+}
+
+fn mt_diff(kind, len): i64 {
+    var buf = g_fbuf + HB_GUARD;
+    hb_sentinel(0);
+    hb_guards(len);
+    if (kind == MT_SFNT) { mt_gaps(buf, len, 0xA5); }
+    hb_stats_reset();
+    g_diff_a = mt_sweep(kind, buf, len);
+    hb_sentinel(1);
+    hb_guards(len);
+    if (kind == MT_SFNT) { mt_gaps(buf, len, 0x5A); }
+    hb_stats_reset();
+    g_diff_b = mt_sweep(kind, buf, len);
+    if (g_diff_a == g_diff_b) { return 1; }
+    return 0;
+}
+
+# A digest of what the seed draws, from the global allocator: every glyph's points and its advance.
+# Two containers of one face digest equal; the mutation loop is never measured by it.
+fn mt_draws(kind, buf, len): i64 {
+    sd_alloc_set(0);
+    var f = mt_open(kind, buf, len);
+    var h = 0xcbf29ce484222325;
+    if (f != 0) {
+        var ng = rekha_glyph_count(f);
+        var gid = 0;
+        while (gid < ng) {
+            var o = rekha_load_glyph(f, gid);
+            var np = rekha_outline_n_points(o);
+            h = (h ^ np) * 0x100000001b3;
+            var i = 0;
+            while (i < np) {
+                h = (h ^ (load64(rekha_outline_xs(o) + i * 8) & 0xFFFFFFFF)) * 0x100000001b3;
+                h = (h ^ (load64(rekha_outline_ys(o) + i * 8) & 0xFFFFFFFF)) * 0x100000001b3;
+                i = i + 1;
+            }
+            h = (h ^ rekha_advance_width(f, gid)) * 0x100000001b3;
+            gid = gid + 1;
+        }
+    }
+    sd_alloc_set(&hb_hook);
+    hb_sentinel(g_which);
+    return h & 0x7FFFFFFFFFFF;
+}
+
+fn mt_fnv(p, n): i64 {
+    var h = 0xcbf29ce484222325;
+    var i = 0;
+    while (i < n) {
+        h = (h ^ load8(p + i)) * 0x100000001b3;
+        i = i + 1;
+    }
+    return h;
+}
+
+# ================================================================
+# The loop, per seed.
+# ================================================================
+var g_seed = 0;                        # the seed's bytes, kept pristine
+var MT_MUTANTS = 1000;
+
+# A mutant of the seed now in (g_mb, g_mlen): for an SFNT, a hot spot 40%, the directory 6%, a
+# table's first 32 bytes 20%, anywhere in a table 34%; for a container, its header and directory
+# 40%, anywhere 60%.
+fn mt_mutant(kind, seed): i64 {
+    hb_srand(seed);
+    var nm = 1 + hb_below(6);
+    var m = 0;
+    while (m < nm) {
+        var off = hb_below(g_mlen);
+        if (kind == MT_SFNT) {
+            var nt = rekha_rd_u16(g_seed, 4);
+            var r = hb_below(100);
+            var e = 12 + hb_below(nt) * 16;
+            var to = rekha_rd_u32(g_seed, e + 8);
+            var tl = rekha_rd_u32(g_seed, e + 12);
+            if (r < 40 && g_nhotf > 0) {
+                off = load64(g_hotf + hb_below(g_nhotf) * 8);
+            } elif (r < 46) {
+                off = 12 + hb_below(nt * 16);
+            } elif (r < 66) {
+                var hl = tl;
+                if (hl > 32) { hl = 32; }
+                off = to + hb_below(hl);
+            } else {
+                off = to + hb_below(tl);
+            }
+        } else {
+            var dl = 48 + rekha_rd_u16(g_seed, 12) * 20;
+            if (hb_below(100) < 40) { off = hb_below(dl); }
+        }
+        if (off >= 0 && off < g_mlen) { mu_at(off); }
+        m = m + 1;
+    }
+    return 0;
+}
+
+fn mt_loop(name, kind, len, min_open): i64 {
+    g_sec = name;
+    g_mb = g_fbuf + HB_GUARD;
+    g_mlen = len;
+    memcpy(g_mb, g_seed, len);
+    var want = mt_fnv(g_seed, len);
+    # the pristine seed first: it must pass the differential and decode cleanly itself
+    check(mt_diff(kind, len), 1);
+    memcpy(g_mb, g_seed, len);
+    check(hb_clean(), 1);
+    check(g_st_opened, 1);
+    check(g_st_decoded > 0, 1);
+    var diffs = 0;
+    var dirty = 0;
+    var opened = 0;
+    var decoded = 0;
+    var hinted = 0;
+    var poisoned = 0;
+    var seed = 1;
+    while (seed <= MT_MUTANTS) {
+        mt_mutant(kind, seed * 7919 + kind);
+        if (mt_diff(kind, len) == 0) {
+            diffs = diffs + 1;
+            hb_puts(2, "mutate_test: [");
+            hb_puts(2, name);
+            hb_puts(2, "] mutant ");
+            fmt_int_fd(2, seed);
+            hb_puts(2, " digest A != digest B (a read outside what rekha owns)\n");
+        }
+        if (hb_clean() == 0) {
+            dirty = dirty + 1;
+            hb_puts(2, "mutate_test: [");
+            hb_puts(2, name);
+            hb_puts(2, "] mutant ");
+            fmt_int_fd(2, seed);
+            hb_puts(2, " broke an outline guarantee, hit OOM or a work bound: viol ");
+            fmt_int_fd(2, g_st_viol);
+            hb_puts(2, " oom ");
+            fmt_int_fd(2, g_st_oom);
+            hb_puts(2, " over ");
+            fmt_int_fd(2, g_st_over);
+            hb_puts(2, " pool ");
+            fmt_int_fd(2, g_st_pool_max);
+            hb_puts(2, " verbs ");
+            fmt_int_fd(2, g_st_verbs_max);
+            hb_puts(2, "\n");
+        }
+        opened = opened + g_st_opened;
+        decoded = decoded + g_st_decoded;
+        hinted = hinted + g_st_hinted;
+        # and once more under poison: a WRITE past any block rekha allocated stops the run (exit 86)
+        if (kind == MT_SFNT) { mt_gaps(g_mb, len, 0); }
+        pz_begin();
+        mt_sweep(kind, g_mb, len);
+        poisoned = poisoned + pz_end();
+        memcpy(g_mb, g_seed, len);                     # the whole seed back: the gaps were written too
+        g_undo_n = 0;
+        seed = seed + 1;
+    }
+    check(diffs, 0);
+    check(dirty, 0);
+    check(poisoned, 0);
+    check(opened >= min_open, 1);                      # enough mutants still open: the sweep is real
+    check(decoded > 0, 1);
+    check(mt_fnv(g_mb, len), want);                    # the seed is what it was built as
+    check(mt_fnv(g_seed, len), want);
+    hb_puts(1, "mutate_test: ");
+    hb_puts(1, name);
+    hb_puts(1, " mutants ");
+    fmt_int_fd(1, MT_MUTANTS);
+    hb_puts(1, " bytes ");
+    fmt_int_fd(1, len);
+    hb_puts(1, " opened ");
+    fmt_int_fd(1, opened);
+    hb_puts(1, " decoded ");
+    fmt_int_fd(1, decoded);
+    hb_puts(1, " hinted ");
+    fmt_int_fd(1, hinted);
+    hb_puts(1, " A/B-diffs ");
+    fmt_int_fd(1, diffs);
+    hb_puts(1, "\n");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    g_prog = "mutate_test";
+    # ⚠ A CONTAINER DECLARES ITS OWN SIZE: a WOFF2 may ask for up to REKHA_WOFF2_MAXSIZE (64 MB) of
+    # inflated block and as much again of rebuilt file, and a mutant does. The pool holds both, so
+    # those blocks stay sentinel-covered rather than spilling to the global heap.
+    HB_POOL_CAP = 160 * 1048576;
+    g_pool = alloc(HB_POOL_CAP);
+    g_fbuf = alloc(HB_GUARD + HB_FCAP + HB_GUARD);
+    g_undo = alloc(HB_UNDO_CAP * 16);
+    g_tags = alloc(HB_NTAGS * 8);
+    store64(g_tags, MT_TAG_HEAD);
+    store64(g_tags + 8, MT_TAG_CFF);
+    store64(g_tags + 16, MT_TAG_CFF2);
+    store64(g_tags + 24, MT_TAG_GVAR);
+    store64(g_tags + 32, MT_TAG_HVAR);
+    store64(g_tags + 40, MT_TAG_GPOS);
+    store64(g_tags + 48, MT_TAG_GLYF);
+    store64(g_tags + 56, MT_TAG_FVAR);
+    store64(g_tags + 64, 0x7A7A7A7A);
+    g_sb = alloc(262144);
+    g_hot = alloc(4096 * 8);
+    g_hotf = alloc(4096 * 8);
+    HB_BLOCK_GAP = 64;
+    g_tt = alloc(32 * 24);
+    g_cs = alloc(4096);
+    g_px = alloc(64 * 8);
+    g_py = alloc(64 * 8);
+    g_pon = alloc(64 * 8);
+    g_pe = alloc(16 * 8);
+    g_fl = alloc(64);
+    g_ins = alloc(64);
+    g_nb = alloc(256);
+    g_seed = alloc(WCAP);
+    g_blk = alloc(WCAP);
+    g_tmp = alloc(WCAP * 2);
+    g_desc = alloc(64 * 32);
+    g_gx = alloc(WCAP);
+    g_hx = alloc(65536);
+    g_snc = alloc(65536);
+    g_snp = alloc(65536);
+    g_sfl = alloc(65536);
+    g_sgl = alloc(65536);
+    g_scm = alloc(65536);
+    g_sbb = alloc(65536);
+    g_sin = alloc(65536);
+    g_sbm = alloc(4096);
+    g_sov = alloc(4096);
+    var sf = alloc(WCAP);
+    pz_init();
+    sd_alloc_set(&hb_hook);
+    hb_sentinel(0);
+
+    # the three SFNT seeds, and four containers built from two of them. A container must draw exactly
+    # what its SFNT draws before it is mutated, or the loop would be mutating a broken seed. Each
+    # container comes STORED (a mutated byte reaches the table data, and for woff2x the transform
+    # decoder, intact) and COMPRESSED (the mutation lands in sankoch's stream: most mutants then
+    # refuse, which is the decoder's robustness under test, so fewer need to open).
+    var most = MT_MUTANTS / 4;
+    var some = MT_MUTANTS / 8;                         # a stored container: its own fields refuse too
+    g_sec = "seeds";
+    var lcff = seed_cff(g_seed);
+    var dcff = mt_draws(MT_SFNT, g_seed, lcff);
+    mt_loop("cff", MT_SFNT, lcff, most);
+    var l2 = seed_cff2(g_seed);
+    mt_loop("cff2", MT_SFNT, l2, most);
+    var ltt = seed_tt(sf);
+    var dtt = mt_draws(MT_SFNT, sf, ltt);
+    memcpy(g_seed, sf, ltt);
+    mt_loop("gvar", MT_SFNT, ltt, most);
+    var lw = woff_build(sf, g_seed, 0);
+    g_sec = "seeds";
+    check(mt_draws(MT_WOFF, g_seed, lw), dtt);
+    mt_loop("woff", MT_WOFF, lw, some);
+    lw = woff_build(sf, g_seed, 1);
+    g_sec = "seeds";
+    check(lw > 0 && lw < ltt, 1);                      # zlib really compressed it
+    check(mt_draws(MT_WOFF, g_seed, lw), dtt);
+    mt_loop("woffz", MT_WOFF, lw, 1);
+    g_brotli = 0;
+    var lw3 = w2_build_xform(sf, g_seed, g_desc);
+    g_sec = "seeds";
+    check(lw3 > 0, 1);
+    check(mt_draws(MT_WOFF2, g_seed, lw3), dtt);
+    mt_loop("woff2x", MT_WOFF2, lw3, some);
+    g_brotli = 1;
+    var lcff2 = seed_cff(sf);
+    var lw2 = w2_build_null(sf, g_seed, g_desc);
+    g_sec = "seeds";
+    check(lw2 > 0 && lw2 < lcff2, 1);                  # and Brotli it
+    check(mt_draws(MT_WOFF2, g_seed, lw2), dcff);
+    mt_loop("woff2z", MT_WOFF2, lw2, 1);
+    g_sec = "pool";
+    check(g_pool_over, 0);
+    sd_alloc_set(0);
+
+    hb_puts(1, "mutate_test: ");
+    fmt_int_fd(1, g_n);
+    hb_puts(1, " checks\n");
+    if (g_fails == 0) {
+        hb_puts(1, "mutate_test: PASS (cff, cff2, gvar, woff, woffz, woff2x, woff2z seeds; sentinel differential)\n");
+    } else {
+        hb_puts(2, "mutate_test: FAIL\n");
+    }
+    if (g_fails > 255) { return 255; }
+    return g_fails;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

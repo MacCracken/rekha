@@ -19,25 +19,24 @@
 # suites (dist_test, woff_dist_test) deliberately do NOT — they spell out the
 # leaves their sidecar names, so the file documents a real consumer chain.
 #
-# ⚠ WHERE THESE EIGHT COME FROM NOW, MEASURED (0.4.4). They are no longer in
-# rekha's `[deps] stdlib`, so whether `cyrius deps` vendors them into lib/ is
-# not up to rekha: through 1.0.0 it did, because sadish's own sidecar required
-# all nine. From 1.1.0 it does not — sadish 0.12.0's sidecar names syscalls,
-# alloc and string, so lib/ holds 17 files and fmt/vec/str/io/assert/bench
-# come from the toolchain snapshot. That does NOT matter here. An include resolves from vendored lib/
-# first and from the PINNED TOOLCHAIN SNAPSHOT (~/.cyrius/versions/6.6.4/lib)
-# otherwise — proven two ways: rekha's lib/ has never contained sync.cyr or
-# sankoch.cyr, yet programs/woff_test.cyr includes both and passes; and
-# resolving rekha against a sadish whose sidecar lists only string+alloc cuts
-# lib/ to 8 files, after which every suite here still builds and runs green.
-# A file that exists in NEITHER place is a hard build error ("cannot open
-# include file"), never a silent miss. So this prelude is self-sufficient.
+# ⚠ WHERE THESE EIGHT COME FROM (1.1.2). cyrius.cyml's [test] stdlib names
+# them (with sync + sankoch for the WOFF suites), so `cyrius deps` vendors
+# them into lib/ and cyrius.lock pins each by hash; cyrius keeps a [test]
+# leaf out of every build's scope and every dist sidecar. Through 1.1.1 they
+# were in no manifest: sadish 0.12.0's sidecar names syscalls, alloc and
+# string, so lib/ held 17 files and the rest resolved from the PINNED
+# TOOLCHAIN SNAPSHOT (an include resolves from vendored lib/ first, then the
+# snapshot). MEASURED moving them: lib/ 17 -> 36 files, every program's
+# binary byte-identical. A file that exists in NEITHER place is a hard build
+# error ("cannot open include file"), never a silent miss.
 #
 # ⛔ WHAT THIS FILE CANNOT DO. Inside rekha's tree cyrius AUTO-PREPENDS every
-# resolved leaf into scope, so a program compiles whether or not it includes
-# what it calls — measured: a program with zero includes calls alloc/strlen/
-# vec_new and builds clean. These include lines are therefore DOCUMENTATION,
-# not enforcement, and no include list in programs/ can gate the sidecar.
+# [deps] leaf into scope (rekha's `string`, sadish's syscalls / alloc), so a
+# program compiles whether or not it includes those — MEASURED (1.1.2, cyrius
+# 6.7.18): a program with zero includes calls alloc / strlen and builds clean,
+# while vec_new, a [test] leaf, is `undefined function`. Through 1.0.0, when
+# sadish's sidecar named all nine, vec_new built clean too. So no include
+# list in programs/ can gate the sidecar.
 # The sidecar's sufficiency is proven by distlib's own compile-verify pass,
 # which splices the bundle with exactly the leaves under test and _skip_deps
 # on; `cyrius distlib --check` runs it and CI gates it.

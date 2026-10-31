@@ -1,0 +1,725 @@
+# programs/hb_harness.cyr — the sentinel-differential harness hostile_test.cyr and mutate_test.cyr
+# share (1.1.2: split out of hostile_test so the mutation loop could reach the faces it did not).
+#
+# ⭐ WHAT IT IS, in full in hostile_test.cyr's header: every sd_alloc goes through hb_hook, a bump
+# pool whose unallocated bytes and trailing redzone hold a sentinel; every font sits in g_fbuf
+# between two HB_GUARD-byte sentinel guards; a sweep folds every public answer into an FNV-1a
+# digest, and a font swept under sentinel A (0xA5) and B (0x5A) must digest equal. A read of a
+# byte rekha does not own folds a value that differs between the two.
+#
+# ⚠ AN INCLUDE, NOT A PROGRAM: it has no main and needs programs/prelude.cyr first. The includer
+# allocates g_pool, g_fbuf and g_tags (HB_NTAGS slots) and installs sd_alloc_set(&hb_hook).
+
+var g_prog = "hostile_test";        # the includer's name, for its failure lines
+var g_fails = 0;
+var g_n = 0;
+var g_sec = "start";
+
+fn hb_puts(fd, s): i64 {
+    syscall(1, fd, s, strlen(s));
+    return 0;
+}
+
+fn check(got, want): i64 {
+    g_n = g_n + 1;
+    if (got == want) { return 0; }
+    g_fails = g_fails + 1;
+    hb_puts(2, g_prog);
+    hb_puts(2, ": check failed at #");
+    fmt_int_fd(2, g_n);
+    hb_puts(2, " [");
+    hb_puts(2, g_sec);
+    hb_puts(2, "] got ");
+    fmt_int_fd(2, got);
+    hb_puts(2, " want ");
+    fmt_int_fd(2, want);
+    hb_puts(2, "\n");
+    return 1;
+}
+
+fn put_u16(buf, off, v): i64 {
+    store8(buf + off, (v >> 8) & 255);
+    store8(buf + off + 1, v & 255);
+    return 0;
+}
+
+fn put_u32(buf, off, v): i64 {
+    put_u16(buf, off, (v >> 16) & 65535);
+    put_u16(buf, off + 2, v & 65535);
+    return 0;
+}
+
+fn dir_entry(buf, ent, tag, off, tlen): i64 {
+    put_u32(buf, ent, tag);
+    put_u32(buf, ent + 8, off);
+    put_u32(buf, ent + 12, tlen);
+    return 0;
+}
+
+# ================================================================
+# Work bounds, derived from glyf.cyr's caps (never read from the font).
+#
+# HB_LOAD_POOL_MAX — bytes ONE rekha_load_glyph may take from the hook. Points decoded across the
+#   load are capped at REKHA_GLYPH_MAXPOINTS_TOTAL (16,384), every block is 17 B per point plus 8 B
+#   per contour (contours <= points, since endPts strictly increase), and each of the <= 64 loads
+#   adds at most a 48 B record + 7 B alignment + component-pointer slots (<= 2 x 64 x 8 overall) +
+#   the <= 6 x 48 B empty records an abort cascades through: 16384 x 25 + 64 x 55 + 1024 + 288
+#   = 414,432 B, stated as 420,000.
+# HB_VERBS_MAX — verbs of one converted outline. One outline holds <= 4,096 points and a contour of
+#   n points emits <= n + 3 verbs (moveto, n segments, a closing quad, close): <= 4 x 4096 = 16,384.
+# HB_PATH_POOL_MAX — sadish bytes for that path: <= 20,480 points (2n + 3 per contour) x 16 B, plus
+#   verb/point arrays doubling from 256 to 32,768 slots (2 x 8 x 65,024 B) and the 48 B record +
+#   the first 4,096 B: 1,372,208 B, stated as 1,400,000.
+# HB_GLYPH_POOL_MAX — one gid's whole turn: the load and its path (1,820,000), plus the HINTED path
+#   (v0.8.2): rekha_hint_glyph allocates nothing (zone 1 is the outline; the context was allocated
+#   before the pool's base was set), and rekha_hint_to_sdpath sizes its path exactly, so the hinted
+#   path of a <= 4,096-point zone is under HB_PATH_POOL_MAX again: 3,220,000.
+# ================================================================
+var HB_LOAD_POOL_MAX = 420000;
+var HB_PATH_POOL_MAX = 1400000;
+var HB_GLYPH_POOL_MAX = 3220000;
+var HB_VERBS_MAX = 16384;
+
+var HB_SCALE = 4096;                  # 16.16: 1/16 px per design unit
+var HB_OX = 196608;                   # 3 px
+var HB_OY = 13107200;                 # 200 px
+
+# ================================================================
+# The sentinel pool — the hook every sd_alloc goes through.
+#   [0, base)        the RekhaFont record of the current sweep (kept across per-glyph resets)
+#   [base, bump)     blocks handed out since the last reset
+#   [bump, touched)  ⭐ INVARIANT: holds the current sentinel, byte for byte
+# The hook fills [touched, bump + HB_REDZONE) lazily, so a block is sentinel until its owner writes
+# it and HB_REDZONE bytes past the newest block are sentinel too. A per-glyph reset refills
+# [base, bump); a sentinel switch sets touched = 0, so every byte handed out afterwards is filled
+# with the new sentinel first. A request that would not fit is served from `alloc` and counted
+# (g_st_over per sweep, asserted 0 by hb_clean; g_pool_over for the run, asserted 0 at the end).
+# ================================================================
+var HB_POOL_CAP = 8388608;
+var HB_REDZONE = 4096;
+var HB_GUARD = 256;
+var HB_FCAP = 420000;                 # font capacity of the guarded buffer (the face is 410,820 B)
+
+var g_pool = 0;
+var g_pool_base = 0;
+var g_pool_bump = 0;
+var g_pool_touched = 0;
+var g_pool_over = 0;                  # whole run
+var g_st_over = 0;                    # current sweep
+var g_pool_blocks = 0;
+var g_pool_refuse_at = 0 - 1;         # -1 = never; K = refuse every block from the K-th on
+var g_sent = 0;
+var g_which = 0;
+var g_fbuf = 0;                       # [guard][font, len][guard]
+
+fn hb_fill(p, n, pat): i64 {
+    var i = 0;
+    while (i + 8 <= n) {
+        store64(p + i, pat);
+        i = i + 8;
+    }
+    while (i < n) {
+        store8(p + i, pat & 255);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# HB_BLOCK_GAP sentinel bytes left after every block, when an includer sets it (mutate_test does;
+# hostile_test pins exact pool costs and leaves it 0): a read past a block's end then lands on the
+# sentinel instead of in the next block, which the differential can see.
+var HB_BLOCK_GAP = 0;
+
+fn hb_hook(n): i64 {
+    if (g_pool_refuse_at >= 0) {
+        if (g_pool_blocks >= g_pool_refuse_at) { return 0; }
+    }
+    g_pool_blocks = g_pool_blocks + 1;
+    var sz = ((n + 7) & (0 - 8)) + HB_BLOCK_GAP;
+    if (sz <= 0) { sz = 8; }
+    if (g_pool_bump + sz + HB_REDZONE > HB_POOL_CAP) {
+        g_pool_over = g_pool_over + 1;
+        g_st_over = g_st_over + 1;
+        return alloc(sz);
+    }
+    var p = g_pool + g_pool_bump;
+    g_pool_bump = g_pool_bump + sz;
+    var want = g_pool_bump + HB_REDZONE;
+    if (want > g_pool_touched) {
+        hb_fill(g_pool + g_pool_touched, want - g_pool_touched, g_sent);
+        g_pool_touched = want;
+    }
+    return p;
+}
+
+# Per-glyph reset: give back [base, bump), restoring the sentinel over it.
+fn hb_reset(): i64 {
+    hb_fill(g_pool + g_pool_base, g_pool_bump - g_pool_base, g_sent);
+    g_pool_bump = g_pool_base;
+    g_pool_blocks = 0;
+    return 0;
+}
+
+# Switch the whole harness to sentinel A (0) or B (1) and empty the pool.
+fn hb_sentinel(which): i64 {
+    g_which = which;
+    g_sent = 0xA5A5A5A5A5A5A5A5;
+    if (which != 0) { g_sent = 0x5A5A5A5A5A5A5A5A; }
+    g_pool_base = 0;
+    g_pool_bump = 0;
+    g_pool_touched = 0;
+    g_pool_blocks = 0;
+    return 0;
+}
+
+fn hb_guards(len): i64 {
+    hb_fill(g_fbuf, HB_GUARD, g_sent);
+    hb_fill(g_fbuf + HB_GUARD + len, HB_GUARD, g_sent);
+    return 0;
+}
+
+# ================================================================
+# Digest — FNV-1a (64-bit offset basis and prime), folded one 32-bit limb at a time.
+# ================================================================
+var g_h = 0;
+
+fn hb_fold(v): i64 {
+    g_h = (g_h ^ (v & 0xFFFFFFFF)) * 1099511628211;
+    g_h = (g_h ^ ((v >> 32) & 0xFFFFFFFF)) * 1099511628211;
+    return 0;
+}
+
+# Per-sweep statistics (reset by hb_stats_reset; identical under A and B when the digests match).
+var g_st_opened = 0;
+var g_st_decoded = 0;
+var g_st_points = 0;
+var g_st_verbs = 0;
+var g_st_oom = 0;
+var g_st_viol = 0;
+var g_st_pool_max = 0;
+var g_st_verbs_max = 0;
+var g_st_comp = 0;
+var g_st_comp_multi = 0;
+var g_st_hinted = 0;                  # gids rekha_hint_glyph answered 1 for
+
+fn hb_stats_reset(): i64 {
+    g_st_hinted = 0;
+    g_st_opened = 0;
+    g_st_decoded = 0;
+    g_st_points = 0;
+    g_st_verbs = 0;
+    g_st_oom = 0;
+    g_st_viol = 0;
+    g_st_pool_max = 0;
+    g_st_verbs_max = 0;
+    g_st_comp = 0;
+    g_st_comp_multi = 0;
+    g_st_over = 0;
+    return 0;
+}
+
+# Fold an outline and count every broken loader guarantee (glyf.cyr "WHAT THE LOADERS GUARANTEE"):
+# empty means all-zero counts; otherwise endPts strictly increase, all < n_points, the last is
+# n_points - 1, n_points <= REKHA_COMPOSITE_MAXP and on_curve is 0/1. Returns n_contours.
+fn hb_outline(o): i64 {
+    if (o == 0) {
+        hb_fold(0 - 7);
+        return 0;
+    }
+    var nc = rekha_outline_n_contours(o);
+    var np = rekha_outline_n_points(o);
+    hb_fold(nc);
+    hb_fold(np);
+    if (nc == 0) {
+        if (np != 0) { g_st_viol = g_st_viol + 1; }
+        return 0;
+    }
+    if (nc < 0) {
+        g_st_viol = g_st_viol + 1;
+        return 0;
+    }
+    if (np < nc) {
+        g_st_viol = g_st_viol + 1;
+        return 0;
+    }
+    if (np > REKHA_COMPOSITE_MAXP) {
+        g_st_viol = g_st_viol + 1;
+        return 0;
+    }
+    var eps = rekha_outline_end_pts(o);
+    var xs = rekha_outline_xs(o);
+    var ys = rekha_outline_ys(o);
+    var oc = rekha_outline_on_curve(o);
+    var prev = 0 - 1;
+    var i = 0;
+    while (i < nc) {
+        var e = load64(eps + i * 8);
+        hb_fold(e);
+        if (e <= prev) { g_st_viol = g_st_viol + 1; }
+        if (e >= np) { g_st_viol = g_st_viol + 1; }
+        prev = e;
+        i = i + 1;
+    }
+    if (prev != np - 1) { g_st_viol = g_st_viol + 1; }
+    # hb_fold inlined over a local (the same fold sequence): this loop is the sweep's hottest.
+    var h = g_h;
+    var j = 0;
+    while (j < np) {
+        var x = load64(xs + j * 8);
+        h = (h ^ (x & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((x >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        var y = load64(ys + j * 8);
+        h = (h ^ (y & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((y >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        var b = load8(oc + j);
+        h = (h ^ b) * 1099511628211;
+        h = h * 1099511628211;
+        if (b > 2) { g_st_viol = g_st_viol + 1; }     # 0 / 1, and 2 for a CFF cubic control
+        j = j + 1;
+    }
+    g_h = h;
+    return nc;
+}
+
+# Fold a path: counts, every verb tag, every point's 16.16 coordinates. Returns the verb count.
+fn hb_path(p): i64 {
+    if (p == 0) {
+        hb_fold(0 - 9);
+        g_st_oom = g_st_oom + 1;
+        return 0;
+    }
+    var nv = sd_path_verb_count(p);
+    var npt = sd_path_point_count(p);
+    hb_fold(nv);
+    hb_fold(npt);
+    # hb_fold inlined over a local, as in hb_outline. Verb tags are 0..4: their high limb is 0.
+    var h = g_h;
+    var i = 0;
+    while (i < nv) {
+        var vb = sd_path_verb_at(p, i);
+        h = (h ^ (vb & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((vb >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < npt) {
+        var px = sd_path_point_x(p, i);
+        h = (h ^ (px & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((px >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        var py = sd_path_point_y(p, i);
+        h = (h ^ (py & 0xFFFFFFFF)) * 1099511628211;
+        h = (h ^ ((py >> 32) & 0xFFFFFFFF)) * 1099511628211;
+        i = i + 1;
+    }
+    g_h = h;
+    g_st_verbs = g_st_verbs + nv;
+    if (nv > g_st_verbs_max) { g_st_verbs_max = nv; }
+    return nv;
+}
+
+fn hb_odigest(o): i64 {
+    g_h = 0xcbf29ce484222325;
+    hb_outline(o);
+    return g_h;
+}
+
+# ================================================================
+# The sweep — every public entry point, folded into g_h.
+# ================================================================
+var g_tags = 0;
+var HB_NTAGS = 9;
+
+# The hinted turn of one gid (v0.8.2): rekha_hint_glyph's answer, the code, the loaded gid, then —
+# when a view exists — the view through hb_outline (its counts, ends, points and on-curve bytes,
+# held to the loader's guarantees), the advance and the hinted path. A refused load answers 0 and
+# no view; a font with no context (no hinting tables, or a maxp that trips a cap) folds a marker.
+fn hb_hint(hc, gid): i64 {
+    if (hc == 0) {
+        hb_fold(0 - 11);
+        return 0;
+    }
+    var r = rekha_hint_glyph(hc, gid);
+    hb_fold(r);
+    hb_fold(rekha_hint_error(hc));
+    hb_fold(rekha_hint_gid(hc));
+    var o = rekha_hint_outline(hc);
+    if (o == 0) {
+        hb_fold(0 - 13);
+        return r;
+    }
+    hb_outline(o);
+    hb_fold(rekha_hint_advance_px(hc));
+    hb_path(rekha_hint_to_sdpath(hc, HB_OX, HB_OY));
+    if (r == 1) { g_st_hinted = g_st_hinted + 1; }
+    return r;
+}
+
+fn hb_gid(f, hc, gid): i64 {
+    hb_fold(rekha_advance_width(f, gid));
+    hb_fold(rekha_left_side_bearing(f, gid));
+    hb_fold(rekha_glyph_advance_px(f, gid, 16));
+    hb_fold(rekha_glyph_advance_fx(f, gid, 37));
+    var sp: i64[2];
+    var has = rekha_glyf_span(f, gid, &sp);
+    hb_fold(has);
+    hb_fold(load64(&sp));
+    hb_fold(load64(&sp + 8));
+    hb_reset();
+    var o = rekha_load_glyph(f, gid);
+    if (o == 0) { g_st_oom = g_st_oom + 1; }
+    var nc = hb_outline(o);
+    hb_path(rekha_outline_to_sdpath(o, HB_SCALE, HB_OX, HB_OY));
+    hb_hint(hc, gid);
+    var used = g_pool_bump - g_pool_base;
+    if (used > g_st_pool_max) { g_st_pool_max = used; }
+    if (nc > 0) {
+        g_st_decoded = g_st_decoded + 1;
+        g_st_points = g_st_points + rekha_outline_n_points(o);
+    }
+    if (has == 1) {
+        if (load64(&sp + 8) >= 10) {
+            if (rekha_rd_i16(rekha_font_data(f), load64(&sp)) < 0) {
+                g_st_comp = g_st_comp + 1;
+                if (nc > 1) { g_st_comp_multi = g_st_comp_multi + 1; }
+            }
+        }
+    }
+    return 0;
+}
+
+fn hb_cp(f, cp): i64 {
+    hb_fold(rekha_char_to_glyph(f, cp));
+    hb_fold(rekha_char_advance(f, cp));
+    hb_fold(rekha_char_advance_px(f, cp, 16));
+    hb_fold(rekha_char_advance_fx(f, cp, 37));
+    return 0;
+}
+
+fn hb_cpath(f, cp): i64 {
+    hb_reset();
+    hb_path(rekha_char_to_sdpath(f, cp, HB_SCALE, 0, HB_OY));
+    var used = g_pool_bump - g_pool_base;
+    if (used > g_st_pool_max) { g_st_pool_max = used; }
+    return 0;
+}
+
+# Sweep the font at (buf, len): gids -2 .. min(max(numGlyphs, 8) + 2, gid_cap), codepoints every
+# one below cp_dense and every cp_step-th above it, the BMP / non-BMP edges, four char -> path runs.
+fn hb_sweep(buf, len, gid_cap, cp_dense, cp_step): i64 {
+    g_h = 0xcbf29ce484222325;
+    var f = rekha_font_open(buf, len);
+    # ⚠ The hinting context is a lazy allocation cached on the handle, so like the record it must
+    # live BELOW the pool's base — a per-glyph reset would otherwise hand its bytes back and refill
+    # them with the sentinel under the next glyph. Warm it here, once, exactly as a consumer must
+    # warm it outside its per-frame arena; fpgm and prep run over whatever the tables hold.
+    var hc = rekha_hint_ctx(f, 12);
+    g_pool_base = g_pool_bump;
+    hb_sweep_font(f, hc, gid_cap, cp_dense, cp_step);
+    return g_h;
+}
+
+# The sweep of an OPEN handle `f` (and its context `hc`, or 0), folding into g_h, which the caller
+# seeded. Everything a consumer may ask for that has to stay inside the font; the caller has
+# already put every lazy allocation (the context, the axes, the GPOS cache) below the pool's base.
+fn hb_sweep_font(f, hc, gid_cap, cp_dense, cp_step): i64 {
+    hb_fold(f != 0);
+    if (f != 0) { g_st_opened = g_st_opened + 1; }
+    hb_fold(hc != 0);
+    if (hc != 0) {
+        hb_fold(rekha_hint_error(hc));
+        hb_fold(rekha_hint_bytes(hc));
+        hb_fold(rekha_hint_ppem(hc));
+    }
+    var cell: i64[1];
+    var t = 0;
+    while (t < HB_NTAGS) {
+        var tag = load64(g_tags + t * 8);
+        hb_fold(rekha_find_table(f, tag));
+        hb_fold(rekha_find_table_len(f, tag, &cell));
+        hb_fold(load64(&cell));
+        t = t + 1;
+    }
+    hb_fold(rekha_units_per_em(f));
+    hb_fold(rekha_loca_format(f));
+    var ng = rekha_glyph_count(f);
+    hb_fold(ng);
+    hb_fold(rekha_num_h_metrics(f));
+    hb_fold(rekha_ascender(f));
+    hb_fold(rekha_descender(f));
+    hb_fold(rekha_line_gap(f));
+    var lim = ng;
+    if (lim < 8) { lim = 8; }
+    lim = lim + 2;
+    if (lim > gid_cap) { lim = gid_cap; }
+    var gid = 0 - 2;
+    while (gid < lim) {
+        hb_gid(f, hc, gid);
+        gid = gid + 1;
+    }
+    hb_hint(hc, 65535);
+    hb_hint(hc, 70000);
+    hb_fold(rekha_advance_width(f, 65535));
+    hb_fold(rekha_advance_width(f, 70000));
+    hb_fold(rekha_glyph_advance_fx(f, 70000, 12));
+    var sp: i64[2];
+    hb_fold(rekha_glyf_span(f, 65535, &sp));
+    var cp = 0;
+    while (cp < 65536) {
+        hb_cp(f, cp);
+        if (cp < cp_dense) {
+            cp = cp + 1;
+        } else {
+            cp = cp + cp_step;
+        }
+    }
+    hb_cp(f, 0 - 1);
+    hb_cp(f, 65534);
+    hb_cp(f, 65535);
+    hb_cp(f, 65536);
+    # the supplementary planes a format 12 / 13 table reaches (0.4.0): a prime stride + both edges
+    cp = 65537;
+    while (cp < 0x10FFFF) {
+        hb_cp(f, cp);
+        cp = cp + 4093;
+    }
+    hb_cp(f, 0x1F600);
+    hb_cp(f, 0x10FFFF);
+    hb_cp(f, 0x110000);
+    hb_cpath(f, 65);
+    hb_cpath(f, 66);
+    hb_cpath(f, 37);
+    hb_cpath(f, 233);
+    return 0;
+}
+
+var g_diff_a = 0;
+var g_diff_b = 0;
+
+# The differential over the font at g_fbuf + HB_GUARD: 1 when digest(A) == digest(B). The stats
+# left behind are sentinel B's.
+fn hb_diff(len, gid_cap, cp_dense, cp_step): i64 {
+    var buf = g_fbuf + HB_GUARD;
+    hb_sentinel(0);
+    hb_guards(len);
+    hb_stats_reset();
+    g_diff_a = hb_sweep(buf, len, gid_cap, cp_dense, cp_step);
+    hb_sentinel(1);
+    hb_guards(len);
+    hb_stats_reset();
+    g_diff_b = hb_sweep(buf, len, gid_cap, cp_dense, cp_step);
+    if (g_diff_a == g_diff_b) { return 1; }
+    return 0;
+}
+
+# 1 when the last sweep broke no loader guarantee, never saw a 0 outline/path (OOM), never spilled
+# out of the pool and stayed inside the stated bounds.
+fn hb_clean(): i64 {
+    if (g_st_viol != 0) { return 0; }
+    if (g_st_oom != 0) { return 0; }
+    if (g_st_over != 0) { return 0; }
+    if (g_st_pool_max > HB_GLYPH_POOL_MAX) { return 0; }
+    if (g_st_verbs_max > HB_VERBS_MAX) { return 0; }
+    return 1;
+}
+
+# Open the font now in the guarded buffer for targeted checks: the record comes from the global
+# allocator so the pool can be reset freely; the pool restarts on the current sentinel.
+fn hb_font(len): i64 {
+    sd_alloc_set(0);
+    var f = rekha_font_open(g_fbuf + HB_GUARD, len);
+    sd_alloc_set(&hb_hook);
+    hb_sentinel(g_which);
+    return f;
+}
+
+# Install a built font in the guarded buffer, run the differential + cleanliness checks (2 checks)
+# and return a handle for targeted assertions.
+fn hb_corpus(src, len): i64 {
+    memcpy(g_fbuf + HB_GUARD, src, len);
+    var same = hb_diff(len, 64, 384, 97);
+    if (same == 0) {
+        hb_puts(2, g_prog);
+        hb_puts(2, ": [");
+        hb_puts(2, g_sec);
+        hb_puts(2, "] corpus font: digest A != digest B (a read outside what rekha owns)\n");
+    }
+    check(same, 1);
+    var clean = hb_clean();
+    if (clean == 0) {
+        hb_puts(2, g_prog);
+        hb_puts(2, ": [");
+        hb_puts(2, g_sec);
+        hb_puts(2, "] corpus font: broken outline guarantees ");
+        fmt_int_fd(2, g_st_viol);
+        hb_puts(2, ", OOM ");
+        fmt_int_fd(2, g_st_oom);
+        hb_puts(2, ", pool spills ");
+        fmt_int_fd(2, g_st_over);
+        hb_puts(2, ", max pool/glyph ");
+        fmt_int_fd(2, g_st_pool_max);
+        hb_puts(2, ", max verbs/glyph ");
+        fmt_int_fd(2, g_st_verbs_max);
+        hb_puts(2, "\n");
+    }
+    check(clean, 1);
+    return hb_font(len);
+}
+
+# Load `gid` on a fresh pool; the outline lands in g_o. Returns the pool bytes the load took.
+var g_o = 0;
+
+fn hb_cost(f, gid): i64 {
+    hb_reset();
+    g_o = rekha_load_glyph(f, gid);
+    return g_pool_bump - g_pool_base;
+}
+
+# 1 when the font's last refusal detail is the cstring `s`.
+fn hb_detail_is(f, s): i64 {
+    var d = rekha_font_error_detail(f);
+    if (d == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        if (load8(d + i) != load8(s + i)) { return 0; }
+        i = i + 1;
+    }
+    return load8(d + i) == 0;
+}
+
+fn hb_verbs(o): i64 {
+    return sd_path_verb_count(rekha_outline_to_sdpath(o, HB_SCALE, HB_OX, HB_OY));
+}
+
+# ================================================================
+# POISON: the stdlib's redzoned allocator through the same seam (1.1.2). The sentinel pool sees a
+# READ of a byte rekha does not own; it cannot see a WRITE past a block, which lands in the next
+# block or the frontier and is overwritten by the next fill. lib/poison.cyr arms 32-byte leading
+# and trailing redzones around every block and checks them all on poison_sweep(): a mutant swept a
+# third time under pz_hook, then swept for redzones, catches the write. Trap mode is on, so a
+# detection reports and stops the run with exit 86. The blocks come from a growable arena that
+# reset_via empties after each mutant, so the run does not grow with the loop.
+# ================================================================
+include "lib/poison.cyr"
+
+var g_pz = 0;
+
+fn pz_hook(n): i64 { return alloc_via(g_pz, n); }
+
+fn pz_init(): i64 {
+    g_pz = poison_allocator_over(arena_allocator_growable(16777216));
+    poison_trap_set(1);
+    return 0;
+}
+
+fn pz_begin(): i64 { return sd_alloc_set(&pz_hook); }
+
+# Back to the sentinel pool; returns the redzones found broken (0, or the run has already stopped).
+fn pz_end(): i64 {
+    sd_alloc_set(&hb_hook);
+    var bad = poison_sweep();
+    reset_via(g_pz);
+    return bad;
+}
+
+# ================================================================
+# Mutation primitives: a seeded LCG and undoable byte writes into (g_mb, g_mlen).
+# ================================================================
+var HB_UNDO_CAP = 256;
+
+var g_rng = 1;
+var g_mb = 0;
+var g_mlen = 0;
+var g_undo = 0;
+var g_undo_n = 0;
+
+fn hb_srand(s): i64 {
+    g_rng = s * 2862933555777941757 + 3037000493;
+    hb_rand();
+    hb_rand();
+    return 0;
+}
+
+fn hb_rand(): i64 {
+    g_rng = g_rng * 6364136223846793005 + 1442695040888963407;
+    return (g_rng >> 33) & 0x7FFFFFFF;
+}
+
+fn hb_below(n): i64 {
+    if (n <= 0) { return 0; }
+    return hb_rand() % n;
+}
+
+fn mu_set8(off, v): i64 {
+    if (off < 0) { return 0; }
+    if (off >= g_mlen) { return 0; }
+    if (g_undo_n >= HB_UNDO_CAP) { return 0; }
+    store64(g_undo + g_undo_n * 16, off);
+    store64(g_undo + g_undo_n * 16 + 8, load8(g_mb + off));
+    g_undo_n = g_undo_n + 1;
+    store8(g_mb + off, v & 255);
+    return 0;
+}
+
+fn mu_set16(off, v): i64 {
+    mu_set8(off, (v >> 8) & 255);
+    mu_set8(off + 1, v & 255);
+    return 0;
+}
+
+fn mu_set32(off, v): i64 {
+    mu_set16(off, (v >> 16) & 65535);
+    mu_set16(off + 2, v & 65535);
+    return 0;
+}
+
+fn mu_undo(): i64 {
+    while (g_undo_n > 0) {
+        g_undo_n = g_undo_n - 1;
+        store8(g_mb + load64(g_undo + g_undo_n * 16), load64(g_undo + g_undo_n * 16 + 8));
+    }
+    return 0;
+}
+
+fn mu_int8(): i64 {
+    var r = hb_below(6);
+    if (r == 0) { return 0; }
+    if (r == 1) { return 0xFF; }
+    if (r == 2) { return 0x7F; }
+    if (r == 3) { return 0x80; }
+    if (r == 4) { return 1; }
+    return hb_below(256);
+}
+
+fn mu_int16(): i64 {
+    var r = hb_below(8);
+    if (r == 0) { return 0; }
+    if (r == 1) { return 0xFFFF; }
+    if (r == 2) { return 0x7FFF; }
+    if (r == 3) { return 0x8000; }
+    if (r == 4) { return 1; }
+    if (r == 5) { return 0xFFFE; }
+    if (r == 6) { return hb_below(64); }
+    return hb_below(65536);
+}
+
+fn mu_at(off): i64 {
+    var kind = hb_below(5);
+    if (kind == 0) {
+        mu_set8(off, load8(g_mb + off) ^ (1 << hb_below(8)));
+    } elif (kind == 1) {
+        mu_set8(off, mu_int8());
+    } elif (kind == 2) {
+        mu_set16(off, mu_int16());
+    } elif (kind == 3) {
+        mu_set16(off, mu_int16());
+        mu_set16(off + 2, mu_int16());
+    } else {
+        var n = 1 + hb_below(8);
+        var i = 0;
+        while (i < n) {
+            mu_set8(off + i, hb_below(256));
+            i = i + 1;
+        }
+    }
+    return 0;
+}

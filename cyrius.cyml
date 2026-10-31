@@ -99,11 +99,11 @@ modules = [
 # was the union's doing — a leaf every consumer vendored for nothing.
 #
 # rekha's own harness wants eight more (fmt_int_fd, arena_*, str_same, assert_*, bench_*) —
-# declared in programs/prelude.cyr. An include resolves from vendored lib/ first and from the
-# pinned toolchain snapshot otherwise, the path programs/woff_test.cyr has always used for
-# sync + sankoch (lib/ has never held either). From 1.1.0 it is the path for fmt / vec / str /
-# io / assert / bench as well: sadish 0.12.0's sidecar names syscalls / alloc / string where
-# 0.11.2's named nine, so `cyrius deps` vendors 17 files into lib/, not 26.
+# included by programs/prelude.cyr — and the WOFF suites want sync + sankoch. They are the [test]
+# stdlib below (1.1.2), NOT this array: an include resolves from vendored lib/ first and from the
+# pinned toolchain snapshot otherwise, and through 1.1.1 fmt / vec / str / io / assert / bench /
+# sync / sankoch took the snapshot path, recorded nowhere but the include lines (sadish 0.12.0's
+# sidecar names syscalls / alloc / string, so `cyrius deps` vendored 17 files).
 #
 # sankoch is deliberately NOT here: rekha's base build never calls it. WOFF 1.0 and WOFF2
 # (src/woff.cyr, src/woff2.cyr, [lib.woff]) resolve `sync` + `sankoch` from the toolchain pin in
@@ -117,6 +117,15 @@ modules = [
 # dist/rekha-woff.cyr stays sankoch >= 2.8.0.
 stdlib = ["string"]
 
+# The harness's leaves (1.1.2). `cyrius deps` vendors them into lib/ and hashes them into
+# cyrius.lock, so the suites build from pinned files instead of whatever the toolchain snapshot
+# holds; cyrius never adds them to a build's scope or to a dist sidecar. MEASURED at the 6.7.18
+# pin: lib/ 17 -> 36 files, every program's binary byte-identical, dist/*.deps unchanged.
+# alloc and syscalls arrive through sadish's sidecar too; they are named so a smaller sidecar
+# cannot take them from the harness.
+[test]
+stdlib = ["fmt", "alloc", "vec", "str", "io", "syscalls", "assert", "bench", "sync", "sankoch"]
+
 # sadish — the rasterize target. rekha emits glyph-outline PATHS
 # (moveto/lineto/quadto/close); sadish fills them to coverage. rekha does NOT
 # bundle its own Bézier rasterizer.
@@ -124,8 +133,10 @@ stdlib = ["string"]
 # change from the 0.11.2 rekha pinned from 0.4.5 to 1.0.0 (its 0.11.3, 0.12.0 and 0.12.1 changed the
 # version probe, the sidecar and the requires block, nothing rekha calls). Three sadish releases are
 # load-bearing here: `sd_alloc` (0.5.5) takes every allocation rekha makes, `sd_path_new_cap`
-# (0.7.2) opens a path at the glyph's own size, and 0.9.0 stores a path's points INLINE — rekha's
-# tests read them through `sd_path_point_x` / `_y`, which 0.8.0 and below do not define. ⛔ Against
+# (0.7.1; each array sized on its own from 0.7.2) opens a path at the glyph's own size, and 0.9.0
+# stores a path's points INLINE — rekha's tests read them through `sd_path_point_x` / `_y`, which
+# 0.8.0 and below do not define. MEASURED (1.1.2): dist_test links and passes from 0.7.1, so the
+# bundle's own floor is lower; 0.9.0 is the supported one. ⛔ Against
 # an older pin the build MAY still go green: cyrius judges an undefined name by its FIRST call site
 # in code order, and rekha's is rekha_err_new (src/error.cyr), dead in every suite — so a suite
 # COMPILES with `warning: undefined function` and dies (SIGILL, rc 132) at the first call, while a

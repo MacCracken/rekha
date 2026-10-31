@@ -129,7 +129,7 @@ fn rekha_woff_sfnt_size(buf, len): i64
 
 Returns the byte size of the SFNT the WOFF 1.0 container at (buf, len) rebuilds to (its validated totalSfntSize, which must be EXACTLY 12 + 16 x numTables + the 4-byte-padded origLengths), or 0 when (buf, len) is not a valid WOFF 1.0 under the module's ⛔ rules (bad signature/reserved/length, non-strictly-ascending tags, table data outside [end of directory, length), compLength > origLength, padded compLengths summing past length, origLength > REKHA_WOFF_MAX_RATIO (1032) x compLength, or a metadata/private block outside length). Reads only the header and directory, inflates nothing, allocates 0 B; it does not touch rekha_font_error (there is no handle) and sets no RekhaErrCode.
 
-<!-- src/woff.cyr:69 -->
+<!-- src/woff.cyr:70 -->
 
 ### `rekha_woff_decode(buf, len, dst, cap)`
 
@@ -139,7 +139,7 @@ fn rekha_woff_decode(buf, len, dst, cap): i64
 
 Rebuilds the SFNT carried by the WOFF 1.0 container at (buf, len) into `dst` (`cap` bytes) and returns the SFNT's byte length, or 0 when the container is invalid (rekha_woff_sfnt_size returns 0), `cap` is smaller than the SFNT, or a table does not inflate to EXACTLY its origLength (⛔ capped at origLength: a stream that would write more fails closed in sankoch with ERR_OUTPUT_LIMIT, one that writes less fails here). On 0 the contents of `dst` are unspecified. Allocates 0 B on rekha's sd_alloc seam; sankoch's inflate takes MEASURED 448 B of global heap per call; table checksums are carried, not verified; metadata and private blocks are not copied. Sets no RekhaErrCode.
 
-<!-- src/woff.cyr:126 -->
+<!-- src/woff.cyr:127 -->
 
 ### `rekha_font_open_woff(buf, len)`
 
@@ -149,7 +149,7 @@ fn rekha_font_open_woff(buf, len): i64
 
 Opens a WOFF 1.0 font: validates, rebuilds its SFNT into ONE sd_alloc(totalSfntSize) that the returned RekhaFont borrows, then rekha_font_open's it; returns the font handle or 0 for an invalid container, a failed inflate, an allocation failure (sd_alloc returned 0), or an SFNT rekha_font_open refuses (e.g. a flavor none of 0x00010000 / 'true' / 'OTTO'). Allocation is exactly two sd_allocs (the SFNT buffer and the RekhaFont: totalSfntSize + REKHA_FONT_SIZE, MEASURED 410,820 + 832 B for the embedded face; through 1.1.1 this said 410,824 + 176) plus sankoch's MEASURED 448 B of global heap per inflate. ⚠ The rebuilt buffer lives as long as the allocator it came from, so open a WOFF once, outside a scoped per-frame hook, as with rekha_font_open; ⛔ the module is opt-in (dist/rekha-woff.cyr, [lib.woff]) and the consumer brings sankoch (>= 2.7.13 for zlib_decompress_capped). No RekhaErrCode is reported on 0 (there is no handle) and unlike rekha_font_open there is no `_why` variant.
 
-<!-- src/woff.cyr:184 -->
+<!-- src/woff.cyr:185 -->
 
 ### `rekha_woff2_face_count(buf, len)`
 
@@ -159,7 +159,7 @@ fn rekha_woff2_face_count(buf, len): i64
 
 Answers how many faces the WOFF2 at (buf, len) carries: 1 for an ordinary font, the collection's face count for a 'ttcf'-flavoured one; 0 when (buf, len) is not a WOFF2 rekha accepts (any refusal in the module-header list). It allocates the parse context (REKHA_W2_CTX = 80 bytes plus the entry, face and index arrays via sd_alloc) and never frees it; no RekhaErrCode is produced — the container opens answer a bare 0 (roadmap: 'The WOFF / WOFF2 opens do not say why').
 
-<!-- src/woff2.cyr:1498 -->
+<!-- src/woff2.cyr:1512 -->
 
 ### `rekha_woff2_block_size(buf, len)`
 
@@ -169,7 +169,7 @@ fn rekha_woff2_block_size(buf, len): i64
 
 Answers the exact byte length of the inflated table-data block: the sum of every directory entry's compressed-stream length; 0 when (buf, len) is not a WOFF2 rekha accepts. ⚠ Spec 5 makes this an EQUALITY with what Brotli produces, so it is both the buffer to allocate and the length rekha_woff2_inflate must return. Allocates the parse context via sd_alloc (never freed); sets no RekhaErrCode.
 
-<!-- src/woff2.cyr:1508 -->
+<!-- src/woff2.cyr:1522 -->
 
 ### `rekha_woff2_inflate(buf, len, td, cap)`
 
@@ -179,7 +179,7 @@ fn rekha_woff2_inflate(buf, len, td, cap): i64
 
 Inflates the WOFF2's compressed font data into td (cap bytes) and returns the byte length, which is rekha_woff2_block_size exactly, or 0 (invalid container, cap < block size, td == 0, totalCompressedSize < 1 or running past length, or a Brotli output that is not exactly the block size). ⛔ The equality is the gate: a stream that expands to more fails closed inside sankoch (ERR_OUTPUT_LIMIT) and one that expands to less fails here. Requires sankoch >= 2.8.0 (brotli_decompress_capped) and is therefore only in dist/rekha-woff.cyr; allocates the parse context via sd_alloc; sets no RekhaErrCode.
 
-<!-- src/woff2.cyr:1518 -->
+<!-- src/woff2.cyr:1532 -->
 
 ### `rekha_woff2_sfnt_size(buf, len, td, tdlen)`
 
@@ -189,7 +189,7 @@ fn rekha_woff2_sfnt_size(buf, len, td, tdlen): i64
 
 Answers the byte length of the SFNT (or TTC, for a collection) the WOFF2 rebuilds to, given its already-inflated block at (td, tdlen); 0 for any refusal, including tdlen != rekha_woff2_block_size and any transform refusal found by the measuring pass. ⚠ Unlike rekha_woff_sfnt_size this CANNOT be answered from the container alone — the measuring pass walks the transformed glyf point data. Allocates the parse context plus a REKHA_W2_GST (160-byte) state block via sd_alloc; sets no RekhaErrCode.
 
-<!-- src/woff2.cyr:1539 -->
+<!-- src/woff2.cyr:1553 -->
 
 ### `rekha_woff2_decode(buf, len, td, tdlen, dst, cap)`
 
@@ -199,7 +199,7 @@ fn rekha_woff2_decode(buf, len, td, tdlen, dst, cap): i64
 
 Rebuilds the SFNT (or TTC) of the WOFF2 at (buf, len), whose inflated table data is at (td, tdlen), into dst (cap bytes) and returns its byte length, or 0 when the container is invalid, tdlen != block size, dst == 0, cap is short, or a transform refuses; on 0 the contents of dst are unspecified. ⭐ A 'ttcf' WOFF2 rebuilds to a real .ttc — TTC header (always version 1.0), one offset table per face and ONE copy of each shared table — which rekha_font_open_index then opens face by face. Checksums and head.checkSumAdjustment are recomputed; a rebuilt glyf is NOT byte-identical to the original (one flag byte per point, no REPEAT). Allocates the parse context plus REKHA_W2_GST via sd_alloc; sets no RekhaErrCode.
 
-<!-- src/woff2.cyr:1553 -->
+<!-- src/woff2.cyr:1567 -->
 
 ### `rekha_font_open_woff2_index(buf, len, index)`
 
@@ -207,9 +207,9 @@ Rebuilds the SFNT (or TTC) of the WOFF2 at (buf, len), whose inflated table data
 fn rekha_font_open_woff2_index(buf, len, index): i64
 ```
 
-Opens face index of a WOFF2 (inflate, rebuild, then rekha_font_open_index) and returns the RekhaFont handle, or 0 for index < 0, an invalid container, a failed inflate or transform, an allocation failure, an index past the collection, or an SFNT rekha_font_open refuses. ⚠ THIS REBUILDS THE WHOLE FILE PER CALL: a caller that wants more than one face should inflate and rekha_woff2_decode ONCE and walk the result with rekha_ttc_count / rekha_font_open_index. ⚠ EVERYTHING IT ALLOCATES OUTLIVES THE CALL (rekha's seam has no free): the inflated block, the rebuilt file and the RekhaFont, and the decoder's scratch — a parse context per step (four, each 80 B + 72 B per table + a 32 B face record + an 8 B-per-table index; for a collection 32 B per face and a REKHA_WOFF2_MAXREFS x 8 = 65,536 B index) and two 160 B GST blocks. MEASURED for the embedded face under a null transform: 21 blocks, 828,994 B = 410,494 + 410,820 + 832 + 4 x 1,632 + 2 x 160 (through 1.1.1 this said two blocks plus the RekhaFont). Open a WOFF2 once, outside a per-frame hook. Sets no RekhaErrCode of its own.
+Opens face index of a WOFF2 (inflate, rebuild, then rekha_font_open_index) and returns the RekhaFont handle, or 0 for index < 0, an invalid container (since 1.1.2 that includes one whose table directory declares more than 64 MB of inflated data or of rebuilt file — FreeType's MAX_SFNT_SIZE, checked before anything is allocated), a failed inflate or transform, an allocation failure, an index past the collection, or an SFNT rekha_font_open refuses. ⚠ THIS REBUILDS THE WHOLE FILE PER CALL: a caller that wants more than one face should inflate and rekha_woff2_decode ONCE and walk the result with rekha_ttc_count / rekha_font_open_index. ⚠ EVERYTHING IT ALLOCATES OUTLIVES THE CALL (rekha's seam has no free): the inflated block, the rebuilt file and the RekhaFont, and the decoder's scratch — a parse context per step (four, each 80 B + 72 B per table + a 32 B face record + an 8 B-per-table index; for a collection 32 B per face and a REKHA_WOFF2_MAXREFS x 8 = 65,536 B index) and two 160 B GST blocks. MEASURED for the embedded face under a null transform: 21 blocks, 828,994 B = 410,494 + 410,820 + 832 + 4 x 1,632 + 2 x 160 (through 1.1.1 this said two blocks plus the RekhaFont). Open a WOFF2 once, outside a per-frame hook. Sets no RekhaErrCode of its own.
 
-<!-- src/woff2.cyr:1575 -->
+<!-- src/woff2.cyr:1589 -->
 
 ### `rekha_font_open_woff2(buf, len)`
 
@@ -219,7 +219,7 @@ fn rekha_font_open_woff2(buf, len): i64
 
 Opens a WOFF2 font's face 0 (the only face an ordinary WOFF2 has) via rekha_font_open_woff2_index(buf, len, 0), returning the RekhaFont handle or 0 under the same refusals and with the same never-freed allocations (rekha_font_open_woff2_index's ⚠). Available only through dist/rekha-woff.cyr ([lib.woff]); sets no RekhaErrCode.
 
-<!-- src/woff2.cyr:1591 -->
+<!-- src/woff2.cyr:1605 -->
 
 ### `rekha_font_open_any(buf, len)`
 
@@ -229,7 +229,7 @@ fn rekha_font_open_any(buf, len): i64
 
 Opens font bytes of ANY container rekha reads: a 'wOFF' signature goes through rekha_font_open_woff, 'wOF2' through rekha_font_open_woff2, anything else (including buffers under 4 bytes) straight through rekha_font_open; returns 0 as whichever would return (buf == 0 is 0 outright). A collection — plain .ttc or 'ttcf' WOFF2 — gives face 0, the same as rekha_font_open does. ⚠ It lives in woff2.cyr (moved from woff.cyr in 0.4.6) and so is only in dist/rekha-woff.cyr, not dist/rekha.cyr; allocation follows the branch taken.
 
-<!-- src/woff2.cyr:1601 -->
+<!-- src/woff2.cyr:1615 -->
 
 ## The embedded default face
 

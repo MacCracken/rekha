@@ -35,7 +35,7 @@ fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64
 
 Returns a sadish SdPath for codepoint `cp` scaled by `scale` and positioned at (`ox`, `oy`) via rekha_char_to_glyph then rekha_glyph_to_sdpath; an EMPTY path (not 0) for a character the font cannot draw is the contract every caller since 0.3.0 was written against; 0 only when an allocation is refused, rekha_glyph_to_sdpath's rule (through 1.1.1 an outline OOM came back as the empty path too). Allocates the path through sd_alloc (README: 20 calls under an arena hook cost the global heap exactly 0 bytes). ⚠ THE WRAPPER DOES NOT CLEAR the error itself; ⛔ if the cmap step refused (rekha_font_error != REKHA_OK) and the glyph step then reported REKHA_OK, it re-raises the first refusal's code and detail so the cmap reason survives the second call.
 
-<!-- src/cmap.cyr:368 -->
+<!-- src/cmap.cyr:387 -->
 
 ### `rekha_outline_n_contours(o)`
 

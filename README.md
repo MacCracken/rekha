@@ -1,6 +1,6 @@
 # rekha
 
-Version: 1.1.1
+Version: 1.1.2
 
 **rekha** (रेखा — Sanskrit/Hindi: *line / outline / contour / stroke*) is
 a pure-Cyrius vector/outline font subsystem for AGNOS. It parses
@@ -215,7 +215,9 @@ it, variable arrays stay inside their own table, and every outline's `end_pts` s
 stay `< n_points`. Load caps — 4,096 points / 4,096 contours per outline, 64 glyph loads, 16,384
 decoded points and 2,099,200 `gvar` point-passes per `rekha_load_glyph`, nesting depth 5, no
 component cycles — yield an EMPTY glyph, never a partial one. `programs/hostile_test.cyr` is the standing corpus: a crafted font per audit
-class, a seeded mutation sweep, and an A/B sentinel differential across the allocation seam.
+class, a seeded mutation sweep, and an A/B sentinel differential across the allocation seam;
+`programs/mutate_test.cyr` carries that sweep to CFF, CFF2, the variation tables, GPOS and both web
+containers (1.1.2).
 
 ⚠ The font buffer is **borrowed** and its metadata snapshotted at open — do not mutate it
 afterwards, and open fonts OUTSIDE a scoped per-frame `sd_alloc` hook.
@@ -251,8 +253,8 @@ call lands in a minor, a fix measured against the font or FreeType in a patch):
 | ~~**0.9.0 — the freeze**~~ | **Closed.** 178 `public fn` and 72 `public var` in `src/` against 287 internals, a `private` bundle the compiler enforces, `docs/api/` with the 1.x promise, nine ADRs, `SECURITY.md`, `CONTRIBUTING.md`, and a CI probe that must fail to reach an internal. |
 | ~~**1.0.0 — lock it in**~~ | **Shipped.** The freeze consumed — crab and dhancha build against the `private` 0.9.0 bundle and crab's QEMU face test drew through it — and a release with no surface change: `docs/api/surface.txt` is byte-identical to 0.9.0's across a cyrius 6.6.6 → 6.6.20 move. Refuse-don't-guess is kept for the line (ADR 0002). |
 | ~~**1.1.0 / 1.1.1 — the 6.7 line**~~ | **Shipped.** cyrius 6.7.9 and sadish 0.12.0, then 6.7.18 and 0.12.1 — each with `docs/api/surface.txt` byte-identical and every suite's output byte-identical to the release before. |
-| ▶ **1.1.2 — the P(-1) audit** | **Next.** The first full audit since 0.3.11, which covered 4 modules and 1,331 lines; `src/` is 13,175 now. One adversarial lens per surface (the hint interpreter, CFF / CFF2, the web containers, variations, layout and names, the boundary), the mutation loop extended past the TrueType face, a real Brotli stream into WOFF2, `poison_alloc` through the `sd_alloc` seam, and a dossier under `docs/audit/`. |
-| **1.2.x — the formats still refused or skipped** | `cmap` format 14 variation selectors (1.2.0); the reference differentials in CI (1.2.1); `cmap` 2 / 8 / 10, the Expert charsets and CFF2 FDSelect 4, `kern` format 2. |
+| ~~**1.1.2 — the P(-1) audit**~~ | **Shipped.** The first full audit since 0.3.11: three out-of-bounds reads fixed (CFF FDSelect, a short STAT, the WOFF2 `hmtx` transform's `loca`) and 21 MEDIUM, 39 LOW and 6 INFO findings, each fixed with a mutation-checked test, corrected in the docs, or recorded as a divergence from FreeType. `programs/mutate_test.cyr` and `poison_alloc` now run in CI. No surface change. [The dossier](docs/audit/2026-10-30-1.1.2-p-1.md). |
+| ▶ **1.2.x — the formats still refused or skipped** | `cmap` format 14 variation selectors (1.2.0); the reference differentials in CI (1.2.1); `cmap` 2 / 8 / 10, the Expert charsets and CFF2 FDSelect 4, `kern` format 2. |
 | **1.3.x — metrics for composites and variable fonts** | Resolvers beside the O(1) readers — `USE_MY_METRICS`, `gvar` phantom advances, the HVAR rsb map, GPOS kerning that follows the axes (1.3.0); `avar` 2.0's variation store (1.3.1). |
 | **1.4.x — the web containers, completed** | `_why` twins for the container opens, the metadata and private blocks, one inflate per WOFF2 collection (1.4.0); the 1.2 – 1.4 closeout P(-1) (1.4.1). |
 | **1.5.x – 1.9.x — opens on request** | Each waits for a consumer or a decision and keeps its number: opt-in FreeType fallbacks, settable `GETINFO` and an `hdmx` advance (1.5.x), the default face as an `[embed]` profile (1.6), `COLR` v0 + `CPAL` (1.7), consumer-shaped readers (1.8), CFF hinting and `COLR` v1 (1.9). |
@@ -312,8 +314,12 @@ and drew it with sadish 0.11.2 — the face path end to end, on AGNOS.
 
 - **sadish** — the 2D vector-fill core rekha emits glyph paths into (the
   rasterize target), AND the allocation seam rekha draws from (`sd_alloc`).
-  ⛔ Floor **0.9.0**: `SdPath`'s inline points and `sd_path_new_cap` are 0.7.2 / 0.9.0, and
-  `sd_alloc` does not exist below 0.5.5 — the build may
+  ⛔ Floor **0.9.0**: `sd_path_new_cap` arrived in 0.7.1 and sizes its two arrays separately from
+  0.7.2 (the allocation figures rekha documents), `SdPath`'s inline points that rekha's own suites
+  read through `sd_path_point_x` are 0.9.0, and `sd_alloc` does not exist below 0.5.5. MEASURED
+  (1.1.2): `programs/dist_test.cyr` builds clean and passes against every tag from 0.7.1 up, and
+  0.7.0 has no `sd_path_new_cap` — so 0.7.1 is where the bundle links, and 0.9.0 is what is
+  supported. Below 0.5.5 the build may
   still compile (`warning: undefined function 'sd_alloc'`, printed either way)
   and fault at the first `rekha_font_open`, or be refused outright, depending
   on where the first call site sits (CHANGELOG 0.3.10). Wired via
@@ -337,9 +343,9 @@ and drew it with sadish 0.11.2 — the face path end to end, on AGNOS.
   `lib/sankoch.cyr`'s own include of `lib/string.cyr`. Through 1.0.0 that sidecar also named
   `string`, until sadish 0.11.3's bundle began including it (CHANGELOG 1.1.0).
   ⚠ rekha's own test harness uses eight leaves (`fmt`, `alloc`, `vec`, `str`, `io`, `syscalls`,
-  `assert`, `bench`), declared in `programs/prelude.cyr`; none reaches a sidecar. `cyrius deps`
-  vendors `syscalls`, `alloc` and `string` into `lib/`; the other five resolve from the pinned
-  toolchain snapshot.
+  `assert`, `bench`), included by `programs/prelude.cyr`; with `sync` and `sankoch` for the WOFF
+  suites they are `cyrius.cyml`'s `[test] stdlib` (1.1.2), which `cyrius deps` vendors into `lib/`
+  and pins in `cyrius.lock` and which never reaches a build's scope or a sidecar.
 - **sankoch** — only for the web containers, and only through `dist/rekha-woff.cyr`:
   `zlib_decompress_capped` for WOFF 1.0 (sankoch >= 2.7.13) and `brotli_decompress_capped` for
   WOFF2 (**>= 2.8.0**, which is the floor for that bundle as of 0.4.6; the cyrius 6.7.18 stdlib

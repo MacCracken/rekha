@@ -32,7 +32,7 @@ fn rekha_char_to_glyph(font, cp): i64
 
 Maps Unicode codepoint `cp` to a glyph id through the subtable chosen at open; returns 0 (.notdef) if the handle is 0, cp is outside 0..U+10FFFF (rekha_font_error = REKHA_ERR_OTHER, detail "codepoint"), there is no usable subtable (REKHA_ERR_NO_TABLE, "cmap"), or the mapped id is past 0xFFFF or >= maxp.numGlyphs when maxp is present (REKHA_ERR_BAD_SFNT, "cmap glyph id"; through 1.1.1 a format 12 / 13 id past 0xFFFF read as unmapped); an UNMAPPED character returns 0 with REKHA_OK — .notdef is the right answer, not an error. Clears the error on entry (after the 0-handle check), allocates 0 B. ⚠ Coverage follows the chosen table (format 4 / 6 / 0 cannot reach past U+FFFF / its range / U+00FF); a (3,0) SYMBOL table is retried at U+F000 + cp when cp <= U+00FF misses. A format 4 odd segCountX2 is floored to even, as FreeType does; a format 4 table whose segments overlap with a start or end out of order is looked up linearly in table order, FreeType's UNSORTED rule; a format 12 / 13 table whose groups run backwards or overlap is not chosen (1.1.2).
 
-<!-- src/cmap.cyr:331 -->
+<!-- src/cmap.cyr:350 -->
 
 ### `rekha_char_advance(font, cp)`
 
@@ -42,7 +42,7 @@ fn rekha_char_advance(font, cp): i64
 
 Advance width of codepoint `cp` in font DESIGN UNITS, = rekha_advance_width(font, rekha_char_to_glyph(font, cp)); 0 = unknown (and inherits rekha_char_to_glyph's error codes for a bad handle / codepoint / missing cmap — kept past the advance reader's own clear since 1.1.2; the answer is still .notdef's advance). ⚠ An unmapped codepoint resolves to .notdef (gid 0), whose advance is a real metric in most fonts, so missing text still advances by the .notdef box rather than collapsing to zero. Allocates nothing.
 
-<!-- src/cmap.cyr:390 -->
+<!-- src/cmap.cyr:409 -->
 
 ### `rekha_char_advance_px(font, cp, px_size)`
 
@@ -52,7 +52,7 @@ fn rekha_char_advance_px(font, cp, px_size): i64
 
 Advance of `cp` in integer PIXELS at `px_size`, rounded half-up (nearest); = rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size), keeping rekha_char_to_glyph's code as rekha_char_advance does (1.1.2). ⚠ Returns 0 when the metric is unknown OR `upem` is 0, so the caller's fallback is a single `== 0` test. ⛔ PER-GLYPH ROUNDING HALVES THE BIAS; IT DOES NOT STOP THE DRIFT — a run built by summing these integers accumulates up to half a pixel per glyph; exact run widths come from summing 16.16 advances (rekha_char_advance_fx) and rounding the pen ONCE. Allocates nothing.
 
-<!-- src/cmap.cyr:419 -->
+<!-- src/cmap.cyr:442 -->
 
 ### `rekha_char_advance_fx(font, cp, px_size)`
 
@@ -62,7 +62,7 @@ fn rekha_char_advance_fx(font, cp, px_size): i64
 
 Advance of `cp` at `px_size` as 16.16 fixed-point pixels; = rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size), keeping rekha_char_to_glyph's code as rekha_char_advance does (1.1.2). 0 = unknown. Allocates 0 B. Sum these and round the pen once for exact run widths (per rekha_char_advance_px's ⛔ note).
 
-<!-- src/cmap.cyr:428 -->
+<!-- src/cmap.cyr:455 -->
 
 ### `rekha_os2_version(font)`
 

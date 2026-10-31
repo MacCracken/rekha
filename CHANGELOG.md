@@ -5,6 +5,195 @@ All notable changes to rekha are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-10-30 — the P(-1) audit
+
+A patch release: the first full audit since 0.3.11, recorded in
+[`docs/audit/2026-10-30-1.1.2-p-1.md`](docs/audit/2026-10-30-1.1.2-p-1.md). It found three
+out-of-bounds reads, 21 MEDIUM, 39 LOW and 6 INFO findings. Each is fixed with a mutation-checked
+test, corrected in the docs, or recorded as a divergence from FreeType 2.14.3. **No public name,
+signature or documented answer changed**: `docs/api/surface.txt` is byte-identical to 1.1.1's.
+Where a fix makes rekha refuse an input 1.1.1 accepted, it is listed below. Every such refusal was
+swept against the host's 2,155 faces (every glyph) before it landed, and the only glyph any rule
+refuses is U+E783 in the nine CodeNewRoman Nerd faces (4,220 points, over the point cap). The
+toolchain stays cyrius 6.7.18 and sadish 0.12.1, and neither published sidecar moved (base: none;
+WOFF: `sankoch`).
+
+### Security — three out-of-bounds reads, each reachable from a font alone
+
+- **CFF / CFF2 FDSelect format 0** read one byte per glyph id before the id was checked against
+  CharStrings. `maxp` may declare more glyphs than the CFF holds, so a `cmap` could hand out an id
+  that read past the table, and past `len` for a large one (a SIGSEGV, reproduced).
+  `rekha_cff_load` now refuses such an id as the TrueType path does (`REKHA_ERR_OTHER` "glyph id"),
+  and the format 0 read is bounded too.
+- **STAT** of minorVersion ≥ 1 was accepted at 18 or 19 bytes, and `rekha_stat_fallback_name_id`
+  read the 2-byte field past it (a SIGSEGV when STAT was the file's last table, reproduced). Such a
+  table is now the "header that does not fit" `docs/api/names.md` promised: STAT reads as absent.
+- **The WOFF2 `hmtx` transform** rebuilt every omitted bearing through `loca` for all `maxp`
+  glyphs, and never compared `loca`'s length with them. With a null-transformed `loca` laid out
+  last, the reads ran past the whole rebuilt file — 60 KB past a 125 KB buffer in the proof, a
+  sentinel differential. Only `dist/rekha-woff.cyr` reaches it. Found in the dossier pass, from a
+  lead the review left unproven.
+
+None of the three writes.
+
+### Refused now — inputs 1.1.1 accepted
+
+- **Containers.**
+  - A WOFF2 whose transformed `hmtx` sits over a `loca` of fewer than numGlyphs + 1 entries — the
+    container is refused. The 607 WOFF2 files on the host decode byte-identically.
+  - A WOFF2 declaring more than **64 MB** inflated or rebuilt (`REKHA_WOFF2_MAXSIZE`, FreeType's
+    `MAX_SFNT_SIZE`). Through 1.1.1 a 685-byte file could ask the allocator for 21 MB, and a crafted
+    one for terabytes. `programs/mutate_test.cyr`'s first run found it.
+- **Faces.**
+  - A face with no usable `head` (absent, shorter than 54 B, or **`unitsPerEm` outside
+    16..16384**): glyph loads refuse with `REKHA_ERR_NO_TABLE` "head", and `rekha_units_per_em`
+    answers 0. Through 1.1.1 such a face had its `loca` read as SHORT by guess, and upem 1 put a
+    16 px advance at 8,160 px. FreeType refuses these faces.
+  - A STAT of minorVersion ≥ 1 shorter than 20 bytes (above).
+- **Glyphs.**
+  - A composite with a refused component is refused whole, wherever the component sits; it was
+    drawn partial with `REKHA_OK`.
+  - A CFF / CFF2 glyph id outside CharStrings (above).
+  - More than 4,096 contours in one outline, in every loader. The point cap trips first in any
+    real glyph.
+  - A load that would spend more than 2,099,200 `gvar` point-passes (`REKHA_GVAR_MAXWORK`, 512
+    tuples × 4,100 points — what one maximal simple glyph costs, so no glyph that loaded is refused):
+    `REKHA_ERR_OOM` "gvar budget". 12 KB of font cost 262 ms on one load; it now costs about 60 ms.
+  - A `gvar` tuple refused after others had applied refuses the glyph; it was half-varied with
+    `REKHA_OK`. So does a refused `gvar` scratch (`REKHA_ERR_OOM` "gvar scratch"), which drew the
+    default instance.
+- **CFF and CFF2.**
+  - A malformed DICT refuses the table: an operator whose operand count is not its arity, one that
+    appears twice, or a real where an integer is required. rekha read the last operand of the first
+    occurrence and FreeType the first of the last, so they drew different glyphs. The host's 405
+    OpenType CFF faces carry none.
+  - A charstring is refused for any of:
+    - `endchar` with 2, 3 or 6+ leftover operands;
+    - more than 96 stems;
+    - a hintmask, after the stem list has closed, carrying stems of its own;
+    - a 16.16 value where an integer operand is required — subr numbers, `vsindex`, the `blend`
+      count, seac codes.
+
+    FreeType refuses each.
+  - A CFF2 with more than one Font DICT and no FDSelect.
+  - A `blend` whose variation subtable did not resolve: it ran with no regions and left the deltas
+    on the stack to be drawn as coordinates.
+  - A `blend` naming a region past the list, or over a region list whose axis count is not fvar's.
+- **Variations.** Each of these now reads as ABSENT, as FreeType drops it:
+  - `gvar` whose axisCount is not fvar's, or whose glyph offsets run backwards;
+  - `avar` whose map count is not fvar's axis count;
+  - an ItemVariationStore (HVAR, MVAR, VVAR, CFF2) whose region list has another axis count, or
+    whose data subtables name regions it does not have;
+  - an HVAR or VVAR whose advance map is not well formed.
+
+  `gvar` and `avar` are also bounded by their own table length, not the file's.
+- **Layout.** The GPOS `kern` feature is refused past any of:
+  - 64 distinct lookups — the 65th and later were dropped, and the sum came back partial;
+  - 4,096 (FeatureRecord, lookup) pairs walked — one 196 KB GPOS cost 105.7 s on its first query;
+  - 1,024 subtables summed over the lookups kept — 435 ms a query from 131 KB.
+
+  Host faces reach at most 12, 29 and 19.
+- **`cmap`.**
+  - A format 12 / 13 whose groups are not well formed and strictly increasing is ranked out.
+    Through 1.1.1 an overlapping (3,10) outranked a valid (3,1) and mapped wrong ids.
+  - A format 12 / 13 mapping to a glyph id past 0xFFFF answers `REKHA_ERR_BAD_SFNT` "cmap"; it was
+    "unmapped" with `REKHA_OK`.
+- **Metrics and hinting.**
+  - A left or top side bearing for a gid past numGlyphs is refused. One past 2^62 wrapped its
+    offset.
+  - `rekha_hint_ctx` refuses a ppem past 65,535: near 2^35 the F26Dot6 arithmetic wrapped i64.
+
+### Accepted now — inputs 1.1.1 refused or misread
+
+- A composite of 129 to 4,096 contours: through 1.1.1 the unhinted merge alone capped composites
+  at 128. The sweep showed 128 would blank glyphs in 2,116 of the 2,155 host faces.
+- A blank component is skipped before its point-matching pair is read, as FreeType skips it.
+  Matching against it refused the whole composite.
+- `cmap` format 4 with an odd segCountX2 is read FLOORED, as FreeType reads it, so characters
+  1.1.1 missed now map. So do those of a format 4 whose endCode[] does not ascend, through
+  FreeType's linear lookup.
+
+### Fixed — answers that were wrong
+
+- **CFF.** A moveto with surplus operands takes them from the top of the stack, as FreeType pops
+  them. This fixes **FreeSans U+0299**, which 1.1.1 drew wrong; the other 404 host CFF faces decode
+  identically. Stems declared after the hint mask is in force are ignored, as FreeType ignores
+  them. The fill pass is bounded by the count pass's sizes.
+- **`gvar`.**
+  - IUP runs against the default outline per tuple, so the outline no longer depends on tuple
+    order (FreeType's `points_org`).
+  - A repeated packed point number adds its deltas.
+  - A tuple with neither private nor shared points is skipped; it was applied to every point.
+  - The scratch is allocated by `rekha_var_set_axis`, outside a frame hook. Allocated lazily on
+    the first load, a per-frame arena could reissue it.
+- **Variation stores.**
+  - A NULL ItemVariationData offset means no variation; it was read at the store's own header.
+  - VVAR with a NULL tsb or vOrg map no longer applies the advance rows to them.
+  - The hinted loader keeps `gvar`'s phantoms unless a store FreeType would load supplies the
+    advance.
+- **Variation coordinates.** `rekha_var_coord` stays in its documented [−65536, 65536]. An axis
+  whose min / default / max are out of order sits at its default, and an `avar` result is clamped.
+  `rekha_var_set_axis` answers 0 when the CFF2 region-scalar allocation is refused.
+- **Hinted metrics.** The vertical phantoms carry no VVAR tsb delta and take
+  `TT_Get_VMetrics`' 16-bit casts. The advance takes `FT_UShort`'s, so an HVAR delta below 0 no
+  longer gives a negative hinted advance.
+- **Errors and empty answers.**
+  - `rekha_char_advance` / `_px` / `_fx` keep the cmap step's error code.
+  - Three unhinted refusal sites name `BAD_GLYF` where they answered an empty outline with
+    `REKHA_OK`.
+  - `rekha_glyph_to_sdpath` / `rekha_char_to_sdpath` answer 0 on an outline OOM, as documented,
+    not an empty path.
+  - The six outline accessors answer 0 for the 0 outline instead of faulting.
+- **Faces and tables.**
+  - A TTC face keeps its table floor after open.
+  - `rekha_x_height` / `rekha_cap_height` read OS/2 version 2 fields only from version 2.
+  - Apple `kern` kernVariation subtables are skipped, not added to the default instance.
+  - A refused GPOS lookup-list allocation is retried, not cached for the handle's life.
+
+### Added — tests and tools
+
+- `programs/mutate_test.cyr` (CI, every push). Seven seeds built in code — a CFF face, a CFF2
+  variable face, a `gvar` / HVAR / MVAR / GPOS face with hinting tables, that face as a stored and
+  a zlib WOFF, as a transformed WOFF2, and the CFF face as a Brotli WOFF2. 1,000 mutants each,
+  with a sentinel gap after every table and pool block. The harness is shared with `hostile_test`
+  through `programs/hb_harness.cyr`.
+- `poison_alloc` redzones through the `sd_alloc` seam around both mutation loops. A write past a
+  block stops the run with exit 86.
+- `programs/woff2_test.cyr` runs groups A, B, R and G a third time over sankoch's Brotli encoder
+  (293 → 305 checks with group R4, the `loca` refusal).
+
+Every fix above has a test that was seen to fail with the fix removed.
+
+### Changed — build and docs
+
+- **`cyrius.cyml` gains a `[test] stdlib`** — the harness's eight leaves plus `sync` / `sankoch`
+  for the WOFF suites. `cyrius deps` vendors them and `cyrius.lock` pins them: 17 → 36 entries.
+  Every program's binary is byte-identical, `dist/*.deps` is unchanged, and cyrius keeps a `[test]`
+  leaf out of every build's scope and every sidecar.
+- **The sadish floor is 0.9.0**, stated one way. Through 1.1.1 `docs/api/README.md` said 0.11.2 —
+  the version pinned at the freeze. MEASURED: `programs/dist_test.cyr` links and passes from
+  sadish 0.7.1 up.
+- The nine internals with no call site are removed: seven WOFF2 directory accessors,
+  `rekha_hint_trig_atan` and `rekha_cff2_regions`. None was public.
+- `--bounds` (cyrius 6.7.8) gets no CI leg. It adds 40 bytes to every binary and no checks, since
+  rekha reads through `load8` .. `load64` on computed addresses.
+- `docs/api/`, `SECURITY.md`, the source headers and the roadmap are corrected where the audit
+  found them wrong: the 128-contour cap, the hint caps, the container allocation figures, the
+  `kern` and `errors` contracts, and more than 250 drifted line citations.
+
+### Measured
+
+- `programs/bench_hotpath.cyr`, medians of interleaved runs, 1.1.1 → 1.1.2:
+  - `rekha_char_to_glyph` 35 → 36 ns;
+  - `rekha_char_advance_px` 62 → 63;
+  - `rekha_load_glyph` 434 → 437;
+  - `rekha_char_to_sdpath` 1,346 → 1,356;
+  - a label 73,126 → 73,820.
+
+  Checksums are equal.
+- `hostile_test`'s mutants decode 735 fewer outlines and 2,614 fewer hinted glyphs than at 1.1.1.
+  Every drop traces to the `head` and `unitsPerEm` refusals above, and its A/B differential is 0.
+
 ## [1.1.1] - 2026-10-30 — the 6.7.18 pin
 
 A patch release: the toolchain pin moves **6.7.9 → 6.7.18** and sadish **0.12.0 → 0.12.1**, its

@@ -42,6 +42,8 @@
 #   - a point delta or an absolute coordinate outside i16 — unrepresentable in the glyf it rebuilds;
 #   - a transformed hmtx with reserved flag bits set, with neither reconstruct bit set, on a font
 #     with no glyf, or whose numberOfHMetrics does not fit its own glyph count;
+#   - a transformed hmtx over a loca shorter than numGlyphs + 1 entries, which its bearings are read
+#     back through (1.1.2 audit: through 1.1.1 a short null-transformed loca was read past its end);
 #   - an indexFormat 0 whose reconstructed glyf needs an offset past 65535 x 2;
 #   - a metadata or private block that does not lie inside `length`.
 # ⚠ `totalSfntSize` is NOT a gate. The spec says so twice and means it: a reconstructed glyf may be
@@ -79,6 +81,12 @@ var REKHA_W2_ENT          = 72;
 # either: the largest CJK collections carry a couple of dozen faces of a couple of dozen tables.
 var REKHA_WOFF2_MAXFONTS  = 256;
 var REKHA_WOFF2_MAXREFS   = 8192;
+# ⛔ THE LARGEST FONT A WOFF2 MAY DECLARE, inflated or rebuilt: FreeType's MAX_SFNT_SIZE (1 << 26,
+# sfwoff2.c:41, 2252). Both sizes are the container's own word, summed from its table directory,
+# and rekha allocates the inflated block BEFORE Brotli has read a byte — so through 1.1.1 a
+# 685-byte file could ask the allocator for 21 MB, and a crafted one for terabytes (1.1.2 audit:
+# programs/mutate_test.cyr found it). Past this the container is refused.
+var REKHA_WOFF2_MAXSIZE   = 67108864;
 # The decode context: one record threaded through layout and write instead of six arguments.
 #   +0 unique tables · +8 compressed-data offset · +16 ents · +24 faces · +32 face records
 #   +40 the flat index array · +48 its length · +56 1 when the file is a collection · +64 flavor
@@ -183,13 +191,8 @@ fn rekha_w2_rd255(buf, p, end, out): i64 {
 #   inflated block) · +32 dataOffset (where, in that block) · +40 outLength · +48 outOffset
 # ================================================================
 
-fn rekha_w2_ent_tag(e): i64   { return load64(e); }
-fn rekha_w2_ent_xform(e): i64 { return load64(e + 8); }
-fn rekha_w2_ent_orig(e): i64  { return load64(e + 16); }
-fn rekha_w2_ent_dlen(e): i64  { return load64(e + 24); }
-fn rekha_w2_ent_doff(e): i64  { return load64(e + 32); }
-fn rekha_w2_ent_olen(e): i64  { return load64(e + 40); }
-fn rekha_w2_ent_ooff(e): i64  { return load64(e + 48); }
+# (Read by offset where they are used; the seven one-line accessors that named these fields had no
+# caller and went in 1.1.2.)
 
 # Is a transformLength field present for (tag, xform)? 1 yes, 0 no, 0 - 1 for a transform version
 # this spec version does not define — which the decoder MUST reject outright (spec 4.1), since a
@@ -364,6 +367,7 @@ fn rekha_w2_block_size(ents, n): i64 {
     var i = 0;
     while (i < n) {
         total = total + load64(ents + i * REKHA_W2_ENT + 24);
+        if (total > REKHA_WOFF2_MAXSIZE) { return 0; }
         i = i + 1;
     }
     return total;
@@ -894,8 +898,8 @@ fn rekha_w2_xmin(dst, gat, glen, lat, ifmt, gid): i64 {
 
 # Rebuild hmtx from its transformed form at [hoff, hoff + hlen). `dst == 0` measures. Returns the
 # reconstructed byte length, or 0 - 1 on refusal. The glyf and loca it reads xMin from must already
-# be written at (gat, glen) / lat — which is why rekha_w2_write lays those two down first.
-fn rekha_w2_hmtx(td, hoff, hlen, ng, nhm, dst, at, gat, glen, lat, ifmt): i64 {
+# be written at (gat, glen) / (lat, llen) — which is why rekha_w2_write lays those two down first.
+fn rekha_w2_hmtx(td, hoff, hlen, ng, nhm, dst, at, gat, glen, lat, llen, ifmt): i64 {
     # ⛔ Spec 5.4: bits 2-7 are reserved and MUST be zero, and at least one of bits 0/1 must be set —
     # a transform that reconstructs nothing is not a transform, and the table it names would then be
     # a null-transform hmtx wearing version 1.
@@ -905,6 +909,14 @@ fn rekha_w2_hmtx(td, hoff, hlen, ng, nhm, dst, at, gat, glen, lat, ifmt): i64 {
     if ((flags & 3) == 0) { return 0 - 1; }
     if (nhm < 1) { return 0 - 1; }
     if (nhm > ng) { return 0 - 1; }
+    # ⛔ Every omitted bearing is read back through loca, one entry past its glyph, so loca must hold
+    # numGlyphs + 1 entries — OpenType's own rule for it. A null-transformed loca's length is the
+    # font's word, and through 1.1.1 a short one was read past its end, past the whole rebuilt file
+    # when the directory laid loca out last: 60 KB beyond a 125 KB SFNT (1.1.2 audit; FreeType reads
+    # on into whatever follows, rekha refuses).
+    var esz = 2;
+    if (ifmt == 1) { esz = 4; }
+    if (llen < (ng + 1) * esz) { return 0 - 1; }
     var no_lsb = flags & 1;
     var no_lsbm = (flags >> 1) & 1;
     var nmono = ng - nhm;
@@ -1212,13 +1224,15 @@ fn rekha_w2_layout(ctx, td, tdlen, st): i64 {
                     # ⛔ Spec 5.4: the transform rebuilds left side bearings from glyf's xMin, so it
                     # is defined only for a TrueType-flavoured face.
                     if (rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_GLYF2) == 0) { return 0; }
+                    var le2 = rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_LOCA2);
+                    if (le2 == 0) { return 0; }
                     var hh = rekha_w2_ffind(ents, idxs, s2, cnt2, REKHA_TAG_HHEA2);
                     if (hh == 0) { return 0; }
                     if (load64(hh + 24) < 36) { return 0; }
                     if (rekha_w2_face_ng(ents, idxs, s2, cnt2, td, st, &nginfo) == 0) { return 0; }
                     var nhm = rekha_rd_u16(td, load64(hh + 32) + 34);
                     var hlen = rekha_w2_hmtx(td, load64(he + 32), load64(he + 24), load64(&nginfo),
-                      nhm, 0, 0, 0, 0, 0, load64(&nginfo + 8));
+                      nhm, 0, 0, 0, 0, 0, load64(le2 + 40), load64(&nginfo + 8));
                     if (hlen < 0) { return 0; }
                     store64(he + 40, hlen);
                     store64(he + 56, 1);
@@ -1243,7 +1257,7 @@ fn rekha_w2_layout(ctx, td, tdlen, st): i64 {
         var e2 = ents + i * REKHA_W2_ENT;
         store64(e2 + 48, at);
         at = at + rekha_pad4(load64(e2 + 40));
-        if (at > 0x7FFFFFFF) { return 0; }
+        if (at > REKHA_WOFF2_MAXSIZE) { return 0; }     # was 2^31 through 1.1.1
         i = i + 1;
     }
     return at;
@@ -1385,7 +1399,7 @@ fn rekha_w2_write(ctx, td, st, dst, size): i64 {
                     var nhm4 = rekha_rd_u16(td, load64(hh4 + 32) + 34);
                     if (rekha_w2_hmtx(td, load64(he + 32), load64(he + 24), load64(&nginfo), nhm4,
                         dst, load64(he + 48), load64(ge4 + 48), load64(ge4 + 40),
-                        load64(le4 + 48), load64(&nginfo + 8)) < 0) { return 0; }
+                        load64(le4 + 48), load64(le4 + 40), load64(&nginfo + 8)) < 0) { return 0; }
                     store64(he + 56, 1);
                 }
             }

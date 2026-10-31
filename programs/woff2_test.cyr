@@ -221,6 +221,12 @@ fn known_index(tag): i64 {
 }
 
 var g_blk = 0;         # the table-data block, before it is stored into a Brotli stream
+# ⭐ THE THIRD CONTAINER VARIANT (1.1.2; docs/development/issues/2026-09-20-revisit-woff2-test-...):
+# 1 = the block goes through sankoch's Brotli ENCODER, so groups A, B, R and G run once more over a
+# genuinely compressed stream — prefix codes, context maps, block switching, back-references, all
+# of what a stored stream never reaches. ⚠ sankoch's encoder through sankoch's decoder is a round
+# trip, not an independent check; the stored emitter stays the gate (group S) and an accepted form.
+var g_w2_compress = 0;
 var g_tmp = 0;         # the transformed glyf under construction
 var g_out = 0;         # the rebuilt SFNT
 var g_w = 0;           # the WOFF2 container
@@ -254,7 +260,12 @@ fn w2_assemble(s, out, ntab, desc, blklen, total_sfnt, use_known): i64 {
         if (rekha_w2_has_tlen(tag, xf) == 1) { at = put128(out, at, load64(d + 24)); }
         i = i + 1;
     }
-    var clen = brotli_store(g_blk, blklen, out + at);
+    var clen = 0;
+    if (g_w2_compress != 0) {
+        clen = brotli_compress(g_blk, blklen, out + at, WCAP - at);
+    } else {
+        clen = brotli_store(g_blk, blklen, out + at);
+    }
     rekha_wr_u32(out, 20, clen);                            # totalCompressedSize
     rekha_wr_u32(out, 8, at + clen);                        # length
     return at + clen;
@@ -1452,6 +1463,145 @@ fn t_internals(): i64 {
     return 0;
 }
 
+# ── R3) THE SIZE CAP: a container's declared size against REKHA_WOFF2_MAXSIZE ──────────────
+# sd_alloc hook that records the largest request it sees
+var g_maxreq = 0;
+fn maxreq_hook(n): i64 {
+    if (n > g_maxreq) { g_maxreq = n; }
+    return alloc(n);
+}
+
+fn t_cap(): i64 {
+    g_group = "R3 size cap";
+    var n = rekha_rd_u16(g_face, 4);
+    g_wlen = w2_build_null(g_face, g_face_len, g_w, g_desc, 1);
+    check(rekha_font_open_woff2(g_w, g_wlen) != 0, 1);          # control: the container is valid
+    var blk = 0;
+    var i = 0;
+    while (i < n) {
+        blk = blk + load64(g_desc + i * 32 + 24);
+        i = i + 1;
+    }
+    var d = g_desc + (n - 1) * 32;
+    var last = load64(d + 24);
+    # ⛔ the last table declared so that the inflated block is EXACTLY 64 MB: still a size rekha
+    # reports; one byte more and the container is refused before anything is allocated. Through
+    # 1.1.1 nothing bounded it, and a 685-byte file asked for 21 MB (1.1.2 audit, mutate_test).
+    store64(d + 16, REKHA_WOFF2_MAXSIZE - (blk - last));
+    store64(d + 24, REKHA_WOFF2_MAXSIZE - (blk - last));
+    var len = w2_assemble(g_face, g_w, n, g_desc, blk, g_face_len, 1);
+    check(rekha_woff2_block_size(g_w, len), REKHA_WOFF2_MAXSIZE);
+    store64(d + 16, REKHA_WOFF2_MAXSIZE - (blk - last) + 1);
+    store64(d + 24, REKHA_WOFF2_MAXSIZE - (blk - last) + 1);
+    len = w2_assemble(g_face, g_w, n, g_desc, blk, g_face_len, 1);
+    check(rekha_woff2_block_size(g_w, len), 0);
+    g_maxreq = 0;
+    sd_alloc_set(&maxreq_hook);
+    check(rekha_font_open_woff2(g_w, len), 0);
+    sd_alloc_set(0);
+    check(g_maxreq < 1048576, 1);                                # the 64 MB was never asked for
+    return 0;
+}
+
+# ── R4) A LOCA SHORT OF THE hmtx TRANSFORM: the bearings are read back through loca ──────────────
+# A face of head · hhea · maxp (ng glyphs) · hmtx (TRANSFORMED, both bearing arrays omitted) · glyf
+# (null, all empty glyphs) · loca (null, `nloca` entries) — loca LAST, so it ends the rebuilt file.
+# Returns the container's length in g_w; the SFNT it should rebuild to lands in g_hl_total.
+var g_hl_total = 0;
+fn hl_build(ng, lfmt, nloca): i64 {
+    var esz = 2;
+    if (lfmt == 1) { esz = 4; }
+    var glen = 64;
+    memset(g_blk, 0, 4096);
+    var at = 0;
+    rekha_wr_u32(g_blk, at, 0x00010000);
+    rekha_wr_u32(g_blk, at + 12, 0x5F0F3CF5);
+    rekha_wr_u16(g_blk, at + 18, 1000);
+    rekha_wr_u16(g_blk, at + 50, lfmt);
+    at = at + 54;
+    rekha_wr_u32(g_blk, at, 0x00010000);
+    rekha_wr_u16(g_blk, at + 34, 1);                              # numberOfHMetrics
+    at = at + 36;
+    rekha_wr_u32(g_blk, at, 0x00005000);
+    rekha_wr_u16(g_blk, at + 4, ng);
+    at = at + 6;
+    store8(g_blk + at, 3);                                        # flags: both lsb arrays omitted
+    rekha_wr_u16(g_blk, at + 1, 500);
+    at = at + 3;
+    memset(g_blk + at, 0x37, glen);
+    at = at + glen;
+    at = at + nloca * esz;                                        # every offset 0: empty glyphs
+    var hmtx_len = 4 + (ng - 1) * 2;
+    var tags: i64[6];
+    var xfs: i64[6];
+    var ols: i64[6];
+    var dls: i64[6];
+    tags[0] = REKHA_TAG_HEAD2;  xfs[0] = 0;  ols[0] = 54;           dls[0] = 54;
+    tags[1] = REKHA_TAG_HHEA2;  xfs[1] = 0;  ols[1] = 36;           dls[1] = 36;
+    tags[2] = REKHA_TAG_MAXP2;  xfs[2] = 0;  ols[2] = 6;            dls[2] = 6;
+    tags[3] = REKHA_TAG_HMTX2;  xfs[3] = 1;  ols[3] = hmtx_len;     dls[3] = 3;
+    tags[4] = REKHA_TAG_GLYF2;  xfs[4] = 3;  ols[4] = glen;         dls[4] = glen;
+    tags[5] = REKHA_TAG_LOCA2;  xfs[5] = 3;  ols[5] = nloca * esz;  dls[5] = nloca * esz;
+    g_hl_total = 12 + 6 * 16;
+    var i = 0;
+    while (i < 6) {
+        var d = g_desc + i * 32;
+        store64(d, tags[i]);
+        store64(d + 8, xfs[i]);
+        store64(d + 16, ols[i]);
+        store64(d + 24, dls[i]);
+        g_hl_total = g_hl_total + rekha_pad4(ols[i]);
+        i = i + 1;
+    }
+    g_wlen = w2_assemble(g_face, g_w, 6, g_desc, at, g_hl_total, 1);
+    return g_wlen;
+}
+
+# Decode the container in g_w into g_out with 4 KB of room past the SFNT filled with `fill`.
+fn hl_decode(fill): i64 {
+    var tdlen = rekha_woff2_block_size(g_w, g_wlen);
+    if (rekha_woff2_inflate(g_w, g_wlen, g_tmp, tdlen) != tdlen) { return 0 - 1; }
+    var size = rekha_woff2_sfnt_size(g_w, g_wlen, g_tmp, tdlen);
+    if (size == 0) { return 0; }
+    memset(g_out, fill, size + 4096);
+    return rekha_woff2_decode(g_w, g_wlen, g_tmp, tdlen, g_out, size + 4096);
+}
+
+fn t_hmtx_loca(): i64 {
+    g_group = "R4 loca under hmtx";
+    var lfmt = 0;
+    while (lfmt < 2) {
+        var ng = 40;
+        # control: ng + 1 entries rebuilds, and reads nothing past the file — two fills, one answer
+        hl_build(ng, lfmt, ng + 1);
+        check(hl_decode(0), g_hl_total);
+        var a = 0;
+        var k = 0;
+        while (k < g_hl_total) {
+            a = a * 31 + load8(g_out + k);
+            k = k + 1;
+        }
+        check(hl_decode(0xFF), g_hl_total);
+        var b = 0;
+        k = 0;
+        while (k < g_hl_total) {
+            b = b * 31 + load8(g_out + k);
+            k = k + 1;
+        }
+        check(a, b);
+        # ⛔ one entry short is REFUSED before anything is rebuilt. Through 1.1.1 the bearings were
+        # read on past loca's end — past the whole rebuilt file here, since loca is laid out last:
+        # a 125 KB face read 60 KB beyond its buffer (1.1.2 audit; FreeType reads on, rekha refuses).
+        hl_build(ng, lfmt, ng);
+        var tdlen = rekha_woff2_block_size(g_w, g_wlen);
+        check(rekha_woff2_inflate(g_w, g_wlen, g_tmp, tdlen), tdlen);
+        check(rekha_woff2_sfnt_size(g_w, g_wlen, g_tmp, tdlen), 0);
+        check(rekha_font_open_woff2(g_w, g_wlen), 0);
+        lfmt = lfmt + 1;
+    }
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     g_face_len = rekha_face_default_len();
@@ -1488,11 +1638,26 @@ fn main(): i64 {
     t_null();
     t_xform();
     t_refuse();
+    t_cap();
+    t_hmtx_loca();
     t_refuse_block();
     t_guard();
     t_coll();
     t_coll_refuse();
     t_internals();
+    # the third variant: the same groups over sankoch-compressed streams — and it really is one
+    g_group = "C compressed";
+    var stored = w2_build_null(g_face, g_face_len, g_w, g_desc, 1);
+    g_w2_compress = 1;
+    var packed = w2_build_null(g_face, g_face_len, g_w, g_desc, 1);
+    check(packed > 0, 1);
+    check(packed < stored, 1);
+    check(font_digest(rekha_font_open_woff2(g_w, packed)), font_digest(rekha_font_open(g_face, g_face_len)));
+    t_null();
+    t_xform();
+    t_refuse();
+    t_guard();
+    g_w2_compress = 0;
     if (g_fails == 0) {
         var ok = "woff2_test: PASS (";
         syscall(1, 1, ok, strlen(ok));

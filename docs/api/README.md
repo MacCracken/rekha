@@ -72,7 +72,7 @@ spend **2,099,200** gvar point-passes (512 tuples x 4,100 points); a collection 
 slots once FreeType's margin of half again is added), 8,192 storage slots, 4,096 functions,
 256 instruction defs, 16,384 control values, 4,096 twilight points and 4,092 glyph points (4,096
 with the four phantoms); WOFF inflation is capped at 1,032:1 and WOFF2 at what the header
-declares.
+declares, never past **64 MB** inflated or rebuilt (FreeType's limit; 1.1.2).
 A hinting refusal never draws a partially hinted glyph: the outline comes back unhinted.
 
 **5. The sadish seam.** rekha never rasterizes. `rekha_char_to_sdpath` /
@@ -117,7 +117,8 @@ sets, and what it allocates; an HTML comment carries the `src/` line the entry w
 - **Fixes**: a documented answer that was measured wrong against a font's own tables or against
   FreeType is a bug, fixed in a patch release and recorded with the measurement.
 - **Consumers below cyrius 6.6.6** cannot compile the bundle (`private` / `public` are reserved
-  words from 6.5.0). The sadish floor is 0.11.2.
+  words from 6.5.0). The sadish floor is 0.9.0 — the reasons are in the top-level README's
+  *Dependencies*. Through 1.1.1 this line said 0.11.2, the version pinned at the freeze, not a floor.
 - **What a 1.x release may still change**: the stdlib leaves a bundle needs (pinned in CI, and a
   change is a CHANGELOG line), the toolchain rekha itself builds with, and anything not on this
   surface — internals, test seams, comments. Refuse-don't-guess holds for the line

@@ -1,6 +1,7 @@
 # Revisit the WOFF2 suite with a REAL Brotli encoder once sankoch's encoder lands (now 2.8.4)
 
-**Status:** 🟢 **OPEN and UNBLOCKED — nothing is waited on; the steps below can be taken.**
+**Status:** ✅ **RESOLVED at 1.1.2** (steps 1–3 below; step 4 not re-run — see the 1.1.2 note).
+Was: 🟢 OPEN and UNBLOCKED — nothing is waited on; the steps below can be taken.
 Reviewed 2026-10-30 at rekha 1.1.1: the cyrius 6.7.18 pin carries sankoch 2.8.9, encoder included.
 Reviewed 2026-10-29 at 1.1.0: sankoch 2.8.4 had shipped the encoder, and rekha's 6.7.9 pin predated
 the first stdlib that folds it (6.7.11). Reviewed 2026-10-13 at 1.0.0: the trigger this file was
@@ -19,6 +20,25 @@ follow-up, recorded so the gap does not quietly become permanent.
 **Severity:** a **coverage gap in CI**, not a defect, and not a 1.0.0 blocker — it is test-only
 and every step of the plan below is additive. Every claim 0.4.6 makes is true; one class of input
 is reached today only by a measurement that CI cannot run.
+
+## Resolved 2026-10-30 (rekha 1.1.2, cyrius 6.7.18)
+
+- **Step 1, taken.** `programs/woff2_test.cyr` has the third variant: `g_w2_compress = 1` sends the
+  table-data block through sankoch's `brotli_compress` in `w2_assemble`, and groups A, B, R and G
+  (`t_null`, `t_xform`, `t_refuse`, `t_guard`) run again over genuinely compressed streams — 191
+  checks became 293, both DCE modes. Group C pins that the variant really compresses (the null
+  container is smaller than its stored twin) and that it decodes to the embedded face's digest.
+- **Step 2, kept.** `brotli_store` and group S stay: a stored stream is a legal encoding rekha must
+  go on accepting, and it is the gate the rest of the stored passes stand on.
+- **Step 3, the floor.** Nothing in `src/` compresses; only the test needs the encoder, so the
+  published `[lib.woff]` sankoch floor is unchanged. The 1.1.2 CHANGELOG says so.
+- **Also (1.1.2):** `programs/mutate_test.cyr` takes a Brotli-compressed WOFF2 (`woff2z`) and a
+  stored, transformed one (`woff2x`) through 1,000 mutants each; its first run found the declared
+  size cap rekha now enforces (`REKHA_WOFF2_MAXSIZE`, 64 MB, FreeType's).
+- **Step 4, NOT re-run.** fontTools is not on the dev host this release ran on, so the 280-file
+  differential against fontTools 4.65.0 is still dated 0.4.6. ⚠ The independence caveat stands: an
+  encoder and decoder from one author can share a mistake; the reference-encoder fixture remains
+  the maintainer's call.
 
 ## Reviewed 2026-10-30 (rekha 1.1.1, cyrius 6.7.18) — unblocked here
 

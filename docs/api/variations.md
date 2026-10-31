@@ -62,7 +62,7 @@ fn rekha_var_axis_count(font): i64
 
 Number of fvar axes the font declares. Returns 0 for a null font, a font with no fvar, or an fvar the resolver refused (majorVersion != 1, axisCount < 1 or > 64, axisSize < 20, or axis records past the table end). Never records a RekhaErrCode (rekha_var_resolve never fails an open); no allocation.
 
-<!-- src/var.cyr:72 -->
+<!-- src/var.cyr:73 -->
 
 ### `rekha_var_axis_tag(font, i)`
 
@@ -72,7 +72,7 @@ fn rekha_var_axis_tag(font, i): i64
 
 Axis i's four-byte tag as a big-endian u32 (e.g. 'wght'), read at record offset 0. Returns 0 for a null font or an index outside [0, rekha_var_axis_count). No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:86 -->
+<!-- src/var.cyr:87 -->
 
 ### `rekha_var_axis_name_id(font, i)`
 
@@ -82,7 +82,7 @@ fn rekha_var_axis_name_id(font, i): i64
 
 The axisNameID of axis i (u16 at record offset 18), to pass to rekha_name_utf8 for the label text. Returns 0 when the font has no such axis (null font or bad index). No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:106 -->
+<!-- src/var.cyr:107 -->
 
 ### `rekha_var_axis_min(font, i)`
 
@@ -92,7 +92,7 @@ fn rekha_var_axis_min(font, i): i64
 
 Axis i's minValue as a signed 16.16 user value (fvar Fixed at record offset 4, sign-extended from the u32 read: v >= 0x80000000 -> v - 0x100000000). Returns 0 for a bad index or null font. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:113 -->
+<!-- src/var.cyr:114 -->
 
 ### `rekha_var_axis_default(font, i)`
 
@@ -102,7 +102,7 @@ fn rekha_var_axis_default(font, i): i64
 
 Axis i's defaultValue as a signed 16.16 user value (fvar Fixed at record offset 8, sign-extended). Returns 0 for a bad index or null font. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:114 -->
+<!-- src/var.cyr:115 -->
 
 ### `rekha_var_axis_max(font, i)`
 
@@ -112,7 +112,7 @@ fn rekha_var_axis_max(font, i): i64
 
 Axis i's maxValue as a signed 16.16 user value (fvar Fixed at record offset 12, sign-extended). Returns 0 for a bad index or null font. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:115 -->
+<!-- src/var.cyr:116 -->
 
 ### `rekha_var_instance_count(font)`
 
@@ -122,7 +122,7 @@ fn rekha_var_instance_count(font): i64
 
 Number of fvar named instances the font ships. Returns 0 for a null font, no instances, or an instance array the resolver refused (instanceCount > 4096, instanceSize other than axisCount x 4 + 4 or axisCount x 4 + 6, or records past the table end); a refused instance array loses only the instances, the axes stay. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:287 -->
+<!-- src/var.cyr:288 -->
 
 ### `rekha_var_instance_name_id(font, i)`
 
@@ -132,7 +132,7 @@ fn rekha_var_instance_name_id(font, i): i64
 
 Instance i's subfamilyNameID (u16 at record offset 0), to pass to rekha_name_utf8. Returns 0 when there is no such instance. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:302 -->
+<!-- src/var.cyr:303 -->
 
 ### `rekha_var_instance_ps_name_id(font, i)`
 
@@ -142,7 +142,7 @@ fn rekha_var_instance_ps_name_id(font, i): i64
 
 Instance i's postScriptNameID (u16 at record offset 4 + axisCount x 4). Returns 0 when there is no such instance or when instanceSize != axisCount x 4 + 6 — ⚠ the field is OPTIONAL and its presence is told by instanceSize alone. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:311 -->
+<!-- src/var.cyr:312 -->
 
 ### `rekha_var_instance_flags(font, i)`
 
@@ -152,7 +152,7 @@ fn rekha_var_instance_flags(font, i): i64
 
 Instance i's flags u16 (record offset 2); every bit is reserved as of OpenType 1.9. Returns 0 when there is no such instance. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:320 -->
+<!-- src/var.cyr:321 -->
 
 ### `rekha_var_instance_coord(font, i, a)`
 
@@ -162,7 +162,7 @@ fn rekha_var_instance_coord(font, i, a): i64
 
 Instance i's coordinate on axis a as a signed 16.16 USER value (record offset 4 + a x 4, sign-extended from the u32). Returns 0 when either index is out of range — ⚠ 0 is a real coordinate on most axes, so check rekha_var_instance_count and rekha_var_axis_count first. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:328 -->
+<!-- src/var.cyr:329 -->
 
 ### `rekha_var_set_instance(font, i)`
 
@@ -172,7 +172,7 @@ fn rekha_var_set_instance(font, i): i64
 
 Puts every axis at instance i's user coordinates through rekha_var_set_axis, so the next rekha_load_glyph draws that style. Returns 1, or 0 when there is no such instance (or a rekha_var_set_axis call fails). ⛔ It sets EVERY axis, including ones the instance leaves at default — a named instance is a whole location. Allocates on first use exactly as rekha_var_set_axis does and marks a cached hint context stale; no RekhaErrCode.
 
-<!-- src/var.cyr:341 -->
+<!-- src/var.cyr:342 -->
 
 ### `rekha_var_coord(font, i)`
 
@@ -182,7 +182,7 @@ fn rekha_var_coord(font, i): i64
 
 The normalized 16.16 coordinate axis i currently sits at (after avar), in [-65536, 65536] — an avar map that points past ±1.0 is clamped to it, and an axis whose fvar min / default / max are out of order sits at 0, FreeType's rule (1.1.2); 0 at the default location and until rekha_var_set_axis moves it. Returns 0 for a null font, an index outside [0, rekha_var_axis_count), or before the coordinate array exists — 0 is indistinguishable from 'at default'. No allocation, no RekhaErrCode.
 
-<!-- src/var.cyr:355 -->
+<!-- src/var.cyr:356 -->
 
 ### `rekha_var_set_axis(font, i, value)`
 
@@ -192,7 +192,7 @@ fn rekha_var_set_axis(font, i, value): i64
 
 Puts axis i at value (16.16 USER units, the scale fvar's min / default / max use), normalizes it, applies avar, rebuilds every region scalar, and marks a cached rekha_hint_ctx stale via a forward call to rekha_hint_axes_changed so the next rekha_hint_ctx re-runs prep. Returns 1 on success, 0 for a null font, a font with no axes, a bad index, or an allocation failure — which leaves the previous location in force (through 1.1.1 the coordinate moved while the scalars did not); no RekhaErrCode. avar is read inside its own declared length, never from the bytes after it. ⚠ ALLOCATION: the coordinate array (REKHA_VAR_MAXAXES * 8 = 512 bytes), the scalar array (REKHA_VAR_MAXREGION * 8 = 32768 bytes) and, on a face with `gvar`, gvar's 266,508-byte scratch are allocated on the first call, reused after, and never freed — the scratch here since 1.1.2, so that no glyph load allocates a block the handle keeps (through 1.1.1 the first varied load did, and one under a per-frame arena left the handle writing into reissued memory). ⚠ It changes what EVERY later rekha_load_glyph returns for this font and is not cheap enough for a per-glyph call: set the axes once, then draw.
 
-<!-- src/var.cyr:375 -->
+<!-- src/var.cyr:376 -->
 
 ### `rekha_var_reset(font)`
 
@@ -202,4 +202,4 @@ fn rekha_var_reset(font): i64
 
 Puts every axis back at its default: zeroes all REKHA_VAR_MAXAXES coordinate slots if the array exists, sets the region-scalar count (font+328) to 0, and marks a cached hint context stale as rekha_var_set_axis does. Returns 1 when the font has axes, 0 for a null font or one with no axes. Does not allocate or free; no RekhaErrCode.
 
-<!-- src/var.cyr:438 -->
+<!-- src/var.cyr:439 -->

@@ -111,13 +111,6 @@ fn rekha_cff2_axes_bad(font): i64 {
     return 0;
 }
 
-# The number of regions ItemVariationData[idx] blends over, or -1.
-fn rekha_cff2_regions(buf, vstore, end, idx): i64 {
-    var ivd = rekha_cff2_ivd(buf, vstore, end, idx);
-    if (ivd == 0) { return 0 - 1; }
-    return rekha_rd_u16(buf, ivd + 4);
-}
-
 # The ItemVariationData a Font DICT's glyphs start from: its Private DICT's `vsindex` (22) resolved
 # through the store, or 0. -1 only when an explicit vsindex names something the store does not have.
 # ⚠ Lenient in two places, on purpose. No Private DICT, no vsindex operator, or no variation store

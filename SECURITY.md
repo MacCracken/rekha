@@ -30,7 +30,8 @@ CI, not an aspiration:
   cycles; the hint machine takes at most 8,192 stack / storage slots, 4,096 functions, 256
   instruction defs, 16,384 control values, 4,096 zone points, and runs at most 1,000,000
   instructions per program at a `CALL` depth of 64; a WOFF may inflate at most 1,032:1, a
-  WOFF2 exactly what its header declares (both through sankoch's `*_decompress_capped`). A
+  WOFF2 exactly what its header declares and never past 64 MB inflated or rebuilt (FreeType's
+  `MAX_SFNT_SIZE`; 1.1.2) (both through sankoch's `*_decompress_capped`). A
   tripped cap yields an empty glyph, never a partial one ([ADR 0002](docs/adr/0002-refuse-dont-guess.md)).
   Fan-out was the finding that motivated the budget: a 288-byte font that asked for 96 MB.
 - **Allocation never faults.** Every allocation goes through the consumer's `sd_alloc` hook
@@ -52,6 +53,11 @@ CI, not an aspiration:
 
 ## Evidence
 
+- **1.1.2** ([the P(-1) dossier](docs/audit/2026-10-30-1.1.2-p-1.md)): three out-of-bounds reads
+  reachable from a font alone — CFF FDSelect, a short STAT, and the WOFF2 `hmtx` transform reading
+  `loca` past its end — plus 21 MEDIUM, 39 LOW and 6 INFO findings. Each is fixed with a
+  mutation-checked test, corrected in the docs, or recorded as a divergence from FreeType, and
+  every new refusal was swept against the host's 2,155 faces before it landed.
 - **0.3.11** (CHANGELOG): four out-of-bounds reads reachable from `rekha_char_to_sdpath` with a
   font `rekha_font_open` accepts — each proven by a sentinel differential, then forced to fault
   at a guard page — and the composite fan-out bound; 88 raw findings across eight audit lenses,
@@ -60,8 +66,17 @@ CI, not an aspiration:
   seeded 120-mutant sweep over the embedded face (undone byte by byte and re-verified), and an
   A/B sentinel differential across the allocation seam (a 4,096-byte redzone, 256 sentinel
   bytes around every font, two fill patterns, an FNV-1a digest per sweep — a one-byte overread
-  changes the digest); since 0.8.2 every gid is also hinted (240,908 hinted loads over the
-  mutants, a refused mutant answering 0 and an empty view, never a fault).
+  changes the digest); since 0.8.2 every gid is also hinted (238,294 hinted loads over the
+  mutants at 1.1.2, a refused mutant answering 0 and an empty view, never a fault).
+- **`programs/mutate_test.cyr`** (1.1.2), in CI on every push: the same differential carried past
+  the TrueType face to seven seeds built in code — a CFF face, a CFF2 variable face, a `gvar` /
+  HVAR / MVAR / GPOS face with hinting tables, that face as a stored and a zlib WOFF, as a WOFF2
+  with glyf / loca / hmtx transformed, and the CFF face as a Brotli WOFF2 — 1,000 mutants each,
+  aimed at the fields the builders mark, with a sentinel gap after every table and every pool
+  block so a read past either end shows. Its first run found a 685-byte WOFF2 asking for 21 MB,
+  now capped at FreeType's 64 MB. Both loops also sweep every mutant once more under the stdlib's
+  `poison_alloc` (32-byte redzones around every block rekha allocates, checked after the sweep),
+  so a WRITE past a block — which a read differential cannot see — stops the run with exit 86.
 - **0.8.2's dev-host sweep**: the 25 unit fonts under a full single-byte and u16 mutation of
   every offset, ~85 M checks under a guard-page allocator with canaries; 75,000 random glyph
   programs through the composite loader; 400 face mutants; all 1,750 host TTFs — 0 faults,

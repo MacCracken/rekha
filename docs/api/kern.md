@@ -39,7 +39,7 @@ fn rekha_kern_present(font): i64
 
 Returns 1 when the handle resolved a legacy `kern` table rekha can walk (Microsoft version 0 or Apple 0x00010000), else 0; a 0 handle returns 0. Allocates nothing and records no RekhaErrCode. ⚠ 0 does NOT mean the font has no kerning — a modern face keeps it in GPOS; `rekha_kern_source` is the question to ask.
 
-<!-- src/kern.cyr:79 -->
+<!-- src/kern.cyr:80 -->
 
 ### `rekha_kern_table_pair(font, l, r)`
 
@@ -49,7 +49,7 @@ fn rekha_kern_table_pair(font, l, r): i64
 
 The adjustment for glyph pair (l, r) from the legacy `kern` table ALONE, in design units, usually negative. Returns 0 when the font has no `kern`, when l or r is < 0 or > 65535, when the pair is not in the table, or when every subtable that could carry it is one rekha skips (format != 0, non-HORIZONTAL, CROSS_STREAM, MINIMUM); OVERRIDE subtables replace the accumulated total, others add. The walk is capped at REKHA_KERN_MAXSUB (256) subtables; allocates nothing and records no RekhaErrCode. ⚠ `rekha_kern_pair` is the one to call: since 0.6.6 it prefers GPOS.
 
-<!-- src/kern.cyr:120 -->
+<!-- src/kern.cyr:121 -->
 
 ### `rekha_kern_source(font)`
 
@@ -59,7 +59,7 @@ fn rekha_kern_source(font): i64
 
 Answers where the font keeps its kerning: 0 neither, 1 the legacy `kern` table, 2 GPOS; a 0 handle returns 0. ⛔ NOT BOTH: GPOS wins when a face carries both, because such a face usually says the same thing twice and adding them would double every pair. Allocates nothing directly (the GPOS presence probe it calls resolves GPOS kern lookups lazily on first query) and records no RekhaErrCode.
 
-<!-- src/kern.cyr:200 -->
+<!-- src/kern.cyr:201 -->
 
 ### `rekha_kern_pair(font, l, r)`
 
@@ -69,7 +69,7 @@ fn rekha_kern_pair(font, l, r): i64
 
 THE kerning adjustment for glyph pair (l, r) in design units, from wherever the font keeps it: GPOS when the font has a `kern` feature there (since 0.6.6), the legacy table otherwise; `rekha_kern_source` says which answered. Returns 0 for a 0 handle, an out-of-range gid (< 0 or > 65535), an absent pair, or a font with neither table; records no RekhaErrCode. Allocates nothing itself; the first GPOS query on a handle resolves its kern lookups lazily into one 512 B sd_alloc. ⛔ A GPOS `kern` feature that needs more than REKHA_GPOS_MAXLOOKUP (64) distinct lookups, walks more than REKHA_GPOS_MAXPAIRS (4,096) feature-lookup entries, or declares more than REKHA_GPOS_MAXSUB (1,024) subtables over the lookups it keeps — each one a PairPos evaluation per query — is refused WHOLE — never summed in part, as through 1.1.1 — and the face then kerns as one without GPOS kerning (the legacy table, if any). The host's 2,155 faces need at most 12 lookups, 29 entries and 19 subtables.
 
-<!-- src/kern.cyr:210 -->
+<!-- src/kern.cyr:211 -->
 
 ### `rekha_kern_pair_px(font, l, r, px_size)`
 
@@ -79,7 +79,7 @@ fn rekha_kern_pair_px(font, l, r, px_size): i64
 
 The same adjustment as rekha_kern_pair scaled to whole pixels at `px_size`: floor((v * px_size + upem / 2) / upem), i.e. rounded HALF UP as every other rounding in rekha is. ⚠ Half up, not half away from zero: -1.5 px comes back -1. Returns 0 when units-per-em is <= 0 (including a 0 handle) or when the design-unit adjustment is 0; records no RekhaErrCode and allocates nothing itself (the first GPOS query on a handle resolves 512 B, as rekha_kern_pair says).
 
-<!-- src/kern.cyr:217 -->
+<!-- src/kern.cyr:218 -->
 
 ### `rekha_char_kern(font, cp1, cp2)`
 
@@ -89,4 +89,4 @@ fn rekha_char_kern(font, cp1, cp2): i64
 
 The kerning adjustment between two CHARACTERS (codepoints cp1, cp2) in design units, mapped through cmap then answered by rekha_kern_pair. Returns 0 when either codepoint maps to gid 0 (unmapped, or no usable cmap) or the handle is 0; clears and may set rekha_font_error through rekha_char_to_glyph (OTHER "codepoint", NO_TABLE "cmap", BAD_SFNT "cmap glyph id"), and allocates nothing itself (the first GPOS query on a handle resolves 512 B, as rekha_kern_pair says).
 
-<!-- src/kern.cyr:227 -->
+<!-- src/kern.cyr:228 -->
