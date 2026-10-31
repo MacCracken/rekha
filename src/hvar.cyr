@@ -5,9 +5,10 @@
 # `hmtx` in design units and consulted no variation store. This is that store:
 #
 #   HVAR — per-glyph advance widths (and side bearings). An ItemVariationStore plus up to three
-#          DeltaSetIndexMaps, one per metric. rekha reads the ADVANCE map.
-#   MVAR — font-wide metrics, one ValueRecord per four-byte tag. rekha reads the three the line box
-#          is made of: `hasc`, `hdsc`, `hlgp` — hhea's ascender, descender and lineGap.
+#          DeltaSetIndexMaps, one per metric. rekha reads the ADVANCE map and the LSB map (0.8.2,
+#          rekha_hvar_lsb_delta); the rsb map is not read.
+#   MVAR — font-wide metrics, one ValueRecord per four-byte tag. rekha reads every tag in the table
+#          below (the OS/2, post and hhea fields it has a reader for).
 #
 # ⭐ THE REGION MACHINERY IS var.cyr's, UNCHANGED. `rekha_var_region_scalar` already turns a region
 # of a variation store into one 16.16 scalar at the current axis setting; everything here is the
@@ -104,7 +105,11 @@ fn rekha_ivs_delta(font, ivs, ivend, outer, inner, out): i64 {
     var ndata = rekha_rd_u16(buf, ivs + 6);
     if (outer < 0 || outer >= ndata) { return 0; }
     if (ivs + 8 + ndata * 4 > ivend) { return 0; }
-    var ivd = ivs + rekha_rd_u32(buf, ivs + 8 + outer * 4);
+    # ⛔ A NULL subtable offset is "no variation", the spec's rule for it: the default, answered as
+    # such. Through 1.1.1 the store's own header was read as a subtable (1.1.2 audit).
+    var ivo = rekha_rd_u32(buf, ivs + 8 + outer * 4);
+    if (ivo == 0) { return 1; }
+    var ivd = ivs + ivo;
     if (ivd < ivs) { return 0; }
     if (ivd + 6 > ivend) { return 0; }
     var icount = rekha_rd_u16(buf, ivd);
@@ -203,9 +208,91 @@ fn rekha_dsim(font, map, end, idx, out): i64 {
     return 1;
 }
 
-# Cache HVAR and MVAR at open. Both are validated for version and header extent only; everything
-# below them is bounds-checked at the point of use, because a metric query reads one row and not
-# the table.
+# An ItemVariationStore FreeType would load (tt_var_load_item_variation_store, ttgxvar.c): format 1,
+# at least one subtable, a region list over EXACTLY fvar's axes and fewer than 32,768 regions, and
+# every subtable with word deltas <= region indexes <= regions, each index a region. A NULL subtable
+# offset is skipped — the spec's "no variation". 1 = valid. Walks the store once, at open.
+# ⛔ FreeType drops a table whose store fails this — HVAR, VVAR, MVAR alike — and falls back:
+# without HVAR its hinted advance takes gvar's phantoms. Through 1.1.1 rekha kept such a table,
+# answered 0 deltas from it per query, and still threw gvar's phantoms away (1.1.2 audit).
+fn rekha_ivs_ok(f, ivs, end): i64 {
+    var buf = load64(f);
+    if (ivs + 8 > end) { return 0; }
+    if (rekha_rd_u16(buf, ivs) != 1) { return 0; }
+    var nd = rekha_rd_u16(buf, ivs + 6);
+    if (nd == 0) { return 0; }
+    if (ivs + 8 + nd * 4 > end) { return 0; }
+    var rl = ivs + rekha_rd_u32(buf, ivs + 2);
+    if (rl < ivs || rl + 4 > end) { return 0; }
+    var na = rekha_rd_u16(buf, rl);
+    var nr = rekha_rd_u16(buf, rl + 2);
+    if (na != load64(f + 280)) { return 0; }
+    if (nr >= 32768) { return 0; }
+    if (rl + 4 + nr * na * 6 > end) { return 0; }
+    var i = 0;
+    while (i < nd) {
+        var off = rekha_rd_u32(buf, ivs + 8 + i * 4);
+        if (off != 0) {
+            var d = ivs + off;
+            if (d + 6 > end) { return 0; }
+            var wdc = rekha_rd_u16(buf, d + 2) & 32767;
+            var ric = rekha_rd_u16(buf, d + 4);
+            if (wdc > ric || ric > nr) { return 0; }
+            if (d + 6 + ric * 2 > end) { return 0; }
+            var j = 0;
+            while (j < ric) {
+                if (rekha_rd_u16(buf, d + 6 + j * 2) >= nr) { return 0; }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# A DeltaSetIndexMap FreeType would load (tt_var_load_delta_set_index_mapping): format 0 or 1, no
+# reserved entry bits, its entries inside the table, and every entry's outer index a subtable of the
+# store — except NO_VARIATION_INDEX (0xFFFF / 0xFFFF in a 4-byte entry). 1 = valid.
+fn rekha_dsim_ok(f, map, end, ivs): i64 {
+    var buf = load64(f);
+    if (map + 4 > end) { return 0; }
+    var fmt = load8(buf + map);
+    var ef = load8(buf + map + 1);
+    if ((ef & 192) != 0) { return 0; }
+    var hdr = 4;
+    var n = 0;
+    if (fmt == 0) {
+        n = rekha_rd_u16(buf, map + 2);
+    } else {
+        if (fmt != 1) { return 0; }
+        if (map + 6 > end) { return 0; }
+        hdr = 6;
+        n = rekha_rd_u32(buf, map + 2);
+    }
+    var esz = ((ef >> 4) & 3) + 1;
+    var ibits = (ef & 15) + 1;
+    if (map + hdr + n * esz > end) { return 0; }
+    var nd = rekha_rd_u16(buf, ivs + 6);
+    var k = 0;
+    while (k < n) {
+        var v = 0;
+        var b = 0;
+        while (b < esz) {
+            v = v * 256 + load8(buf + map + hdr + k * esz + b);
+            b = b + 1;
+        }
+        # 0xFFFFFFFF is NO_VARIATION_INDEX (outer and inner 0xFFFF), FreeType's one exception
+        if (v != 0xFFFFFFFF) {
+            if ((v >> ibits) >= nd) { return 0; }
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+# Cache HVAR and MVAR at open, each only when its store — and HVAR's advance map, which is what
+# makes it supply the advance — is one FreeType would load (rekha_ivs_ok, 1.1.2). Rows below them
+# are still bounds-checked at the point of use, because a metric query reads one row.
 fn rekha_hvar_resolve(f): i64 {
     store64(f + 416, 0);
     store64(f + 424, 0);
@@ -217,8 +304,15 @@ fn rekha_hvar_resolve(f): i64 {
     if (hv != 0) {
         if (load64(&c) >= 20) {
             if (rekha_rd_u16(buf, hv) == 1) {
-                store64(f + 416, hv);
-                store64(f + 424, hv + load64(&c));
+                var hend = hv + load64(&c);
+                var hivs = hv + rekha_rd_u32(buf, hv + 4);
+                var amap = rekha_rd_u32(buf, hv + 8);
+                var ok = rekha_ivs_ok(f, hivs, hend);
+                if (ok != 0 && amap != 0) { ok = rekha_dsim_ok(f, hv + amap, hend, hivs); }
+                if (ok != 0) {
+                    store64(f + 416, hv);
+                    store64(f + 424, hend);
+                }
             }
         }
     }
@@ -226,8 +320,13 @@ fn rekha_hvar_resolve(f): i64 {
     if (mv != 0) {
         if (load64(&c) >= 12) {
             if (rekha_rd_u16(buf, mv) == 1) {
-                store64(f + 432, mv);
-                store64(f + 440, mv + load64(&c));
+                var mend = mv + load64(&c);
+                var mivso = rekha_rd_u16(buf, mv + 10);
+                # an MVAR with no records may carry no store (offset 0); one with records needs it
+                if (rekha_rd_u16(buf, mv + 8) == 0 || rekha_ivs_ok(f, mv + mivso, mend) != 0) {
+                    store64(f + 432, mv);
+                    store64(f + 440, mend);
+                }
             }
         }
     }

@@ -30,9 +30,9 @@ font saying which it means, and the choice is the consumer's. A `0` from any met
 fn rekha_char_to_glyph(font, cp): i64
 ```
 
-Maps Unicode codepoint `cp` to a glyph id through the subtable chosen at open; returns 0 (.notdef) if the handle is 0, cp is outside 0..U+10FFFF (rekha_font_error = REKHA_ERR_OTHER, detail "codepoint"), there is no usable subtable (REKHA_ERR_NO_TABLE, "cmap"), or the mapped id is >= maxp.numGlyphs when maxp is present (REKHA_ERR_BAD_SFNT, "cmap glyph id"); an UNMAPPED character returns 0 with REKHA_OK — .notdef is the right answer, not an error. Clears the error on entry (after the 0-handle check), allocates 0 B. ⚠ Coverage follows the chosen table (format 4 / 6 / 0 cannot reach past U+FFFF / its range / U+00FF); a (3,0) SYMBOL table is retried at U+F000 + cp when cp <= U+00FF misses.
+Maps Unicode codepoint `cp` to a glyph id through the subtable chosen at open; returns 0 (.notdef) if the handle is 0, cp is outside 0..U+10FFFF (rekha_font_error = REKHA_ERR_OTHER, detail "codepoint"), there is no usable subtable (REKHA_ERR_NO_TABLE, "cmap"), or the mapped id is past 0xFFFF or >= maxp.numGlyphs when maxp is present (REKHA_ERR_BAD_SFNT, "cmap glyph id"; through 1.1.1 a format 12 / 13 id past 0xFFFF read as unmapped); an UNMAPPED character returns 0 with REKHA_OK — .notdef is the right answer, not an error. Clears the error on entry (after the 0-handle check), allocates 0 B. ⚠ Coverage follows the chosen table (format 4 / 6 / 0 cannot reach past U+FFFF / its range / U+00FF); a (3,0) SYMBOL table is retried at U+F000 + cp when cp <= U+00FF misses. A format 4 odd segCountX2 is floored to even, as FreeType does; a format 4 table whose segments overlap with a start or end out of order is looked up linearly in table order, FreeType's UNSORTED rule; a format 12 / 13 table whose groups run backwards or overlap is not chosen (1.1.2).
 
-<!-- src/cmap.cyr:257 -->
+<!-- src/cmap.cyr:331 -->
 
 ### `rekha_char_advance(font, cp)`
 
@@ -40,9 +40,9 @@ Maps Unicode codepoint `cp` to a glyph id through the subtable chosen at open; r
 fn rekha_char_advance(font, cp): i64
 ```
 
-Advance width of codepoint `cp` in font DESIGN UNITS, = rekha_advance_width(font, rekha_char_to_glyph(font, cp)); 0 = unknown (and inherits rekha_char_to_glyph's error codes for a bad handle / codepoint / missing cmap). ⚠ An unmapped codepoint resolves to .notdef (gid 0), whose advance is a real metric in most fonts, so missing text still advances by the .notdef box rather than collapsing to zero. Allocates nothing.
+Advance width of codepoint `cp` in font DESIGN UNITS, = rekha_advance_width(font, rekha_char_to_glyph(font, cp)); 0 = unknown (and inherits rekha_char_to_glyph's error codes for a bad handle / codepoint / missing cmap — kept past the advance reader's own clear since 1.1.2; the answer is still .notdef's advance). ⚠ An unmapped codepoint resolves to .notdef (gid 0), whose advance is a real metric in most fonts, so missing text still advances by the .notdef box rather than collapsing to zero. Allocates nothing.
 
-<!-- src/cmap.cyr:314 -->
+<!-- src/cmap.cyr:390 -->
 
 ### `rekha_char_advance_px(font, cp, px_size)`
 
@@ -50,9 +50,9 @@ Advance width of codepoint `cp` in font DESIGN UNITS, = rekha_advance_width(font
 fn rekha_char_advance_px(font, cp, px_size): i64
 ```
 
-Advance of `cp` in integer PIXELS at `px_size`, rounded half-up (nearest); = rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size). ⚠ Returns 0 when the metric is unknown OR `upem` is 0, so the caller's fallback is a single `== 0` test. ⛔ PER-GLYPH ROUNDING HALVES THE BIAS; IT DOES NOT STOP THE DRIFT — a run built by summing these integers accumulates up to half a pixel per glyph; exact run widths come from summing 16.16 advances (rekha_char_advance_fx) and rounding the pen ONCE. Allocates nothing.
+Advance of `cp` in integer PIXELS at `px_size`, rounded half-up (nearest); = rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size), keeping rekha_char_to_glyph's code as rekha_char_advance does (1.1.2). ⚠ Returns 0 when the metric is unknown OR `upem` is 0, so the caller's fallback is a single `== 0` test. ⛔ PER-GLYPH ROUNDING HALVES THE BIAS; IT DOES NOT STOP THE DRIFT — a run built by summing these integers accumulates up to half a pixel per glyph; exact run widths come from summing 16.16 advances (rekha_char_advance_fx) and rounding the pen ONCE. Allocates nothing.
 
-<!-- src/cmap.cyr:330 -->
+<!-- src/cmap.cyr:419 -->
 
 ### `rekha_char_advance_fx(font, cp, px_size)`
 
@@ -60,9 +60,9 @@ Advance of `cp` in integer PIXELS at `px_size`, rounded half-up (nearest); = rek
 fn rekha_char_advance_fx(font, cp, px_size): i64
 ```
 
-Advance of `cp` at `px_size` as 16.16 fixed-point pixels; = rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size). 0 = unknown. Allocates 0 B. Sum these and round the pen once for exact run widths (per rekha_char_advance_px's ⛔ note).
+Advance of `cp` at `px_size` as 16.16 fixed-point pixels; = rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size), keeping rekha_char_to_glyph's code as rekha_char_advance does (1.1.2). 0 = unknown. Allocates 0 B. Sum these and round the pen once for exact run widths (per rekha_char_advance_px's ⛔ note).
 
-<!-- src/cmap.cyr:336 -->
+<!-- src/cmap.cyr:428 -->
 
 ### `rekha_os2_version(font)`
 
@@ -180,9 +180,9 @@ usWinDescent (u16 at +76) in design units, plus its MVAR `hcld` delta. ⚠ UNSIG
 fn rekha_x_height(font): i64
 ```
 
-sxHeight (i16 at +86, OS/2 version 2 and up) in design units, plus its MVAR `xhgt` delta. 0 when the table is older or shorter than the field. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
+sxHeight (i16 at +86, OS/2 version 2 and up) in design units, plus its MVAR `xhgt` delta. 0 when the table is older (a version below 2, however long the table — since 1.1.2, as FreeType reads it) or shorter than the field. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:130 -->
+<!-- src/os2.cyr:133 -->
 
 ### `rekha_cap_height(font)`
 
@@ -190,9 +190,9 @@ sxHeight (i16 at +86, OS/2 version 2 and up) in design units, plus its MVAR `xhg
 fn rekha_cap_height(font): i64
 ```
 
-sCapHeight (i16 at +88, OS/2 version 2 and up) in design units, plus its MVAR `cpht` delta. 0 when the table is older or shorter than the field. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
+sCapHeight (i16 at +88, OS/2 version 2 and up) in design units, plus its MVAR `cpht` delta. 0 when the table is older (a version below 2, however long the table — since 1.1.2, as FreeType reads it) or shorter than the field. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:131 -->
+<!-- src/os2.cyr:134 -->
 
 ### `rekha_subscript_x_size(font)`
 
@@ -202,7 +202,7 @@ fn rekha_subscript_x_size(font): i64
 
 ySubscriptXSize (i16 at +10) in design units, plus its MVAR `sbxs` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:137 -->
+<!-- src/os2.cyr:145 -->
 
 ### `rekha_subscript_y_size(font)`
 
@@ -212,7 +212,7 @@ fn rekha_subscript_y_size(font): i64
 
 ySubscriptYSize (i16 at +12) in design units, plus its MVAR `sbys` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:138 -->
+<!-- src/os2.cyr:146 -->
 
 ### `rekha_subscript_x_offset(font)`
 
@@ -222,7 +222,7 @@ fn rekha_subscript_x_offset(font): i64
 
 ySubscriptXOffset (i16 at +14) in design units from the baseline origin, plus its MVAR `sbxo` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:139 -->
+<!-- src/os2.cyr:147 -->
 
 ### `rekha_subscript_y_offset(font)`
 
@@ -232,7 +232,7 @@ fn rekha_subscript_y_offset(font): i64
 
 ySubscriptYOffset (i16 at +16) in design units, plus its MVAR `sbyo` delta. ⚠ Offsets are from the BASELINE, so a subscript's y offset is a positive distance DOWN — the sign convention is the field's. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:140 -->
+<!-- src/os2.cyr:148 -->
 
 ### `rekha_superscript_x_size(font)`
 
@@ -242,7 +242,7 @@ fn rekha_superscript_x_size(font): i64
 
 ySuperscriptXSize (i16 at +18) in design units, plus its MVAR `spxs` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:141 -->
+<!-- src/os2.cyr:149 -->
 
 ### `rekha_superscript_y_size(font)`
 
@@ -252,7 +252,7 @@ fn rekha_superscript_y_size(font): i64
 
 ySuperscriptYSize (i16 at +20) in design units, plus its MVAR `spys` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:142 -->
+<!-- src/os2.cyr:150 -->
 
 ### `rekha_superscript_x_offset(font)`
 
@@ -262,7 +262,7 @@ fn rekha_superscript_x_offset(font): i64
 
 ySuperscriptXOffset (i16 at +22) in design units from the baseline origin, plus its MVAR `spxo` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:143 -->
+<!-- src/os2.cyr:151 -->
 
 ### `rekha_superscript_y_offset(font)`
 
@@ -272,7 +272,7 @@ fn rekha_superscript_y_offset(font): i64
 
 ySuperscriptYOffset (i16 at +24) in design units, plus its MVAR `spyo` delta; a positive distance UP from the baseline. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:144 -->
+<!-- src/os2.cyr:152 -->
 
 ### `rekha_strikeout_size(font)`
 
@@ -282,7 +282,7 @@ fn rekha_strikeout_size(font): i64
 
 yStrikeoutSize (i16 at +26) — the strikeout rule's thickness in design units, plus its MVAR `strs` delta. Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:148 -->
+<!-- src/os2.cyr:156 -->
 
 ### `rekha_strikeout_position(font)`
 
@@ -292,7 +292,7 @@ fn rekha_strikeout_position(font): i64
 
 yStrikeoutPosition (i16 at +28) — the strikeout rule's position above the baseline in design units, plus its MVAR `stro` delta. The UNDERLINE pair is in `post` (rekha_underline_position / rekha_underline_thickness). Answers 0 when the font has no OS/2 table, the table is shorter than the field, or `font` is 0 — 0 is "the font did not say", not a measured zero; probe with rekha_os2_version (-1 = absent) before trusting a 0. Does not allocate and does not set a RekhaErrCode on the handle.
 
-<!-- src/os2.cyr:149 -->
+<!-- src/os2.cyr:157 -->
 
 ### `rekha_post_version(font)`
 
@@ -352,7 +352,7 @@ fn rekha_num_h_metrics(font): i64
 
 Answers hhea.numberOfHMetrics, how many glyphs carry their own long metric. Returns 0 when the handle is 0 or hhea is absent / shorter than its 36-byte fixed part, which callers must treat as 'no metrics'. Does not touch rekha_font_error.
 
-<!-- src/sfnt.cyr:583 -->
+<!-- src/sfnt.cyr:593 -->
 
 ### `rekha_ascender(font)`
 
@@ -362,7 +362,7 @@ fn rekha_ascender(font): i64
 
 Answers hhea.ascender (i16 at hhea+4) in design units. Returns 0 for a 0 handle or an absent / short hhea (hhea_off is non-zero only when the table declares >= 36 B). Does not vary with axes (MVAR has no hhea ascender tag; the sTypo trio in OS/2 is what varies) and does not touch rekha_font_error.
 
-<!-- src/sfnt.cyr:595 -->
+<!-- src/sfnt.cyr:605 -->
 
 ### `rekha_descender(font)`
 
@@ -372,7 +372,7 @@ fn rekha_descender(font): i64
 
 Answers hhea.descender (i16 at hhea+6) in design units, SIGNED: ⚠ negative in every well-formed font, deliberately, so `asc - desc + gap` is the line height. Returns 0 for a 0 handle or an absent / short hhea; does not vary with axes and does not touch rekha_font_error.
 
-<!-- src/sfnt.cyr:603 -->
+<!-- src/sfnt.cyr:613 -->
 
 ### `rekha_caret_slope_rise(font)`
 
@@ -382,7 +382,7 @@ fn rekha_caret_slope_rise(font): i64
 
 Answers hhea.caretSlopeRise (i16 at hhea+18) plus the MVAR 'hcrs' delta at the current axis position, in design units. ⛔ Rise 1 with run 0 is upright: the pair is a vector, not an angle. Returns 0 for a 0 handle or an absent / short hhea; does not touch rekha_font_error. ⚠ This is hhea's caret, not post's italic angle; the two need not agree.
 
-<!-- src/sfnt.cyr:616 -->
+<!-- src/sfnt.cyr:626 -->
 
 ### `rekha_caret_slope_run(font)`
 
@@ -392,7 +392,7 @@ fn rekha_caret_slope_run(font): i64
 
 Answers hhea.caretSlopeRun (i16 at hhea+20) plus the MVAR 'hcrn' delta, in design units; `run` is the component that carries the lean (0 = upright). Returns 0 for a 0 handle or an absent / short hhea; does not touch rekha_font_error.
 
-<!-- src/sfnt.cyr:624 -->
+<!-- src/sfnt.cyr:634 -->
 
 ### `rekha_caret_offset(font)`
 
@@ -402,7 +402,7 @@ fn rekha_caret_offset(font): i64
 
 Answers hhea.caretOffset (i16 at hhea+22) plus the MVAR 'hcof' delta, in design units. Returns 0 for a 0 handle or an absent / short hhea; does not touch rekha_font_error.
 
-<!-- src/sfnt.cyr:632 -->
+<!-- src/sfnt.cyr:642 -->
 
 ### `rekha_line_gap(font)`
 
@@ -412,7 +412,7 @@ fn rekha_line_gap(font): i64
 
 Answers hhea.lineGap (i16 at hhea+8) in design units. Returns 0 for a 0 handle or an absent / short hhea; does not vary with axes and does not touch rekha_font_error.
 
-<!-- src/sfnt.cyr:640 -->
+<!-- src/sfnt.cyr:650 -->
 
 ### `rekha_advance_width(font, gid)`
 
@@ -422,7 +422,7 @@ fn rekha_advance_width(font, gid): i64
 
 Answers glyph `gid`'s advance width in DESIGN UNITS, plus the HVAR advance delta for the real gid at the current axis position; clears rekha_font_error on entry. Returns 0 with REKHA_ERR_OTHER "glyph id" for gid < 0, REKHA_ERR_NO_TABLE "hhea" when numberOfHMetrics is 0, REKHA_ERR_NO_TABLE "hmtx" when hmtx is absent, REKHA_ERR_TRUNCATED "hmtx" when the long metric lies past hmtx's DECLARED length; a 0 handle answers 0 with no code, and a legal zero-width advance answers 0 with REKHA_OK. ⛔ 0 is 'unknown', not 'zero-width': do not paint with it. ⛔ gid is clamped at numberOfHMetrics - 1 because the tail shares the last advance (the format, not a guess); a negative varied width is clamped to 0. Design units: scale by rekha_units_per_em or use rekha_glyph_advance_px / _fx.
 
-<!-- src/sfnt.cyr:661 -->
+<!-- src/sfnt.cyr:671 -->
 
 ### `rekha_left_side_bearing(font, gid)`
 
@@ -430,9 +430,9 @@ Answers glyph `gid`'s advance width in DESIGN UNITS, plus the HVAR advance delta
 fn rekha_left_side_bearing(font, gid): i64
 ```
 
-Answers glyph `gid`'s left side bearing in DESIGN UNITS plus the HVAR lsb-map delta (0.8.2); clears rekha_font_error on entry and refuses like rekha_advance_width: REKHA_ERR_OTHER "glyph id" for gid < 0, REKHA_ERR_NO_TABLE "hhea" / "hmtx", REKHA_ERR_TRUNCATED "hmtx" when the bearing lies past hmtx's declared length; a legal 0 answers REKHA_OK. ⛔ Tail rule is the format's: a gid at or past numberOfHMetrics reads `hmtx + numberOfHMetrics * 4 + (gid - numberOfHMetrics) * 2`. ⚠ The HINTED loader follows FreeType and does NOT apply the lsb delta (src/hint.cyr rekha_hint_hmetrics), so on a variation instance with an lsb map this metric and the hinted outline's origin differ by the delta (pinned in docs/development/roadmap.md).
+Answers glyph `gid`'s left side bearing in DESIGN UNITS plus the HVAR lsb-map delta (0.8.2); clears rekha_font_error on entry and refuses like rekha_advance_width: REKHA_ERR_OTHER "glyph id" for gid < 0 or at or past maxp.numGlyphs (no bearing there, only hmtx's padding — since 1.1.2; the advance's last-metric clamp has no bearing counterpart), REKHA_ERR_NO_TABLE "hhea" / "hmtx", REKHA_ERR_TRUNCATED "hmtx" when the bearing lies past hmtx's declared length or gid > 65535 (no face holds it; a gid near 2^62 overflowed the offset through 1.1.1); a legal 0 answers REKHA_OK. ⛔ Tail rule is the format's: a gid at or past numberOfHMetrics reads `hmtx + numberOfHMetrics * 4 + (gid - numberOfHMetrics) * 2`. ⚠ The HINTED loader follows FreeType and does NOT apply the lsb delta (src/hint.cyr rekha_hint_hmetrics), so on a variation instance with an lsb map this metric and the hinted outline's origin differ by the delta (pinned in docs/development/roadmap.md).
 
-<!-- src/sfnt.cyr:701 -->
+<!-- src/sfnt.cyr:711 -->
 
 ### `rekha_glyph_advance_px(font, gid, px_size)`
 
@@ -442,7 +442,7 @@ fn rekha_glyph_advance_px(font, gid, px_size): i64
 
 Answers glyph `gid`'s advance in whole PIXELS at `px_size`, rounded half-up: `(adv * px_size + upem / 2) / upem`. Returns 0 = unknown when upem <= 0 or the advance is <= 0; the advance path clears and may set rekha_font_error (via rekha_advance_width), but the upem <= 0 refusal returns before that and sets no code. Allocates 0 B. ⚠ Per-glyph rounded pixels drift when summed; accumulate rekha_glyph_advance_fx instead.
 
-<!-- src/sfnt.cyr:719 -->
+<!-- src/sfnt.cyr:735 -->
 
 ### `rekha_glyph_advance_fx(font, gid, px_size)`
 
@@ -452,7 +452,7 @@ fn rekha_glyph_advance_fx(font, gid, px_size): i64
 
 Answers glyph `gid`'s advance at `px_size` as 16.16 fixed-point pixels: `(adv * px_size * 65536 + upem / 2) / upem`. Returns 0 = unknown when upem <= 0 or the advance is <= 0 (same code behaviour as rekha_glyph_advance_px). adv <= 65535, so the product fits i64 for any px_size below 2^31. Sum these into the pen and round once when placing a glyph; the run width is then exact to 1/65536 px per glyph. Allocates 0 B.
 
-<!-- src/sfnt.cyr:733 -->
+<!-- src/sfnt.cyr:749 -->
 
 ### `rekha_vhea_present(font)`
 
@@ -462,7 +462,7 @@ fn rekha_vhea_present(font): i64
 
 Answers 1 when the font has a `vhea` directory entry of length >= 36 (recorded at open), else 0; 0 also for a null font. Sets no RekhaErrCode and allocates nothing. Ask this before trusting a 0 from rekha_vert_ascender / _descender / _line_gap / the caret trio / rekha_num_v_metrics, every one of which is a real value for some font.
 
-<!-- src/vert.cyr:104 -->
+<!-- src/vert.cyr:113 -->
 
 ### `rekha_vert_ascender(font)`
 
@@ -472,7 +472,7 @@ fn rekha_vert_ascender(font): i64
 
 vhea.vertTypoAscender (offset 4) in design units plus the MVAR `vasc` delta at the current axis setting. Returns 0 when the font is null or has no vhea, which is indistinguishable from a real 0: probe rekha_vhea_present first. No RekhaErrCode is set; no allocation.
 
-<!-- src/vert.cyr:111 -->
+<!-- src/vert.cyr:120 -->
 
 ### `rekha_vert_descender(font)`
 
@@ -482,7 +482,7 @@ fn rekha_vert_descender(font): i64
 
 vhea.vertTypoDescender (offset 6) in design units plus the MVAR `vdsc` delta. 0 for a null font or no vhea (a real 0 is possible; rekha_vhea_present disambiguates). No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:112 -->
+<!-- src/vert.cyr:121 -->
 
 ### `rekha_vert_line_gap(font)`
 
@@ -492,7 +492,7 @@ fn rekha_vert_line_gap(font): i64
 
 vhea.vertTypoLineGap (offset 8) in design units plus the MVAR `vlgp` delta. 0 for a null font or no vhea (a real 0 is common; rekha_vhea_present disambiguates). No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:113 -->
+<!-- src/vert.cyr:122 -->
 
 ### `rekha_vert_caret_slope_rise(font)`
 
@@ -502,7 +502,7 @@ fn rekha_vert_caret_slope_rise(font): i64
 
 vhea.caretSlopeRise (offset 18) in design units plus the MVAR `vcrs` delta. 0 for a null font or no vhea. No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:116 -->
+<!-- src/vert.cyr:125 -->
 
 ### `rekha_vert_caret_slope_run(font)`
 
@@ -512,7 +512,7 @@ fn rekha_vert_caret_slope_run(font): i64
 
 vhea.caretSlopeRun (offset 20) in design units plus the MVAR `vcrn` delta. 0 for a null font or no vhea (0 is also the real value for an upright caret; rekha_vhea_present disambiguates). No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:117 -->
+<!-- src/vert.cyr:126 -->
 
 ### `rekha_vert_caret_offset(font)`
 
@@ -522,7 +522,7 @@ fn rekha_vert_caret_offset(font): i64
 
 vhea.caretOffset (offset 22) in design units plus the MVAR `vcof` delta. 0 for a null font or no vhea (0 is the common real value; rekha_vhea_present disambiguates). No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:118 -->
+<!-- src/vert.cyr:127 -->
 
 ### `rekha_num_v_metrics(font)`
 
@@ -532,7 +532,7 @@ fn rekha_num_v_metrics(font): i64
 
 vhea.numOfLongVerMetrics (vhea offset 34, u16): how many glyphs carry their own advance height in vmtx. 0 when the font is null or has no vhea. ⚠ It reports vhea's count even when vmtx is absent or zero-length, in which case rekha_advance_height / rekha_top_side_bearing still answer 0 (hint_test checks vhea present, num_v_metrics 4, advance_height 0). No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:122 -->
+<!-- src/vert.cyr:131 -->
 
 ### `rekha_advance_height(font, gid)`
 
@@ -542,7 +542,7 @@ fn rekha_advance_height(font, gid): i64
 
 `gid`'s advance height in design units (vmtx advanceHeight u16 plus the VVAR advance-map delta, clamped so a negative result returns 0). Returns 0 when the font is null, gid < 0, there is no vhea, numOfLongVerMetrics is 0, vmtx is absent or zero-length, or the record lies past vmtx's length. ⚠ Like hmtx, a gid past numOfLongVerMetrics SHARES the last advance (the format's own rule) while VVAR's delta still applies to the real gid. No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:154 -->
+<!-- src/vert.cyr:169 -->
 
 ### `rekha_top_side_bearing(font, gid)`
 
@@ -550,9 +550,9 @@ fn rekha_advance_height(font, gid): i64
 fn rekha_top_side_bearing(font, gid): i64
 ```
 
-`gid`'s top side bearing in design units (i16 from vmtx's long record for gid < numOfLongVerMetrics, else from the bare i16 tail at nvm * 4 + (gid - nvm) * 2, plus the VVAR tsb-map delta). Returns 0 when the font is null, gid < 0, there is no vhea or vmtx, numOfLongVerMetrics is 0, or the 2-byte read would pass vmtx's length. ⛔ The tail past numOfLongVerMetrics is a BARE i16 array, not a continuation of the 4-byte records. No RekhaErrCode; no allocation.
+`gid`'s top side bearing in design units (i16 from vmtx's long record for gid < numOfLongVerMetrics, else from the bare i16 tail at nvm * 4 + (gid - nvm) * 2, plus the VVAR tsb-map delta — none when VVAR has no tsb map: only the advance map may be implicit, 1.1.2). Returns 0 when the font is null, gid < 0, > 65535 or at or past maxp.numGlyphs (since 1.1.2), there is no vhea or vmtx, numOfLongVerMetrics is 0, or the 2-byte read would pass vmtx's length. ⛔ The tail past numOfLongVerMetrics is a BARE i16 array, not a continuation of the 4-byte records. No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:172 -->
+<!-- src/vert.cyr:187 -->
 
 ### `rekha_vorg_present(font)`
 
@@ -562,7 +562,7 @@ fn rekha_vorg_present(font): i64
 
 Answers 1 when the font carries a VORG table whose major version is 1 and length >= 8 (recorded at open), else 0; 0 for a null font. ⛔ rekha does NOT derive a vertical origin when the font states none, so this is the question to ask before rekha_vert_origin_y. No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:191 -->
+<!-- src/vert.cyr:212 -->
 
 ### `rekha_vert_origin_y(font, gid)`
 
@@ -570,9 +570,9 @@ Answers 1 when the font carries a VORG table whose major version is 1 and length
 fn rekha_vert_origin_y(font, gid): i64
 ```
 
-The y the pen sits at before drawing `gid` in a vertical run, in design units: VORG's per-glyph vertOriginY found by binary search over the sorted (glyphIndex, vertOriginY) records, else VORG's defaultVertOriginY, plus the VVAR vOrg-map delta. ⛔ Returns 0 when the font carries no VORG (rekha does NOT derive one from the bounding box and the top side bearing) or gid < 0; a 0 is also a legitimate origin, so ask rekha_vorg_present first. A record array that overruns the table falls back to the default. No RekhaErrCode; no allocation.
+The y the pen sits at before drawing `gid` in a vertical run, in design units: VORG's per-glyph vertOriginY found by binary search over the sorted (glyphIndex, vertOriginY) records, else VORG's defaultVertOriginY, plus the VVAR vOrg-map delta (none when VVAR has no vOrg map, 1.1.2). ⛔ Returns 0 when the font carries no VORG (rekha does NOT derive one from the bounding box and the top side bearing) or gid < 0; a 0 is also a legitimate origin, so ask rekha_vorg_present first. A record array that overruns the table falls back to the default. No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:201 -->
+<!-- src/vert.cyr:222 -->
 
 ### `rekha_glyph_advance_height_px(font, gid, px_size)`
 
@@ -582,7 +582,7 @@ fn rekha_glyph_advance_height_px(font, gid, px_size): i64
 
 `gid`'s advance height in whole pixels at `px_size`: (h * px_size + upem / 2) / upem, rounded half up, from rekha_advance_height and rekha_units_per_em. Returns 0 when unitsPerEm <= 0 or the design-unit advance height is <= 0 (so every refusal of rekha_advance_height propagates as 0). No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:234 -->
+<!-- src/vert.cyr:255 -->
 
 ### `rekha_glyph_advance_height_fx(font, gid, px_size)`
 
@@ -592,4 +592,4 @@ fn rekha_glyph_advance_height_fx(font, gid, px_size): i64
 
 `gid`'s advance height at `px_size` in 16.16 fixed point: (h * px_size * 65536 + upem / 2) / upem, rounded half up, from rekha_advance_height and rekha_units_per_em. Returns 0 when unitsPerEm <= 0 or the design-unit advance height is <= 0. No RekhaErrCode; no allocation.
 
-<!-- src/vert.cyr:243 -->
+<!-- src/vert.cyr:264 -->

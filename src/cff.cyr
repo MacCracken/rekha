@@ -29,9 +29,12 @@
 #     face surveyed carries FontMatrix = 1 / unitsPerEm, which makes that fold the identity and
 #     the rounding the only step — but it is now read rather than assumed;
 #   - rmoveto / hmoveto / vmoveto start a contour; a contour holding only its moveto point is dropped;
+#     a SURPLUS of operands is read from the top, as FreeType pops it (1.1.2: FreeSans U+0299);
 #   - lineto -> 1 on-curve point; curveto -> control (2), control (2), on-curve (1);
 #   - hint operators are read for their stem count (hintmask / cntrmask byte length) and otherwise
-#     ignored; the optional leading width argument is consumed and ignored (advances come from hmtx);
+#     ignored; the stem list closes at the first hintmask or moveto, after which a stem operator is
+#     ignored as FreeType ignores it (1.1.2); the optional leading width argument is consumed and
+#     ignored (advances come from hmtx);
 #   - flex, hflex, hflex1, flex1 draw their two curves;
 #   - a four-argument endchar is `seac`: the glyph is glyph `bchar` at the origin followed by glyph
 #     `achar` displaced by (adx, ady), both named by STANDARD ENCODING CODE and resolved through the
@@ -40,7 +43,13 @@
 #     or a component is itself a seac;
 #   - EMPTY (not partial) for: the deprecated arithmetic / storage operators, an operator with too few
 #     arguments, a lineto or curveto before any moveto, a charstring that ends without endchar, and
-#     any bound above.
+#     any bound above — and, since 1.1.2 (FreeType refuses each): an endchar with a count other than
+#     0 or seac's 4 after the width; more than 96 stems at a hintmask, a cntrmask or the first moveto
+#     (Type 2's ceiling); a hintmask that brings stems of its own after the mask is in force (FreeType
+#     reads no mask bytes there — rekha refuses rather than run them); and an INTEGER operand — a
+#     subroutine number, vsindex, blend's count, seac's codes — encoded as a 255-form 16.16 or made
+#     by a blend (FreeType's cf2_stack_popInt). The fill pass may not outgrow the block the count
+#     pass sized (the glyf endPts rule of 0.3.11).
 # ⚠ A number cut by the end of its charstring (28 needs 2 bytes, 255 needs 4, 247..254 need 1) is
 # refused by a byte check that keeps the read inside the object and changes no RESULT — a number with
 # nothing after it can never be consumed. A hint mask running past its charstring IS a broken rule
@@ -554,7 +563,10 @@ fn rekha_cff_private_subrs(buf, cff, end, a, b): i64 {
 fn rekha_cff_resolve(f): i64 {
     var k = 176;
     while (k < REKHA_FONT_SIZE) {
-        store64(f + k, 0);
+        # ⛔ EXCEPT +248, the face's table floor, set at open and read by every table lookup after
+        # this one. Cleared, it let a collection member's later tables — and every public
+        # rekha_find_table_len — start inside the TTC header (1.1.2 audit).
+        if (k != 248) { store64(f + k, 0); }
         k = k + 8;
     }
     # ⚠ Variation axes are not a CFF thing — a TrueType variable font has fvar too — but the whole
@@ -768,7 +780,17 @@ var RC_SMAX  = 272;
 # point store needs no font handle. 0.5.1.
 var RC_MTX   = 280;
 var RC_AXBAD = 288;   # 1 when the store's region list and fvar disagree on the axis count
-var RC_SLOTS = 37;
+# 1.1.2 audit. FreeType's interpreter types every operand (CF2_NumberInt / CF2_NumberFixed) and an
+# operator that needs an INTEGER — a subroutine number, vsindex, blend's count, seac's codes —
+# refuses a Fixed one (cf2_stack_popInt, psstack.c:145). One byte per slot says which: 1 for a
+# 255-form 16.16 number and for a blend result (cf2_doBlend writes with cf2_stack_setReal).
+var RC_STKF  = 296;   # pointer to u8[REKHA_CFF2_MAXSTACK]: 1 = that slot holds a Fixed
+var RC_HMASK = 304;   # 1 once the hint mask is in force: the first hintmask, or the first moveto
+var RC_CAPNP = 312;   # the count pass's point cap and contour count, which the fill pass may not
+var RC_CAPNC = 320;   #   pass: the block was sized from them
+var RC_SLOTS = 41;
+# Type 2's hint ceiling (TN 5177 Appendix B; FreeType's CF2_MAX_HINTS): h + v stems together.
+var REKHA_CFF_MAXHINTS = 96;
 
 fn rekha_cff_arg(s, i): i64 { return load64(load64(s + RC_STK) + i * 8); }
 
@@ -783,15 +805,21 @@ fn rekha_cff_width(s, extra): i64 {
     store64(s + RC_WDONE, 1);
     if (extra == 0) { return 0; }
     var stk = load64(s + RC_STK);
+    var stkf = load64(s + RC_STKF);
     var sp = load64(s + RC_SP);
     var i = 1;
     while (i < sp) {
         store64(stk + (i - 1) * 8, load64(stk + i * 8));
+        store8(stkf + i - 1, load8(stkf + i));
         i = i + 1;
     }
     store64(s + RC_SP, sp - 1);
     return 0;
 }
+
+# 1 when argument slot i holds a Fixed (a 255-form number or a blend result), which an operator
+# that takes an INTEGER refuses, as FreeType's cf2_stack_popInt does.
+fn rekha_cff_fixed(s, i): i64 { return load8(load64(s + RC_STKF) + i); }
 
 fn rekha_cff_point(s, flag): i64 {
     var np = load64(s + RC_NP);
@@ -800,6 +828,14 @@ fn rekha_cff_point(s, flag): i64 {
         return 0;
     }
     if (load64(s + RC_FILL) != 0) {
+        # ⛔ BOUNDED BY THE BLOCK, not by the count pass's word: the two passes agree only while the
+        # bytes and the region scalars do, and the stores below are into a block sized from pass 1.
+        # glyf re-checks its endPts on the stored copy for the same reason (0.3.11); this is the CFF
+        # twin (1.1.2 audit).
+        if (np >= load64(s + RC_CAPNP)) {
+            store64(s + RC_BAD, 1);
+            return 0;
+        }
         var x = load64(s + RC_X);
         var y = load64(s + RC_Y);
         var ox = sd_asr(x + 32768, 16);
@@ -836,7 +872,13 @@ fn rekha_cff_close(s): i64 {
         return 0;
     }
     var nc = load64(s + RC_NC);
-    if (load64(s + RC_FILL) != 0) { store64(load64(s + RC_EPS) + nc * 8, np - 1); }
+    if (load64(s + RC_FILL) != 0) {
+        if (nc >= load64(s + RC_CAPNC)) {           # the point store's twin, above
+            store64(s + RC_BAD, 1);
+            return 0;
+        }
+        store64(load64(s + RC_EPS) + nc * 8, np - 1);
+    }
     store64(s + RC_NC, nc + 1);
     return 0;
 }
@@ -886,6 +928,7 @@ fn rekha_cff_exec(s, a, b, depth): i64 {
     }
     var buf = load64(s + RC_BUF);
     var stk = load64(s + RC_STK);
+    var stkf = load64(s + RC_STKF);
     var p = a;
     while (p < b) {
         if (load64(s + RC_BAD) != 0) { return 0 - 1; }
@@ -926,6 +969,7 @@ fn rekha_cff_exec(s, a, b, depth): i64 {
             }
             if (sp >= load64(s + RC_SMAX)) { store64(s + RC_BAD, 1); return 0 - 1; }
             store64(stk + sp * 8, num);
+            store8(stkf + sp, v == 255);
             store64(s + RC_SP, sp + 1);
         } else {
             p = p + 1;
@@ -953,12 +997,32 @@ fn rekha_cff_op(s, op, depth): i64 {
     var sp = load64(s + RC_SP);
     var i = 0;
     if (op == 1 || op == 3 || op == 18 || op == 23 || op == 19 || op == 20) {
+        # ⛔ THE STEM LIST CLOSES WHEN THE HINT MASK COMES INTO FORCE — at the first hintmask, or at
+        # the first moveto, which builds the map from every stem so far. FreeType then IGNORES a stem
+        # operator ("never add hints after the mask is computed", psintrp.c:784-840), so the mask
+        # bytes it skips count only the stems before; through 1.1.1 rekha counted every one and
+        # skipped a different number of bytes — a different instruction stream (1.1.2 audit). A
+        # later hintmask with stems of its own FreeType does not even read past, and rekha refuses.
+        var late = load64(s + RC_HMASK);
+        if (op != 19 && op != 20) {
+            if (late != 0) {
+                store64(s + RC_SP, 0);
+                return 0;
+            }
+        } else {
+            if (late != 0 && sp > 1) { store64(s + RC_BAD, 1); return 0 - 1; }
+        }
         # A width here would make the count odd; dropping it changes no stem count (floor(n / 2) =
         # (n - 1) / 2 for odd n), so the width is only marked consumed.
         rekha_cff_width(s, 0);
         store64(s + RC_STEMS, load64(s + RC_STEMS) + sp / 2);
         store64(s + RC_SP, 0);
-        if (op == 19 || op == 20) { return 2; }
+        if (op == 19 || op == 20) {
+            # more than 96 stems is past Type 2's ceiling, and FreeType refuses the mask
+            if (load64(s + RC_STEMS) > REKHA_CFF_MAXHINTS) { store64(s + RC_BAD, 1); return 0 - 1; }
+            if (op == 19) { store64(s + RC_HMASK, 1); }
+            return 2;
+        }
         return 0;
     }
     if (op == 21 || op == 22 || op == 4) {
@@ -967,9 +1031,19 @@ fn rekha_cff_op(s, op, depth): i64 {
         if (sp > need) { rekha_cff_width(s, 1); } else { rekha_cff_width(s, 0); }
         sp = load64(s + RC_SP);
         if (sp < need) { store64(s + RC_BAD, 1); return 0 - 1; }
-        if (op == 21) { rekha_cff_moveto(s, rekha_cff_arg(s, 0), rekha_cff_arg(s, 1)); }
-        if (op == 22) { rekha_cff_moveto(s, rekha_cff_arg(s, 0), 0); }
-        if (op == 4) { rekha_cff_moveto(s, 0, rekha_cff_arg(s, 0)); }
+        # ⛔ A SURPLUS IS READ FROM THE TOP, as FreeType pops it (psintrp.c:2651-2686): the bottom
+        # operands are dropped, not the top ones. Through 1.1.1 rekha drew the BOTTOM `need` — and
+        # this is not hypothetical: FreeSans.otf's U+0299 (gid 570) opens with an 8-operand rmoveto,
+        # which FreeType starts at (347, 376) and 1.1.1 at (60, 84) (1.1.2 audit; host FreeType 2.15.0).
+        var at = sp - need;
+        # the first moveto puts the hint mask in force over every stem so far (FreeType's map build)
+        if (load64(s + RC_HMASK) == 0) {
+            store64(s + RC_HMASK, 1);
+            if (load64(s + RC_STEMS) > REKHA_CFF_MAXHINTS) { store64(s + RC_BAD, 1); return 0 - 1; }
+        }
+        if (op == 21) { rekha_cff_moveto(s, rekha_cff_arg(s, at), rekha_cff_arg(s, at + 1)); }
+        if (op == 22) { rekha_cff_moveto(s, rekha_cff_arg(s, at), 0); }
+        if (op == 4) { rekha_cff_moveto(s, 0, rekha_cff_arg(s, at)); }
         store64(s + RC_SP, 0);
         return 0;
     }
@@ -982,8 +1056,20 @@ fn rekha_cff_op(s, op, depth): i64 {
         # ⛔ CFF2 has no `endchar`: a charstring ends when its bytes do. The operator is not merely
         # unused there, it is not in the dialect, so meeting one is a broken charstring.
         if (load64(s + RC_V2) != 0) { store64(s + RC_BAD, 1); return 0 - 1; }
-        if (sp == 5) { rekha_cff_width(s, 1); } else { rekha_cff_width(s, 0); }
-        if (load64(s + RC_SP) == 4) {
+        if (sp == 1 || sp == 5) { rekha_cff_width(s, 1); } else { rekha_cff_width(s, 0); }
+        # ⛔ NOTHING, OR seac's FOUR. Through 1.1.1 any other count closed the glyph as a plain
+        # endchar; FreeType takes seac's path for more than one operand and pops the top four, so
+        # two or three underflow and refuse there (psintrp.c:2513-2534) (1.1.2 audit).
+        var esp = load64(s + RC_SP);
+        if (esp != 0 && esp != 4) { store64(s + RC_BAD, 1); return 0 - 1; }
+        if (esp == 4) {
+            # seac's codes are INTEGERS (cf2_stack_popInt): a 255-form one is refused, not floored
+            if (rekha_cff_fixed(s, 2) != 0 || rekha_cff_fixed(s, 3) != 0) {
+                store64(s + RC_BAD, 1);
+                return 0 - 1;
+            }
+        }
+        if (esp == 4) {
             # ⭐ adx ady bchar achar — an accented glyph built from two OTHER glyphs of this font,
             # named by Standard Encoding code. Parked, not recursed: the interpreter has no business
             # resolving a charset mid-charstring, and rekha_cff_run composes the two once this one
@@ -1009,6 +1095,8 @@ fn rekha_cff_op(s, op, depth): i64 {
         if (load64(s + RC_V2) != 0) { csz = 4; }
         if (rekha_cff_idx_next(buf, at, end, csz) == 0) { store64(s + RC_BAD, 1); return 0 - 1; }
         var count = rekha_cff_idx_count_at(buf, at, csz);
+        # the subroutine number is an INTEGER: a 255-form or blended one is refused, not floored
+        if (rekha_cff_fixed(s, sp - 1) != 0) { store64(s + RC_BAD, 1); return 0 - 1; }
         var idx = sd_asr(rekha_cff_arg(s, sp - 1), 16) + rekha_cff_bias(count);
         store64(s + RC_SP, sp - 1);
         var o: i64[2];
@@ -1030,6 +1118,7 @@ fn rekha_cff_op(s, op, depth): i64 {
         # may appear "only once". One flag covers both — a blend clears it too.
         if (load64(s + RC_VSOK) == 0) { store64(s + RC_BAD, 1); return 0 - 1; }
         if (sp < 1) { store64(s + RC_BAD, 1); return 0 - 1; }
+        if (rekha_cff_fixed(s, sp - 1) != 0) { store64(s + RC_BAD, 1); return 0 - 1; }   # an INTEGER
         var vi = sd_asr(rekha_cff_arg(s, sp - 1), 16);
         store64(s + RC_SP, 0);                      # vsindex clears the stack
         store64(s + RC_VSOK, 0);
@@ -1042,15 +1131,19 @@ fn rekha_cff_op(s, op, depth): i64 {
     if (op == 16) {                                 # blend
         if (load64(s + RC_V2) == 0) { store64(s + RC_BAD, 1); return 0 - 1; }
         if (sp < 1) { store64(s + RC_BAD, 1); return 0 - 1; }
+        if (rekha_cff_fixed(s, sp - 1) != 0) { store64(s + RC_BAD, 1); return 0 - 1; }   # an INTEGER
         var nb = sd_asr(rekha_cff_arg(s, sp - 1), 16);
         sp = sp - 1;
         store64(s + RC_SP, sp);
         store64(s + RC_VSOK, 0);
         if (nb < 0 || nb > load64(s + RC_SMAX)) { store64(s + RC_BAD, 1); return 0 - 1; }
         # ⭐ THE DEFAULT INSTANCE, AND WHY IT IS THIS CHEAP. The stack holds n default values, then
-        # n x k deltas, then n. At the default location every region's scalar is zero, so each
-        # blended value IS its default — which is already sitting in place, below the deltas. So the
-        # whole operator is: drop the count, drop the deltas, leave the defaults.
+        # n x k deltas, then n. With no axis set (RC_NSCAL 0) each blended value IS its default —
+        # which is already sitting in place, below the deltas. So the whole operator is: drop the
+        # count, drop the deltas, leave the defaults. ⚠ Not "every scalar is zero at the default":
+        # a region whose peak is 0 on every axis scores 1 everywhere, so once an axis has been SET —
+        # to its default too — its deltas apply. FreeType draws the same two answers: no design
+        # vector builds (1, 0, 0, ...), a set one runs the tents (cff_blend_build_vector, cffload.c).
         # ⛔ A store whose subtable did not resolve has no region count to give — and a blend with
         # none dropped only `n`, leaving the n x k deltas on the stack for the next operator to draw
         # as coordinates (1.1.2 audit). Asked for one, it refuses; so does a region list whose axis
@@ -1061,8 +1154,8 @@ fn rekha_cff_op(s, op, depth): i64 {
         if (nb + nb * k > sp) { store64(s + RC_BAD, 1); return 0 - 1; }
         var base = sp - nb - nb * k;
         # ⭐ INSTANCING, and it is the same three lines plus a weighted sum. With no axes set
-        # RC_NSCAL is 0 and the deltas are simply dropped — byte-identical to 0.4.9 — because every
-        # region's scalar at the default location IS zero and adding them would change nothing.
+        # RC_NSCAL is 0 and the deltas are simply dropped — byte-identical to 0.4.9 (the default
+        # vector, as above).
         if (load64(s + RC_NSCAL) > 0) {
             var stk2 = load64(s + RC_STK);
             var ivd = load64(s + RC_IVD);
@@ -1092,6 +1185,12 @@ fn rekha_cff_op(s, op, depth): i64 {
                 }
                 vi2 = vi2 + 1;
             }
+        }
+        # every result is a Fixed, at the default location too (cf2_doBlend's cf2_stack_setReal)
+        var bf = 0;
+        while (bf < nb) {
+            store8(load64(s + RC_STKF) + base + bf, 1);
+            bf = bf + 1;
         }
         store64(s + RC_SP, base + nb);
         return 0;
@@ -1383,7 +1482,12 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
     var end = load64(font + 224);
     var k = 0;
     while (k < RC_SLOTS) {
-        if (k * 8 < RC_XS || k * 8 > RC_EPS || fill == 0) { store64(s + k * 8, 0); }
+        var keep = 0;
+        if (fill != 0) {
+            if (k * 8 >= RC_XS && k * 8 <= RC_EPS) { keep = 1; }
+            if (k * 8 == RC_CAPNP || k * 8 == RC_CAPNC) { keep = 1; }
+        }
+        if (keep == 0) { store64(s + k * 8, 0); }
         k = k + 1;
     }
     store64(s + RC_BUF, buf);
@@ -1392,6 +1496,7 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
     store64(s + RC_LS, load64(font + 192));
     store64(s + RC_FILL, fill);
     store64(s + RC_STK, stk);
+    store64(s + RC_STKF, stk + REKHA_CFF2_MAXSTACK * 8);
     var v2 = load64(font + 256);
     store64(s + RC_V2, v2);
     store64(s + RC_SMAX, REKHA_CFF_MAXSTACK);
@@ -1429,9 +1534,10 @@ fn rekha_cff_run(font, gid, s, stk, fill): i64 {
     if (load64(s + RC_BAD) != 0) { return 0; }
     if (load64(s + RC_V2) != 0) {
         # ⛔ A CFF2 charstring ENDS WHEN ITS BYTES DO — there is no terminator to look for, so the
-        # success condition is the exact opposite of CFF's. `rekha_cff_exec` answers 0 both at the
-        # end of the bytes and at a top-level `return`; either way the open contour is ours to close,
-        # which `endchar` would have done in a CFF.
+        # success condition is the exact opposite of CFF's. `rekha_cff_exec` answers 0 at the end of
+        # the bytes, and the open contour is ours to close, which `endchar` would have done in a CFF.
+        # A top-level `return` answers -2 and the glyph is refused (BAD_GLYF "charstring"), as
+        # FreeType refuses it: "cannot return from top charstring" (psintrp.c:1055-1059).
         if (r != 0) { return 0; }
         rekha_cff_close(s);
     } else {
@@ -1469,11 +1575,12 @@ fn rekha_cff_refused(font, s): i64 {
 # ⚠ No load context: a CFF glyph has no components, so one decode is one load, and its points are
 # already capped at REKHA_COMPOSITE_MAXP — below any budget a context would carry.
 fn rekha_cff_load(font, gid): i64 {
-    var s: i64[37];
+    var s: i64[41];
     # ⚠ ONE array, sized for the larger dialect (4,104 B of frame), and RC_SMAX is what actually
     # bounds a run — a CFF still refuses its 49th operand. Sizing it per dialect would need two
-    # frames or an allocation, and rekha_cff_load is called once per glyph, not per point.
-    var stk: i64[513];
+    # frames or an allocation, and rekha_cff_load is called once per glyph, not per point. The 65
+    # slots after the 513 are RC_STKF's bytes, one per operand (1.1.2).
+    var stk: i64[578];
     # An id outside the CharStrings INDEX answers what the glyf path answers (rekha_glyf_span):
     # empty, REKHA_ERR_OTHER "glyph id". maxp.numGlyphs is the font's word, not the CFF's, so a
     # cmap can hand rekha an id in the gap between the two.
@@ -1496,6 +1603,8 @@ fn rekha_cff_load(font, gid): i64 {
     store64(&s + RC_YS, ys);
     store64(&s + RC_OC, oc);
     store64(&s + RC_EPS, eps);
+    store64(&s + RC_CAPNP, cap);
+    store64(&s + RC_CAPNC, nc);
     if (rekha_cff_run(font, gid, &s, &stk, 1) == 0) {
         rekha_cff_refused(font, &s);
         return rekha_outline_clear(o);

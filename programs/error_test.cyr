@@ -381,6 +381,35 @@ fn t_wrapper(): i64 {
     # an unmapped one draws .notdef, which here is blank, and is still not an error
     check(sd_path_verb_count(rekha_char_to_sdpath(g_f, 90, 65536, 0, 0)), 0);
     check(rekha_font_error(g_f), REKHA_OK);
+    # ⛔ the advance wrappers keep it too: .notdef's advance, as documented, and the cmap's reason.
+    # Through 1.1.1 the advance reader's own clear left REKHA_OK (1.1.2 audit).
+    # (the expected values first: the readers clear the slot themselves)
+    var adv0 = rekha_advance_width(g_f, 0);
+    var px0 = rekha_glyph_advance_px(g_f, 0, 16);
+    var fx0 = rekha_glyph_advance_fx(g_f, 0, 16);
+    check(adv0 > 0, 1);
+    check(rekha_char_advance(g_f, 90), adv0);
+    check(rekha_font_error(g_f), REKHA_OK);
+    check(rekha_char_advance(g_f, 0x110000), adv0);
+    check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+    detail_is("codepoint");
+    check(rekha_char_advance_px(g_f, 0 - 1, 16), px0);
+    check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+    check(rekha_char_advance_fx(g_f, 0 - 1, 16), fx0);
+    check(rekha_font_error(g_f), REKHA_ERR_OTHER);
+    opts_reset();
+    o_nocmap = 1;
+    check(openf() != 0, 1);
+    adv0 = rekha_advance_width(g_f, 0);
+    px0 = rekha_glyph_advance_px(g_f, 0, 16);
+    fx0 = rekha_glyph_advance_fx(g_f, 0, 16);
+    check(rekha_char_advance(g_f, 65), adv0);
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);
+    detail_is("cmap");
+    check(rekha_char_advance_px(g_f, 65, 16), px0);
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);
+    check(rekha_char_advance_fx(g_f, 65, 16), fx0);
+    check(rekha_font_error(g_f), REKHA_ERR_NO_TABLE);
     return 0;
 }
 

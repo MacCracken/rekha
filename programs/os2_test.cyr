@@ -390,6 +390,26 @@ fn t_short(): i64 {
     check(openf() != 0, 1);
     check(rekha_x_height(g_f), 0);
     check(rekha_win_ascent(g_f), 900);
+    # ⛔ ...and a version 0 / 1 table LONG enough to reach +86 / +88 still has no sxHeight: the
+    # bytes there are not that field, and FreeType reads them only from version 2 (1.1.2 audit)
+    var v = 0;
+    while (v < 2) {
+        opts_reset();
+        o_ver = v;
+        o_len = 96;
+        check(openf() != 0, 1);
+        check(rekha_os2_version(g_f), v);
+        check(rekha_x_height(g_f), 0);
+        check(rekha_cap_height(g_f), 0);
+        check(rekha_win_descent(g_f), 300);             # the version-0 fields still read
+        v = v + 1;
+    }
+    opts_reset();
+    o_ver = 2;
+    o_len = 96;
+    check(openf() != 0, 1);
+    check(rekha_x_height(g_f), 500);                    # control: version 2 has them
+    check(rekha_cap_height(g_f), 700);
     # ⛔ A VERSION AND A LENGTH THAT DISAGREE. The table says 4 and is 80 bytes long. rekha gates on
     # the LENGTH, so usWinAscent (at 74) reads and usWinDescent (at 76, needing 78) does not — the
     # version number is not evidence about how many bytes are there.

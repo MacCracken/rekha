@@ -51,6 +51,11 @@ var REKHA_TAG_KERN_FEAT = 0x6B65726E;   # 'kern', as a feature tag
 var REKHA_GPOS_MAXLOOKUP = 64;
 # (feature record, lookup index) pairs one resolve may walk; past it the GPOS kern is refused.
 var REKHA_GPOS_MAXPAIRS = 4096;
+# ⛔ The subtables every query may walk, summed over the resolved kern lookups: each one is a
+# PairPos evaluation per kerning query, and subTableCount is a u16 per lookup — 64 overlapping
+# lookups over one byte pattern cost 435 ms a query from 131 KB (1.1.2 audit). The host's 462 GPOS
+# kern faces carry at most 19 in all.
+var REKHA_GPOS_MAXSUB = 1024;
 
 fn rekha_gpos_resolve(f): i64 {
     store64(f + 576, 0);
@@ -241,7 +246,8 @@ fn rekha_gpos_pairpos(font, sub, l, r, end, out): i64 {
 }
 
 # Resolve every `kern` feature's lookups, once, into the font's cache. Returns the count.
-# ⛔ BOTH CEILINGS ARE REFUSALS (ADR 0002), and either leaves the GPOS kern absent (count 0):
+# ⛔ ALL THREE CEILINGS ARE REFUSALS (ADR 0002), and each leaves the GPOS kern absent (count 0) —
+# the third is more than REKHA_GPOS_MAXSUB subtables over the lookups kept (1.1.2 audit):
 #   - a 65th distinct lookup. Through 1.1.1 it was DROPPED, so a font with more answered a partial
 #     sum with REKHA_OK. 2,155 host faces carry at most 12 (1.1.2 audit).
 #   - more than REKHA_GPOS_MAXPAIRS (feature record, lookup index) pairs walked. The walk was
@@ -274,6 +280,7 @@ fn rekha_gpos_lookups(font): i64 {
 
     var cnt = 0;
     var walked = 0;
+    var subs = 0;
     var i = 0;
     while (i < nf) {
         var fr = fl + 2 + i * 6;
@@ -300,6 +307,8 @@ fn rekha_gpos_lookups(font): i64 {
                             if (seen == 0) {
                                 if (lo >= ll && lo + 6 <= end) {
                                     if (cnt >= REKHA_GPOS_MAXLOOKUP) { return 0; }   # refused
+                                    subs = subs + rekha_rd_u16(buf, lo + 4);
+                                    if (subs > REKHA_GPOS_MAXSUB) { return 0; }        # refused
                                     store64(arr + cnt * 8, lo);
                                     cnt = cnt + 1;
                                 }
@@ -343,12 +352,21 @@ public fn rekha_gpos_kern_pair(font, l, r): i64 {
     var i = 0;
     while (i < n) {
         var lk = load64(arr + i * 8);
-        var ty = rekha_rd_u16(buf, lk);
-        var ns = rekha_rd_u16(buf, lk + 4);
-        if (lk + 6 + ns * 2 <= end) {
+        # ⛔ RE-CHECKED BEFORE IT IS READ. The array is a cache allocated on the first query from
+        # whatever hook was live; one scoped under a per-frame arena dangles after the reset, and
+        # the reissued bytes were read as offsets with no bound (1.1.2 audit). Every offset the
+        # resolve stored passes this, so a valid cache answers exactly as before.
+        var ns = 0;
+        var ty = 0;
+        if (lk >= t && lk + 6 <= end) {
+            ty = rekha_rd_u16(buf, lk);
+            ns = rekha_rd_u16(buf, lk + 4);
+        }
+        if (ns > 0 && lk + 6 + ns * 2 <= end) {
             var s = 0;
             var done = 0;
-            while (s < ns) {
+            # the first subtable that has the pair answers for the lookup, and the walk ends there
+            while (s < ns && done == 0) {
                 if (done == 0) {
                     var sub = lk + rekha_rd_u16(buf, lk + 6 + s * 2);
                     var ty2 = ty;

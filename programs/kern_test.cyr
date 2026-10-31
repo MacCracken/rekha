@@ -62,6 +62,7 @@ var o_nsub = 1;         # how many subtables
 var o_big = 0;          # a 200-pair array instead of the five below
 var o_badlen = 0;       # declare a subtable length below its own header
 var o_shortpairs = 0;   # declare more pairs than the subtable holds
+var o_avar2nd = 0;      # Apple: the SECOND subtable carries the VARIATION coverage bit
 
 var g_kern = 0;
 var g_kernlen = 0;
@@ -151,6 +152,7 @@ fn put_kern(at): i64 {
             var acov = 0;
             if ((o_cov & 1) == 0) { acov = acov + 128; }      # not horizontal -> VERTICAL
             if ((o_cov & 4) != 0) { acov = acov + 64; }       # CROSS_STREAM
+            if (o_avar2nd != 0 && s == 1) { acov = acov + 32; }   # VARIATION
             store8(FB + sat + 4, acov);
             store8(FB + sat + 5, o_fmt);
             pu16(sat + 6, 0);
@@ -226,6 +228,7 @@ fn build(): i64 {
 fn opts_reset(): i64 {
     o_nokern = 0;
     o_apple = 0;
+    o_avar2nd = 0;
     o_ver = 0;
     o_fmt = 0;
     o_cov = 1;
@@ -316,6 +319,20 @@ fn t_apple(): i64 {
     o_cov = 0;
     check(openf() != 0, 1);
     check(rekha_kern_pair(g_f, 1, 2), 0);
+    # ⛔ a VARIATION subtable (bit 5) holds a variation instance's tuple values, not an adjustment:
+    # skipped. Two subtables sum -40 + -20; with the second a variation one, the first alone
+    # answers. Through 1.1.1 both were added (1.1.2 audit).
+    opts_reset();
+    o_apple = 1;
+    o_nsub = 2;
+    check(openf() != 0, 1);
+    check(rekha_kern_pair(g_f, 1, 2), 0 - 60);
+    opts_reset();
+    o_apple = 1;
+    o_nsub = 2;
+    o_avar2nd = 1;
+    check(openf() != 0, 1);
+    check(rekha_kern_pair(g_f, 1, 2), 0 - 40);
     return 0;
 }
 

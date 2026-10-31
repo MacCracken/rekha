@@ -250,22 +250,41 @@ fn rekha_gvar_scalar(font, naxes, pk, st, en): i64 {
 # 24, a private point list at 25, the raw x / y delta runs at 33 and 41, and the SUM of the scaled
 # deltas over every tuple at 49 and 57 (1.1.2) — 65 units in all.
 var REKHA_GVAR_SCRATCH = 4100;      # REKHA_COMPOSITE_MAXP + 4 phantom points
-var REKHA_GVAR_UNITS = 65;
+var REKHA_GVAR_UNITS = 65;          # + one i64 after them: the work budget left in this load
+
+# ⛔ THE WORK BUDGET. Every tuple that applies costs a pass over all np + 4 points (zero, IUP,
+# accumulate) whatever it names, so a 7-byte tuple buys a full pass and 512 of them on a
+# 4,096-point glyph cost ~65 ms — four times over in a composite of four such children
+# (1.1.2 audit, 262 ms for 12 KB of font). One load may spend REKHA_GVAR_MAXWORK point-passes:
+# exactly what the largest simple glyph at the tuple cap needs, so no glyph that loads alone is
+# refused, and a composite may not multiply it. Past it the load is refused, OOM "gvar budget".
+var REKHA_GVAR_MAXWORK = 2099200;   # REKHA_GVAR_MAXTUPLE * REKHA_GVAR_SCRATCH
 
 fn rekha_gvar_scratch(font): i64 {
     var sc = load64(font + 344);
     if (sc != 0) { return sc; }
-    sc = sd_alloc(REKHA_GVAR_SCRATCH * REKHA_GVAR_UNITS);
+    sc = sd_alloc(REKHA_GVAR_SCRATCH * REKHA_GVAR_UNITS + 8);
     if (sc == 0) { return 0; }
+    store64(sc + REKHA_GVAR_SCRATCH * REKHA_GVAR_UNITS, REKHA_GVAR_MAXWORK);
     store64(font + 344, sc);
     return sc;
+}
+
+# A fresh budget for the load about to start (rekha_load_glyph, rekha_hint_glyph). Allocates
+# nothing: before the scratch exists, rekha_gvar_scratch starts it full.
+fn rekha_gvar_budget_reset(font): i64 {
+    if (font == 0) { return 0; }
+    var sc = load64(font + 344);
+    if (sc != 0) { store64(sc + REKHA_GVAR_SCRATCH * REKHA_GVAR_UNITS, REKHA_GVAR_MAXWORK); }
+    return 0;
 }
 
 # Apply `gvar` to a glyph whose points glyf.cyr has already decoded into xs / ys, with `nc` contours
 # ending at `eps`. Returns 1 when the outline was varied, 0 when it was left exactly as it was —
 # which covers "no gvar", "no axes set", "this glyph has no variation data" and every refusal — and
 # -1 when the scratch could not be allocated, which the CALLER refuses (REKHA_ERR_OOM): drawing the
-# default instance in place of the varied one is a plausible wrong glyph (1.1.2 audit).
+# default instance in place of the varied one is a plausible wrong glyph (1.1.2 audit). -2 when the
+# load's work budget ran out; the code (OOM "gvar budget") is already set and the caller refuses.
 # ⛔ A refusal never half-varies: every tuple's scaled deltas are summed in the scratch, and the sum
 # is added to xs / ys only once the LAST tuple has been read in full. Through 1.1.1 each tuple was
 # added as it was read, so a later tuple's refusal left the earlier ones applied (1.1.2 audit).
@@ -330,6 +349,7 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
     var tch = sc + REKHA_GVAR_SCRATCH * 24;
     var accx = sc + REKHA_GVAR_SCRATCH * 49;
     var accy = sc + REKHA_GVAR_SCRATCH * 57;
+    var wk = sc + REKHA_GVAR_SCRATCH * REKHA_GVAR_UNITS;
     var z = 0;
     while (z < napply) {
         store64(accx + z * 8, 0);
@@ -344,9 +364,14 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
     # decodes to. A tuple with no private point numbers falls back to the glyph's shared ones; when
     # the glyph declares none either, the spec says the tuple provides deltas for every point.
     # Starting this at 0 instead means "names nothing", and every such tuple silently does nothing.
-    store64(&scnt, 0 - 1);
+    # ⛔ ...BUT ONLY WHEN THE GLYPH DECLARES SHARED POINTS. Their "all points" is an encoding (a
+    # count byte of 0), not the absence of a list: with no SHARED_POINT_NUMBERS a tuple that has no
+    # private points names nothing, and FreeType (ttgxvar.c:4289, 4522, 4534) and fontTools both
+    # skip it. Through 1.1.1 rekha applied it to every point (1.1.2 audit). -2 marks "none".
+    store64(&scnt, 0 - 2);
     var shpts = sc + REKHA_GVAR_SCRATCH * 25;            # only read when a tuple is private
     if ((tvc & 32768) != 0) {
+        store64(&scnt, 0 - 1);
         sp = rekha_gvar_points(buf, sp, ge, pts, total, &scnt);
         if (sp < 0) { return 0; }
     }
@@ -383,7 +408,16 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
         if (dend > ge) { return 0; }
 
         var scalar = rekha_gvar_scalar(font, naxes, pk, st, en);
+        # a tuple with no points of its own in a glyph that shares none: nothing to apply
+        if ((tidx & 8192) == 0 && shared_cnt == 0 - 2) { scalar = 0; }
         if (scalar != 0) {
+            # charged BEFORE the pass it pays for
+            var left = load64(wk) - total;
+            if (left < 0) {
+                rekha_fail(font, REKHA_ERR_OOM, "gvar budget");
+                return 0 - 2;
+            }
+            store64(wk, left);
             var q = data;
             var cnt = shared_cnt;
             var plist = pts;
@@ -415,8 +449,11 @@ fn rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, napply): i64 {
                 var pi = i;
                 if (cnt >= 0) { pi = load64(plist + i * 8); }
                 if (pi < total) {
-                    store64(dx + pi * 8, load64(xd + i * 8));
-                    store64(dy + pi * 8, load64(yd + i * 8));
+                    # ⛔ ADDED, not stored: a packed point number may repeat, and "all of these
+                    # deltas must be applied cumulatively" (the spec; FreeType adds, ttgxvar.c:4607).
+                    # Through 1.1.1 the last one overwrote the others (1.1.2 audit).
+                    store64(dx + pi * 8, load64(dx + pi * 8) + load64(xd + i * 8));
+                    store64(dy + pi * 8, load64(dy + pi * 8) + load64(yd + i * 8));
                     store8(tch + pi, 1);
                 }
                 i = i + 1;
@@ -474,6 +511,30 @@ fn rekha_gvar_resolve(f): i64 {
     var g = rekha_find_table_len(f, REKHA_TAG_GVAR, &c);
     if (g == 0) { return 0; }
     if (load64(&c) < 20) { return 0; }
+    var buf = load64(f);
+    var gend = g + load64(&c);
+    # ⛔ fvar's axis count, or the table is not read: the spec's "must be the same number", and
+    # FreeType refuses the table (ttgxvar.c:1836-1843) so its axes cannot be set at all. Through
+    # 1.1.1 tuples were walked over gvar's own count against fvar's coordinates (1.1.2 audit).
+    if (rekha_rd_u16(buf, g + 4) != load64(f + 280)) { return 0; }
+    # ⛔ AN OFFSET ARRAY THAT RUNS BACKWARDS IS REFUSED, as a backward loca is: through 1.1.1 the
+    # glyph after a backward entry started at the lower offset and varied from another glyph's data.
+    # FreeType raises such an entry to the running maximum (ttgxvar.c:1901-1923); rekha does not
+    # guess which glyph the bytes belonged to (a stated divergence, docs/development/roadmap.md).
+    var ngl = rekha_rd_u16(buf, g + 12);
+    var longoff = rekha_rd_u16(buf, g + 14) & 1;
+    var esz = 2;
+    if (longoff != 0) { esz = 4; }
+    if (g + 20 + (ngl + 1) * esz > gend) { return 0; }
+    var prev = 0;
+    var k = 0;
+    while (k <= ngl) {
+        var o = 0;
+        if (longoff != 0) { o = rekha_rd_u32(buf, g + 20 + k * 4); } else { o = rekha_rd_u16(buf, g + 20 + k * 2) * 2; }
+        if (o < prev) { return 0; }
+        prev = o;
+        k = k + 1;
+    }
     store64(f + 336, g);
     # ⛔ The TABLE's end, not the file's: through 1.1.1 every read below was bounded by len, so a gvar
     # declared 20 bytes long drew its offsets and deltas from whatever followed it — the class 0.3.11

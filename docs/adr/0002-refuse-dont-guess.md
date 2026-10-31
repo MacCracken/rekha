@@ -19,7 +19,7 @@ A malformed table, a lying offset, a cap exceeded or bytecode that contradicts i
 the family's sentinel (0, −1, an empty outline, an empty path) and a `RekhaErrCode` with a
 detail string on the handle (ADR 0006). Caps are refusals, not clamps, and a composite's cap is
 a *budget* (64 loads / 16,384 points per `rekha_load_glyph`), not a depth, because depth alone
-lets an acyclic fan-out decode `sum N^L` bodies (`src/glyf.cyr:105-122`). **Hinting corollary:**
+lets an acyclic fan-out decode `sum N^L` bodies (`src/glyf.cyr:107-130`). **Hinting corollary:**
 a refusal inside any program of a glyph load unhints the whole glyph — it is reloaded scaled
 and unhinted, never left partially hinted (`src/hint.cyr:25-27`, `rekha_hint_glyph`).
 

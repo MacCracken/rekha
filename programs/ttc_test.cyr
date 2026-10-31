@@ -250,6 +250,23 @@ fn t_layout(): i64 {
     var f2b = rekha_font_open_index(g_b, g_tlen, 2);
     check(f2b != 0, 1);
     check(rekha_units_per_em(f2b), 0);
+    # ⛔ ...and the floor HOLDS after the open, for every later lookup: a table inside the TTC header
+    # and clear of face 2's own directory is absent to the public reader too. Through 1.1.1 the CFF
+    # resolve cleared the floor, and this answered 8 (1.1.2 audit).
+    memcpy(g_b, g_t, g_tlen);
+    ent = g_dir2 + 12;
+    k = 0;
+    while (k < rekha_rd_u16(g_face, 4)) {
+        if (rekha_rd_u32(g_b, ent + k * 16) == REKHA_TAG_HEAD) {
+            wr_u32(g_b, ent + k * 16 + 8, 8);
+            wr_u32(g_b, ent + k * 16 + 12, 4);
+        }
+        k = k + 1;
+    }
+    var f2c = rekha_font_open_index(g_b, g_tlen, 2);
+    check(f2c != 0, 1);
+    check(rekha_find_table(f2c, REKHA_TAG_HEAD), 0);
+    check(load64(f2c + 248) > 8, 1);
     return 0;
 }
 

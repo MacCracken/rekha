@@ -606,6 +606,24 @@ fn main(): i64 {
     sd_alloc_set(0);
     g_refuse_all = 0;
     check(pz, 0);
+    # ⛔ an OUTLINE refused, a path allowed: rekha_glyph_to_sdpath answers 0 with OOM "outline", as
+    # documented. Through 1.1.1 it handed the 0 on and came back with the EMPTY path a blank glyph
+    # gives (1.1.2 audit) — which only a size-selective hook can tell apart.
+    pool_reset(0);
+    g_limit = 160;                                     # the 8-point outline's block is 192 B; an
+    sd_alloc_set(&pool_hook);                          # empty path's two blocks are at most 128 B
+    var pg = rekha_glyph_to_sdpath(g_font, r8, SD_ONE, 0, 0);
+    sd_alloc_set(0);
+    g_limit = 0 - 1;
+    check(pg, 0);
+    check(rekha_font_error(g_font), REKHA_ERR_OOM);
+    # ...and that 0 is safe to read through the six accessors (they faulted through 1.1.1)
+    check(rekha_outline_n_contours(0), 0);
+    check(rekha_outline_n_points(0), 0);
+    check(rekha_outline_end_pts(0), 0);
+    check(rekha_outline_xs(0), 0);
+    check(rekha_outline_ys(0), 0);
+    check(rekha_outline_on_curve(0), 0);
 
     # ---------------- G13 ----------------
     g_case = "G13 off-curve midpoint floors";

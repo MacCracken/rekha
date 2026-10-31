@@ -6,8 +6,9 @@
 #
 # ⭐ THE DEFAULT INSTANCE, AND SINCE 0.4.11 EVERY OTHER ONE. A CFF2 font is a variable font: its
 # charstrings carry `blend` operators whose deltas move every point as the design axes move. Left
-# alone, rekha decodes the font at its DEFAULT location, where every region's scalar is zero and a
-# blended value is simply its default — the instance a consumer that sets no axis wants, and the
+# alone, rekha decodes the font at its DEFAULT location, where a blended value is simply its default
+# (the default VECTOR: a region peaking at 0 on every axis would score 1 once an axis is set, as in
+# FreeType — see the blend operator in src/cff.cyr) — the instance a consumer that sets no axis wants, and the
 # one `fvar`'s defaults name. `rekha_var_set_axis` (src/var.cyr, 0.4.11) reads `fvar` / `avar` and
 # builds the region scalars `blend` then weights its deltas by.
 #
@@ -19,7 +20,8 @@
 #   - Every INDEX counts in u32, not u16 — including a count-0 one, which is 4 bytes, not 2.
 #     cff.cyr's readers take the width (`rekha_cff_idx_next` / `_obj`), so the bounds logic is not
 #     duplicated here.
-#   - An FDArray is REQUIRED even for a single Font DICT; an FDSelect is omitted when there is one.
+#   - An FDArray is REQUIRED even for a single Font DICT; an FDSelect is omitted when there is one,
+#     and REQUIRED when there are more (1.1.2).
 #   - Top DICT `vstore` (24) points at the ItemVariationStore, and a Private DICT `vsindex` (22)
 #     names the subtable its glyphs blend against.
 #   - The charstring dialect drops the leading width and `endchar` entirely and adds `vsindex` (15)
@@ -61,7 +63,11 @@ fn rekha_cff2_ivd(buf, vstore, end, idx): i64 {
     var cnt = rekha_rd_u16(buf, ivs + 6);
     if (idx >= cnt) { return 0; }
     if (ivs + 8 + cnt * 4 > ivend) { return 0; }
-    var ivd = ivs + rekha_rd_u32(buf, ivs + 8 + idx * 4);
+    # ⛔ A NULL subtable offset names nothing to blend over: refused (0), so a blend asking for it
+    # refuses too. Through 1.1.1 it read the store's own header as the subtable (1.1.2 audit).
+    var ivo = rekha_rd_u32(buf, ivs + 8 + idx * 4);
+    if (ivo == 0) { return 0; }
+    var ivd = ivs + ivo;
     if (ivd < ivs) { return 0; }
     if (ivd + 6 > ivend) { return 0; }
     # ⚠ The region INDEXES are bounds-checked too, not just their count: instancing reads WHICH
@@ -196,12 +202,18 @@ fn rekha_cff2_resolve(f): i64 {
     if (load64(&d + 8) < 0) { return 0; }
     var fdarray = cff + load64(&d + 8);
     if (rekha_cff_idx_next(buf, fdarray, end, 4) == 0) { return 0; }
-    if (rekha_cff_idx_count_at(buf, fdarray, 4) < 1) { return 0; }
+    var nfd = rekha_cff_idx_count_at(buf, fdarray, 4);
+    if (nfd < 1) { return 0; }
 
     var fdselect = 0;
     var fsr = rekha_cff_dict_op_max(buf, ta, tb, 1237, &d, 27);
     if (fsr < 0) { return 0; }
-    if (fsr == 1) {                                                                # FDSelect, optional
+    # ⛔ OPTIONAL ONLY WITH ONE Font DICT: the spec omits it there, and with two or more it is what
+    # says which DICT (local Subrs, vsindex) a glyph takes. Through 1.1.1 every glyph silently took
+    # FD 0; FreeType loads an FDSelect whenever there is more than one (cffload.c:2449-2453), finds
+    # none, and refuses the face (1.1.2 audit).
+    if (fsr == 0 && nfd > 1) { return 0; }
+    if (fsr == 1) {                                                                # FDSelect
         if (load64(&d + 8) < 0) { return 0; }
         fdselect = cff + load64(&d + 8);
         if (rekha_cff2_fdselect_ok(buf, fdselect, end, n) == 0) { return 0; }

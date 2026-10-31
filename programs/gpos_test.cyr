@@ -75,6 +75,7 @@ var g_mnfr = 1;
 var g_mnli = 1;
 var g_mnlook = 1;
 var g_mdistinct = 1;
+var g_mnsub = 0;        # > 0: each lookup declares that many subtables, all the SAME PairPos
 
 var g_gpos = 0;
 var g_gposlen = 0;
@@ -314,6 +315,21 @@ fn put_legacy_kern(at): i64 {
     return 4 + 6 + 8 + 6;
 }
 
+# A PairPos lookup declaring `nsub` subtables that are one shared body: what the subtable ceiling
+# counts is what the font declares, not distinct bytes.
+fn put_lookup_shared(at, nsub, mul): i64 {
+    pu16(at, 2);
+    pu16(at + 2, 0);
+    pu16(at + 4, nsub);
+    var body = 6 + nsub * 2;
+    var s = 0;
+    while (s < nsub) {
+        pu16(at + 6 + s * 2, body);
+        s = s + 1;
+    }
+    return body + put_pairpos(at + body, mul);
+}
+
 fn put_gpos_many(at): i64 {
     var fl = 12;
     pu16(at + 10, 0);                                   # ScriptList: no scripts
@@ -340,7 +356,11 @@ fn put_gpos_many(at): i64 {
     var k = 0;
     while (k < g_mnlook) {
         pu16(at + ll + 2 + k * 2, lbody);
-        lbody = lbody + put_lookup(at + ll + lbody, 2, 1, 1 + k);
+        if (g_mnsub > 0) {
+            lbody = lbody + put_lookup_shared(at + ll + lbody, g_mnsub, 1 + k);
+        } else {
+            lbody = lbody + put_lookup(at + ll + lbody, 2, 1, 1 + k);
+        }
         k = k + 1;
     }
     pu16(at, 1);
@@ -426,6 +446,7 @@ fn opts_reset(): i64 {
     o_many = 0;
     g_mnfr = 1;
     g_mnli = 1;
+    g_mnsub = 0;
     g_mnlook = 1;
     g_mdistinct = 1;
     return 0;
@@ -602,6 +623,35 @@ fn t_ceilings(): i64 {
     g_mnlook = 64;
     check(openf() != 0, 1);
     check(rekha_gpos_kern_present(g_f), 1);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40 * 2080);
+    # ⛔ THE SUBTABLES A QUERY WALKS ARE CAPPED, as declared: 1,024 over the kept lookups resolve,
+    # 1,025 refuse the GPOS kern — never a 435 ms query (1.1.2 audit; the host's most is 19)
+    opts_reset();
+    o_many = 1;
+    g_mnsub = 1024;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 1);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40);       # the first subtable answers, alone
+    opts_reset();
+    o_many = 1;
+    g_mnsub = 1025;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_present(g_f), 0);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0);
+    opts_reset();
+    o_many = 1;
+    g_mnli = 64;
+    g_mnlook = 64;
+    check(openf() != 0, 1);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40 * 2080);   # resolves the cache
+    # ⛔ the cached lookup array is RE-CHECKED before it is read: a cache made under a per-frame
+    # arena dangles after the reset, and 1.1.1 dereferenced whatever the reissued bytes said. White
+    # box: lookup 0's offset overwritten as an arena's next tenant would, the rest left valid.
+    var arr = load64(g_f + 592);
+    var keep = load64(arr);
+    store64(arr, 0x7FFFFFFF0000);
+    check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40 * 2079);  # lookup 0 (-40 x 1) skipped, no fault
+    store64(arr, keep);
     check(rekha_gpos_kern_pair(g_f, 1, 2), 0 - 40 * 2080);
     # ⛔ a 65th is a REFUSAL, not a drop: no GPOS kern at all, never the partial -40 x 2080 of
     # the first 64 that 1.1.1 answered

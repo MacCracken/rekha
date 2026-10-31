@@ -3,13 +3,15 @@
 # var.cyr — read `fvar` and `avar`, turn a user axis setting into a NORMALIZED coordinate, and turn
 # those coordinates into one scalar per region of a variation store. That scalar is the whole of
 # instancing: a blended value is its default plus the sum of its deltas, each weighted by the scalar
-# of the region it belongs to. At the default location every scalar is zero, which is why 0.4.9
-# could decode a CFF2 without any of this.
+# of the region it belongs to. With no axis set the default vector applies, which is why 0.4.9
+# could decode a CFF2 without any of this (at a SET default, a region peaking at 0 everywhere still
+# scores 1 — FreeType's answer too; src/cff.cyr's blend).
 #
 # ⛔ WHAT THIS DOES NOT DO. The region-scalar ARRAY built here is the CFF2 variation store's, and
 # the CFF2 charstring `blend` is its only consumer. `gvar` (0.4.12) shares the tent maths instead —
-# `rekha_var_axis_factor`, `rekha_var_live` — and derives its own scalar per tuple. `HVAR` and
-# `MVAR` are METRICS deltas over the same machinery and are not read: docs/development/roadmap.md.
+# `rekha_var_axis_factor`, `rekha_var_live` — and derives its own scalar per tuple. `HVAR`, `MVAR`
+# and `VVAR` are METRICS deltas over the same machinery, read by src/hvar.cyr (0.6.0) and
+# src/vert.cyr (0.6.7), which compute their scalars on demand rather than from this array.
 #
 # fvar (OpenType): majorVersion u16 · minorVersion u16 · axesArrayOffset u16 · reserved u16 ·
 #   axisCount u16 · axisSize u16 · instanceCount u16 · instanceSize u16; then axisCount
@@ -22,10 +24,11 @@
 # and in the same place — its additions (axisIndexMapOffset, varStoreOffset) sit AFTER them — so a
 # 2.0 table parses here exactly as a 1.0 one does. Through 0.4.12 the version gate took 1 only and
 # dropped such a table WHOLE, discarding mapping rekha already knew how to apply.
-# ⛔ Its variation store is still NOT applied: that needs a DeltaSetIndexMap reader rekha does not
-# have (docs/development/roadmap.md). So a 2.0 axis is mapped by its segments and not refined by
-# its store — which is what 2.0's own design makes the safe subset, since a 2.0 font that does all
-# its work in the store carries identity segment maps and is unaffected either way.
+# ⛔ Its variation store is still NOT applied. The DeltaSetIndexMap reader exists (src/hvar.cyr
+# rekha_dsim); wiring it into avar is a roadmap item (docs/development/roadmap.md). So a 2.0 axis is
+# mapped by its segments and not refined by its store — which is what 2.0's own design makes the
+# safe subset, since a 2.0 font that does all its work in the store carries identity segment maps
+# and is unaffected either way.
 #
 # ⚠ FIXED POINT. Axis values and normalized coordinates are 16.16 here, because that is what fvar's
 # own Fixed fields are and what the charstring interpreter already works in. A region's coordinates
@@ -363,8 +366,9 @@ public fn rekha_var_coord(font, i): i64 {
 # with no axes, a bad index, or an allocation failure.
 # ⚠ This changes what EVERY later rekha_load_glyph returns for this font. It is not cheap enough for
 # a per-glyph call and not meant to be: set the axes once, then draw.
-# ⚠ ALLOCATION: the coordinate and scalar arrays are allocated on the first call and reused after.
-# rekha's seam has no free, so a font whose axes are set keeps them.
+# ⚠ ALLOCATION: the coordinate and scalar arrays — and on a face with gvar, gvar's 266,508 B
+# scratch (1.1.2) — are allocated on the first call and reused after. rekha's seam has no free, so
+# a font whose axes are set keeps them.
 # ⭐ AND IT TELLS THE HINTING CONTEXT (v0.8.2): a cached rekha_hint_ctx is marked stale through
 # rekha_hint_axes_changed, so the next rekha_hint_ctx — at the same ppem or another — re-runs
 # `prep` for the new instance. A FORWARD call into src/hint.cyr, included after this module:
@@ -384,6 +388,14 @@ public fn rekha_var_set_axis(font, i, value): i64 {
             z = z + 1;
         }
         store64(font + 312, c);
+    }
+    # ⛔ THE gvar SCRATCH IS ALLOCATED HERE, WITH THE AXES, not on the first varied glyph load. It is
+    # cached on the handle, and a load is what a consumer scopes under a per-frame arena: the first
+    # varied glyph drawn inside one put the scratch in the arena, and the reset left the handle
+    # writing into reissued memory (1.1.2 audit). Setting the axes is the step docs/api/README.md
+    # rule 1 already puts outside the scope. A refusal is this call's allocation failure.
+    if (load64(font + 336) != 0) {
+        if (rekha_gvar_scratch(font) == 0) { return 0; }
     }
     var nc = rekha_var_normalize(rekha_var_axis_min(font, i), rekha_var_axis_default(font, i),
       rekha_var_axis_max(font, i), value);
@@ -494,7 +506,10 @@ fn rekha_var_resolve(f): i64 {
     if (avar != 0) {
         if (avar + 8 <= avar + load64(&c)) {
             var av = rekha_rd_u16(buf, avar);
-            if (av == 1 || av == 2) { store64(f + 296, avar); }
+            # ⛔ ONE SEGMENT MAP PER fvar AXIS, or none: the spec's "must be the same number", and
+            # FreeType drops the table otherwise (ttgxvar.c:388-394, reading reserved + axisCount as
+            # one long). Through 1.1.1 a short avar mapped the axes it had (1.1.2 audit).
+            if ((av == 1 || av == 2) && rekha_rd_u32(buf, avar + 4) == n) { store64(f + 296, avar); }
         }
     }
     return 1;

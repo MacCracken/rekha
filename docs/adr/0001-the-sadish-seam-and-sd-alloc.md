@@ -28,7 +28,7 @@ context, the GPOS lookups, the WOFF scratch (`grep -c sd_alloc src/*.cyr`). Ther
   varied glyph load must happen *outside* a per-frame hook, or the pointer dangles when the
   arena resets (`src/glyf.cyr:52-58`; the five hinting rules in `docs/api/hint.md`). The hint
   context is one allocation cached on the handle and re-scaled in place, never reallocated,
-  or a size walk would leak one interpreter per size (`src/hint.cyr:133-144`).
+  or a size walk would leak one interpreter per size (`src/hint.cyr:136-147`).
 - **Neutral** — a hook may refuse, and every `sd_alloc` and `sd_path_*` status is checked so a
   refused allocation returns 0 or an empty path, never a fault or a partial glyph
   (`src/glyf.cyr:59-65`; CHANGELOG 0.3.11). `cyrius fuzz --poison` cannot instrument the seam;

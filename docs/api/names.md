@@ -120,7 +120,7 @@ fn rekha_stat_present(font): i64
 
 Returns 1 when the font carries a STAT table that survived the open-time resolve, else 0; a null font handle answers 0. A refused table (majorVersion other than 1, a header that does not fit, designAxisSize below 8, or an axis / offset array outside the table) is reported as simply absent; no RekhaErrCode is set, stat.cyr never touches rekha_font_error. No allocation.
 
-<!-- src/stat.cyr:73 -->
+<!-- src/stat.cyr:78 -->
 
 ### `rekha_stat_fallback_name_id(font)`
 
@@ -130,7 +130,7 @@ fn rekha_stat_fallback_name_id(font): i64
 
 Returns the elidedFallbackNameID (a name id for rekha_name_utf8) to use when every axis value in a style string was elided, or 0 when there is no STAT or the table is minorVersion 0 (the field exists from minorVersion 1 up; a 1.0 table has none). No allocation, no error code.
 
-<!-- src/stat.cyr:81 -->
+<!-- src/stat.cyr:86 -->
 
 ### `rekha_stat_axis_count(font)`
 
@@ -140,7 +140,7 @@ fn rekha_stat_axis_count(font): i64
 
 Returns designAxisCount (u16), or 0 when there is no readable STAT. ⚠ This is STAT's own axis list, which a static member of a variable family also carries; it need not match rekha_var_axis_count. No allocation, no error code.
 
-<!-- src/stat.cyr:90 -->
+<!-- src/stat.cyr:96 -->
 
 ### `rekha_stat_axis_tag(font, i)`
 
@@ -150,7 +150,7 @@ fn rekha_stat_axis_tag(font, i): i64
 
 Returns design axis i's 4-byte tag (u32, e.g. 0x77676874 'wght'), or 0 when there is no STAT or i is outside 0..rekha_stat_axis_count-1. No allocation, no error code.
 
-<!-- src/stat.cyr:105 -->
+<!-- src/stat.cyr:111 -->
 
 ### `rekha_stat_axis_name_id(font, i)`
 
@@ -160,7 +160,7 @@ fn rekha_stat_axis_name_id(font, i): i64
 
 Returns design axis i's axisNameID (u16) for rekha_name_utf8, or 0 when there is no STAT or i is out of range. No allocation, no error code.
 
-<!-- src/stat.cyr:112 -->
+<!-- src/stat.cyr:118 -->
 
 ### `rekha_stat_axis_ordering(font, i)`
 
@@ -170,7 +170,7 @@ fn rekha_stat_axis_ordering(font, i): i64
 
 Returns design axis i's axisOrdering (u16), its sort position within a style string, or 0 when there is no STAT or i is out of range. ⚠ 0 is also a legitimate ordering (the first axis usually has it), so bound i by rekha_stat_axis_count first rather than treating 0 as absence. No allocation, no error code.
 
-<!-- src/stat.cyr:119 -->
+<!-- src/stat.cyr:125 -->
 
 ### `rekha_stat_value_count(font)`
 
@@ -180,7 +180,7 @@ fn rekha_stat_value_count(font): i64
 
 Returns axisValueCount (u16), the number of axis value tables, or 0 when there is no readable STAT. Entries in 0..count-1 may still be individually unreadable (rekha_stat_value_format answers 0 for those). No allocation, no error code.
 
-<!-- src/stat.cyr:126 -->
+<!-- src/stat.cyr:132 -->
 
 ### `rekha_stat_value_format(font, i)`
 
@@ -190,7 +190,7 @@ fn rekha_stat_value_format(font, i): i64
 
 Returns axis value i's format, 1..4, or 0 when there is no readable entry there: no STAT, i outside 0..rekha_stat_value_count-1, an offset of 0 (the spec's 'no entry here'), a format past 4, or a body that does not fit inside the table. No allocation, no error code.
 
-<!-- src/stat.cyr:166 -->
+<!-- src/stat.cyr:172 -->
 
 ### `rekha_stat_value_flags(font, i)`
 
@@ -200,7 +200,7 @@ fn rekha_stat_value_flags(font, i): i64
 
 Returns axis value i's flags (u16), or 0 when there is no readable entry. Test the bits REKHA_STAT_OLDER_SIBLING (1) and REKHA_STAT_ELIDABLE (2); ELIDABLE is the bit that matters for building a style string. A 0 result is also a legitimate 'no flags', so gate on rekha_stat_value_format. No allocation, no error code.
 
-<!-- src/stat.cyr:173 -->
+<!-- src/stat.cyr:179 -->
 
 ### `rekha_stat_value_name_id(font, i)`
 
@@ -210,7 +210,7 @@ fn rekha_stat_value_name_id(font, i): i64
 
 Returns axis value i's valueNameID (u16) for rekha_name_utf8, or 0 when there is no readable entry. No allocation, no error code.
 
-<!-- src/stat.cyr:180 -->
+<!-- src/stat.cyr:186 -->
 
 ### `rekha_stat_value_pairs(font, i)`
 
@@ -220,7 +220,7 @@ fn rekha_stat_value_pairs(font, i): i64
 
 Returns how many (axis, value) pairs entry i carries: 1 for formats 1, 2 and 3, and format 4's own axisCount. 0 when there is no readable entry. ⭐ This is the bound for rekha_stat_value_axis / _value_value's pair index k, so a consumer never branches on the format to reach the numbers. No allocation, no error code.
 
-<!-- src/stat.cyr:188 -->
+<!-- src/stat.cyr:194 -->
 
 ### `rekha_stat_value_axis(font, i, k)`
 
@@ -230,7 +230,7 @@ fn rekha_stat_value_axis(font, i, k): i64
 
 Returns pair k of axis value i's axisIndex (u16) into STAT's own design-axis list, or -1 when there is no readable entry or k is outside 0..rekha_stat_value_pairs-1. ⚠ The axisIndex is NOT checked against designAxisCount: it is reported as written, so an out-of-range one is visible rather than quietly clamped; every BYTE read is inside the table. The only STAT accessor with a -1 sentinel. No allocation, no error code.
 
-<!-- src/stat.cyr:202 -->
+<!-- src/stat.cyr:208 -->
 
 ### `rekha_stat_value_value(font, i, k)`
 
@@ -240,7 +240,7 @@ fn rekha_stat_value_value(font, i, k): i64
 
 Returns pair k of axis value i's value on that axis as a signed 16.16 Fixed in user (design) units, e.g. 700 << 16 for wght 700; for format 2 this is the NOMINAL value and its range is rekha_stat_value_min / _max. 0 when there is no readable entry or k is outside 0..rekha_stat_value_pairs-1 (0 is also a legitimate 0.0, so gate on the format and pair count). No allocation, no error code.
 
-<!-- src/stat.cyr:213 -->
+<!-- src/stat.cyr:219 -->
 
 ### `rekha_stat_value_min(font, i)`
 
@@ -250,7 +250,7 @@ fn rekha_stat_value_min(font, i): i64
 
 Returns format 2's rangeMinValue as a signed 16.16 Fixed in user units; 0 for any other format (a format 1 or 3 entry names a point, not a span) or when there is no readable entry. No allocation, no error code.
 
-<!-- src/stat.cyr:223 -->
+<!-- src/stat.cyr:229 -->
 
 ### `rekha_stat_value_max(font, i)`
 
@@ -260,7 +260,7 @@ fn rekha_stat_value_max(font, i): i64
 
 Returns format 2's rangeMaxValue as a signed 16.16 Fixed in user units; 0 for any other format or when there is no readable entry. No allocation, no error code.
 
-<!-- src/stat.cyr:231 -->
+<!-- src/stat.cyr:237 -->
 
 ### `rekha_stat_value_linked(font, i)`
 
@@ -270,4 +270,4 @@ fn rekha_stat_value_linked(font, i): i64
 
 Returns format 3's linkedValue as a signed 16.16 Fixed in user units: the place on the same axis this style's bold-or-equivalent counterpart sits. 0 for any other format or when there is no readable entry. No allocation, no error code.
 
-<!-- src/stat.cyr:240 -->
+<!-- src/stat.cyr:246 -->

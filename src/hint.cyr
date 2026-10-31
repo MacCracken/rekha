@@ -111,7 +111,10 @@ var REKHA_HINT_MAXDEPTH = 64;
 var REKHA_HINT_BUDGET   = 1000000;
 # ⚠ TrueType is specified on 32-bit signed integers. rekha computes in i64 and CLAMPS every
 # arithmetic result to that range instead of wrapping: a wrap is never what a font meant, and the
-# clamp is what keeps the products in rekha_hint_muldiv inside i64.
+# clamp is what keeps the products in rekha_hint_muldiv inside i64. ⚠ A stated divergence (1.1.2
+# audit; docs/development/roadmap.md): FreeType 2.14.3 on LP64 keeps its stack in FT_Long and its
+# results whole, so a value past 2^31 that a later DIV brings back draws differently there. Only
+# bytecode that leaves the 32-bit range reaches it.
 var REKHA_HINT_CLAMP = 2147483647;
 
 # @public — the eight rounding states, the value `rekha_hint_gs(ctx, REKHA_GS_ROUND)` answers.
@@ -824,10 +827,10 @@ public fn rekha_hint_func_count(ctx): i64 {
 # that answers 0, and it answers 0 for that standing refusal too.
 # ⛔ CALL THIS ONCE, OUTSIDE ANY SCOPED PER-FRAME ALLOCATION HOOK, right after rekha_font_open —
 # the way the font itself is opened. The context is a lazy allocation cached on the font handle
-# (like the gvar scratch and GPOS's lookup list), and a consumer whose first hint happens inside a
-# per-frame `sd_alloc` arena loses it at the arena's reset and reads freed memory at the next
-# frame. On a variable face, load one glyph outside the hook too: the gvar scratch is allocated
-# by the first varied glyph load.
+# (like GPOS's lookup list), and a consumer whose first hint happens inside a per-frame `sd_alloc`
+# arena loses it at the arena's reset and reads freed memory at the next frame. On a variable
+# face, set the axes outside the hook too: rekha_var_set_axis allocates the gvar scratch (1.1.2;
+# through 1.1.1 the first varied glyph load did).
 # ⛔ THE CONTEXT IS CACHED ON THE FONT AND RE-SCALED, NEVER REALLOCATED. `sd_alloc` has no free, so
 # a text run walking sizes would otherwise leak one interpreter per size. The function table and
 # the instruction table are the one thing a size change keeps: a function is a range into font
@@ -851,6 +854,9 @@ public fn rekha_hint_ctx(font, ppem): i64 {
         return rekha_fail(font, REKHA_ERR_NO_TABLE, "hint tables");
     }
     if (ppem <= 0) { return rekha_fail(font, REKHA_ERR_OTHER, "ppem"); }
+    # ⛔ FreeType's ppem is an FT_UShort. Past it the F26Dot6 products leave TrueType's 32-bit range
+    # and, near 2^35, wrap i64 — a point at a wrapped coordinate answered as hinted (1.1.2 audit).
+    if (ppem > 65535) { return rekha_fail(font, REKHA_ERR_OTHER, "ppem"); }
     var upem = load64(font + 40);
     if (upem <= 0) { return rekha_fail(font, REKHA_ERR_NO_TABLE, "head"); }
     var ctx = load64(font + 808);
@@ -3502,7 +3508,10 @@ fn rekha_hint_run_fpgm(ctx): i64 {
 # on it. 1 when `prep` ran (an absent or empty `prep` counts as ran), 0 when it refused or when the
 # font program's standing refusal is re-raised instead, without running. Called for you by
 # `rekha_hint_ctx` on every size change; calling it again is idempotent — same control values,
-# same storage, same twilight zone, same graphics state — because it rebuilds first. It is
+# same storage, same twilight zone, same graphics state — because it rebuilds first, UNLESS `prep`
+# itself (re)defines a function or instruction it also runs: the FDEF / IDEF tables are not
+# rebuilt (they persist as FreeType's per-FT_Size tables do), so a second run calls the new
+# definition (1.1.2 audit; through 1.1.1 this header promised idempotence outright). It is
 # FreeType's `cvt_ready < 0` path (ref2143/ttobjs.c:940-1003), in the same order:
 #   the control values and the storage area repointed at the SIZE's arrays (a glyph load's
 #   private copies are forgotten); the control values re-scaled FROM THE FONT at this ppem; the
@@ -3623,7 +3632,10 @@ fn rekha_hint_load_fail(ctx, lc, code, detail): i64 {
 # hints its point 0 at the same x as at the default instance (programs/hint_test.cyr, L).
 # rekha_left_side_bearing, the public metric reader, keeps the delta (its frozen semantics match
 # rekha_advance_width's); the roadmap pins that the two readers of the lsb disagree on a
-# variation instance.
+# variation instance. ⛔ The varied advance is then CAST, `*aadvance = (FT_UShort)a` (ttmtx.c:331):
+# a delta that drives it below 0 wraps, where rekha_advance_width clamps at 0 — the hinted path's
+# reference is FreeType's arithmetic. Through 1.1.1 it stayed negative, an advance FreeType never
+# answers (1.1.2 audit).
 fn rekha_hint_hmetrics(font, gid, out): i64 {
     store64(out, 0);
     store64(out + 8, 0);
@@ -3635,12 +3647,12 @@ fn rekha_hint_hmetrics(font, gid, out): i64 {
     var buf = load64(font);
     if (gid < nhm) {
         if (gid * 4 + 4 > len) { return 0; }
-        store64(out, rekha_rd_u16(buf, hmtx + gid * 4) + rekha_hvar_advance_delta(font, gid));
+        store64(out, (rekha_rd_u16(buf, hmtx + gid * 4) + rekha_hvar_advance_delta(font, gid)) & 65535);
         store64(out + 8, rekha_rd_i16(buf, hmtx + gid * 4 + 2));
         return 1;
     }
     if ((nhm - 1) * 4 + 2 > len) { return 0; }
-    store64(out, rekha_rd_u16(buf, hmtx + (nhm - 1) * 4) + rekha_hvar_advance_delta(font, gid));
+    store64(out, (rekha_rd_u16(buf, hmtx + (nhm - 1) * 4) + rekha_hvar_advance_delta(font, gid)) & 65535);
     var at = nhm * 4 + (gid - nhm) * 2;
     if (at + 2 > len) { return 1; }
     store64(out + 8, rekha_rd_i16(buf, hmtx + at));
@@ -3663,6 +3675,11 @@ fn rekha_hint_hmetrics(font, gid, out): i64 {
 # tt_face_load_os2 reads its 78 field bytes from the stream whatever the directory says and
 # takes the OS/2 branch with whatever bytes follow the table. rekha's gate is the saner rule and
 # is kept; a face with a 68-byte OS/2 hints its vertical phantoms off-reference (roadmap pin).
+# ⛔ FreeType's casts and hooks, for the hinted path's sake (1.1.2 audit): the advance height takes
+# VVAR's delta and the FT_UShort cast; the top side bearing takes NO delta — the TrueType driver
+# leaves tsb_adjust NULL (ttdriver.c:561), the vertical twin of pp1's lsb rule above; and with no
+# vmtx, TT_Get_VMetrics casts tsb to FT_Short and the height to FT_UShort (ttgload.c:122-136).
+# rekha_top_side_bearing, the public reader, keeps its delta, as rekha_left_side_bearing does.
 fn rekha_hint_vmetrics(font, gid, ymax, out): i64 {
     var asc = 0;
     var desc = 0;
@@ -3682,15 +3699,15 @@ fn rekha_hint_vmetrics(font, gid, ymax, out): i64 {
         if (nvm <= 0) { return 1; }
         if (gid < nvm) {
             if (gid * 4 + 4 > len) { return 1; }
-            store64(out + 8, rekha_rd_u16(buf, vmtx + gid * 4) + rekha_vvar_delta(font, gid, 8));
-            store64(out, rekha_rd_i16(buf, vmtx + gid * 4 + 2) + rekha_vvar_delta(font, gid, 12));
+            store64(out + 8, (rekha_rd_u16(buf, vmtx + gid * 4) + rekha_vvar_delta(font, gid, 8)) & 65535);
+            store64(out, rekha_rd_i16(buf, vmtx + gid * 4 + 2));
             return 1;
         }
         if ((nvm - 1) * 4 + 2 > len) { return 1; }
-        store64(out + 8, rekha_rd_u16(buf, vmtx + (nvm - 1) * 4) + rekha_vvar_delta(font, gid, 8));
+        store64(out + 8, (rekha_rd_u16(buf, vmtx + (nvm - 1) * 4) + rekha_vvar_delta(font, gid, 8)) & 65535);
         var at = nvm * 4 + (gid - nvm) * 2;
         if (at + 2 > len) { return 1; }
-        store64(out, rekha_rd_i16(buf, vmtx + at) + rekha_vvar_delta(font, gid, 12));
+        store64(out, rekha_rd_i16(buf, vmtx + at));
         return 1;
     }
     if (load64(font + 448) != 0) {
@@ -3703,8 +3720,8 @@ fn rekha_hint_vmetrics(font, gid, ymax, out): i64 {
     }
     var ah = asc - desc;
     if (ah < 0) { ah = 0 - ah; }
-    store64(out, asc - ymax);
-    store64(out + 8, ah);
+    store64(out, rekha_hint_s16(asc - ymax));
+    store64(out + 8, ah & 65535);
     return 1;
 }
 
@@ -3731,6 +3748,12 @@ fn rekha_hint_phantoms(ctx, gid, xmin, ymax, xs, ys): i64 {
 # phantom deltas UNDONE where FreeType zeroes them — pp1 / pp2 on a face with an HVAR table,
 # pp3 / pp4 with a VVAR (ref2143/ttgxvar.c:4671-4684), whose metrics readers already carry those
 # tables' deltas. On a static face, or at the default location, one load and a return.
+# The detail a refused rekha_hint_gvar is reported with.
+fn rekha_hint_gvar_why(r): i64 {
+    if (r == 0 - 2) { return "gvar budget"; }
+    return "gvar scratch";
+}
+
 fn rekha_hint_gvar(font, gid, xs, ys, np, nc, eps): i64 {
     if (rekha_var_live(font) == 0) { return 0; }
     var keep: i64[8];
@@ -3741,7 +3764,7 @@ fn rekha_hint_gvar(font, gid, xs, ys, np, nc, eps): i64 {
         k = k + 1;
     }
     var varied = rekha_gvar_apply_n(font, gid, xs, ys, np, nc, eps, np + 4);
-    if (varied < 0) { return 0 - 1; }               # the scratch was refused: the caller refuses
+    if (varied < 0) { return varied; }              # -1 scratch, -2 work budget: the caller refuses
     if (varied == 0) { return 0; }
     if (load64(font + 416) != 0) {
         store64(xs + np * 8, load64(&keep));        store64(ys + np * 8, load64(&keep + 32));
@@ -3937,8 +3960,9 @@ fn rekha_hint_load_empty(ctx, gid, base, lc): i64 {
     var k = 0;
     while (k < 4) { store8(tags + k, 0); k = k + 1; }
     rekha_hint_phantoms(ctx, gid, 0, 0, xs, ys);
-    if (rekha_hint_gvar(load64(ctx + HC_FONT), gid, xs, ys, 0, 0, 0) < 0) {
-        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, "gvar scratch");
+    var hv = rekha_hint_gvar(load64(ctx + HC_FONT), gid, xs, ys, 0, 0, 0);
+    if (hv < 0) {
+        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, rekha_hint_gvar_why(hv));
     }
     rekha_hint_scale_zone(ctx, base, 4);
     store64(lc + LC_NC, 0);
@@ -4017,8 +4041,9 @@ fn rekha_hint_load_simple_at(ctx, gid, start, end, nc, base, cbase, lc): i64 {
       xs + np * 8, ys + np * 8);
     # a refused gvar scratch refuses the glyph — the default instance hinted in the varied one's
     # place answered 1 with REKHA_OK through 1.1.1 (1.1.2 audit)
-    if (rekha_hint_gvar(font, gid, xs, ys, np, nc, eps) < 0) {
-        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, "gvar scratch");
+    var hv = rekha_hint_gvar(font, gid, xs, ys, np, nc, eps);
+    if (hv < 0) {
+        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, rekha_hint_gvar_why(hv));
     }
     rekha_hint_scale_zone(ctx, base, np + 4);
     store64(lc + LC_NC, nc);
@@ -4104,8 +4129,9 @@ fn rekha_hint_load_composite_at(ctx, gid, start, end, depth, base, cbase, lc): i
     }
     rekha_hint_phantoms(ctx, gid, rekha_rd_i16(buf, start + 2), rekha_rd_i16(buf, start + 8),
       &cdx + n * 8, &cdy + n * 8);
-    if (rekha_hint_gvar(font, gid, &cdx, &cdy, n, 0, 0) < 0) {
-        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, "gvar scratch");
+    var hv = rekha_hint_gvar(font, gid, &cdx, &cdy, n, 0, 0);
+    if (hv < 0) {
+        return rekha_hint_load_fail(ctx, lc, REKHA_ERR_OOM, rekha_hint_gvar_why(hv));
     }
     var sc = load64(ctx + HC_SCALE);
     var ppx: i64[4];
@@ -4341,6 +4367,7 @@ fn rekha_hint_load_root(ctx, gid, hinting, lc): i64 {
     store64(lc + LC_HINT, hinting);
     store64(lc + LC_NC, 0);
     rekha_hint_load_reset(ctx);
+    rekha_gvar_budget_reset(load64(ctx + HC_FONT));   # the load's gvar work budget, as rekha_load_glyph's
     var n = rekha_hint_load(ctx, gid, 0, 0, 0, lc);
     if (n < 0) { return 0 - 1; }
     store64(ctx + HC_ZONE1 + ZN_N, n + 4);

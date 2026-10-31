@@ -41,8 +41,9 @@ offsets from it. The buffer must outlive the handle and must not change under it
 used by one thread at a time (its error slot, its variation state and its hint context live on
 it). Nothing in rekha is freed: every allocation goes through sadish's `sd_alloc` hook
 ([ADR 0001](../adr/0001-the-sadish-seam-and-sd-alloc.md)), so a consumer that scopes an arena
-per frame must open faces, warm the hint context and load one glyph of a variable face
-*outside* that scope. The calls that allocate say so in their entry; the rest allocate 0 B.
+per frame must open faces, warm the hint context, set the axes of a variable face and make one
+kerning query on a GPOS face *outside* that scope — each allocates a block the handle keeps
+(through 1.1.1 the `gvar` scratch waited for the first varied glyph load instead). The calls that allocate say so in their entry; the rest allocate 0 B.
 
 **2. Test the answer first, ask `rekha_font_error` second.** A refusal is a sentinel — `0` for
 a handle, a count, a pointer or a metric; an empty path or an empty outline for a glyph — and
@@ -62,13 +63,16 @@ pixel. `>>` in Cyrius is logical — never shift a negative coordinate; sadish e
 **4. Refuse, don't guess.** A malformed table, a lying offset, a cap exceeded, or bytecode that
 contradicts itself yields the sentinel and a code — never a plausible wrong number
 ([ADR 0002](../adr/0002-refuse-dont-guess.md)). The caps are part of that contract and are
-stated as values, not names: an outline holds at most **4,096 points** and **128 contours**;
-a composite nests **5** deep and may load **64** glyphs / **16,384** points per
-`rekha_load_glyph`; a collection has at most **1,024** faces; the hint machine runs at most
-**1,000,000** instructions per program at a `CALL` depth of **64**, and takes a `maxp` that
-declares at most 8,192 stack elements, 8,192 storage slots, 4,096 functions, 256 instruction
-defs, 16,384 control values and 4,096 twilight or glyph points; WOFF inflation is capped at
-1,032:1 and WOFF2 at what the header declares.
+stated as values, not names: an outline holds at most **4,096 points** and **4,096 contours**
+in every loader (128 contours, in the composite merge only, through 1.1.1); a composite nests
+**5** deep and may load **64** glyphs / **16,384** points per `rekha_load_glyph`, which may
+spend **2,099,200** gvar point-passes (512 tuples x 4,100 points); a collection has at most
+**1,024** faces; the hint machine runs at most **1,000,000** instructions per program at a
+`CALL` depth of **64**, and takes a `maxp` that declares at most 5,461 stack elements (8,192
+slots once FreeType's margin of half again is added), 8,192 storage slots, 4,096 functions,
+256 instruction defs, 16,384 control values, 4,096 twilight points and 4,092 glyph points (4,096
+with the four phantoms); WOFF inflation is capped at 1,032:1 and WOFF2 at what the header
+declares.
 A hinting refusal never draws a partially hinted glyph: the outline comes back unhinted.
 
 **5. The sadish seam.** rekha never rasterizes. `rekha_char_to_sdpath` /

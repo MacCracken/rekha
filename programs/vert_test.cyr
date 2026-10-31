@@ -60,6 +60,8 @@ var o_vhealen = 36;     # the DECLARED vhea length (below 36 loses the table)
 var o_vorgver = 1;
 var o_vvarver = 1;
 var o_shortvmtx = 0;    # declare a vmtx too short for the bare tail
+var o_padvmtx = 0;      # declare a vmtx 4 B past numGlyphs' tail (it then covers VORG's version)
+var o_tsbmap = 0;       # VVAR's tsb map is the vOrg one (g -> row g + 2)
 
 var g_vhea = 0;
 var g_vvar = 0;
@@ -90,7 +92,8 @@ fn put_vvar(at): i64 {
     var vorgm = advm + put_map(at + advm, 0);
     var after = vorgm + put_map(at + vorgm, 2);
     pu32(at + 8, advm);
-    pu32(at + 12, 0);                                   # no tsb map: the inner index IS the gid
+    pu32(at + 12, 0);                                   # no tsb map: the tsb does not vary
+    if (o_tsbmap != 0) { pu32(at + 12, vorgm); }
     pu32(at + 16, 0);
     pu32(at + 20, vorgm);
     var ivs = after;
@@ -140,6 +143,7 @@ fn build(): i64 {
     var vmtxlen = NVM * 4 + (NG - NVM) * 2;
     var dvmtxlen = vmtxlen;
     if (o_shortvmtx != 0) { dvmtxlen = NVM * 4; }
+    if (o_padvmtx != 0) { dvmtxlen = vmtxlen + 4; }
     var vorg_at = vmtx_at + ((vmtxlen + 3) & (0 - 4));
     var vorglen = 8 + 2 * 4;
     var fvar_at = vorg_at + vorglen;
@@ -237,6 +241,8 @@ fn opts_reset(): i64 {
     o_vorgver = 1;
     o_vvarver = 1;
     o_shortvmtx = 0;
+    o_padvmtx = 0;
+    o_tsbmap = 0;
     return 0;
 }
 
@@ -305,6 +311,14 @@ fn t_vmtx(): i64 {
     check(rekha_advance_height(g_f, 3), 1030);
     check(rekha_top_side_bearing(g_f, 3), 53);
     check(rekha_top_side_bearing(g_f, 4), 0);
+    # ⛔ past numGlyphs there is no bearing: a vmtx padded past the tail answered VORG's majorVersion
+    # (1) as gid 6's top side bearing through 1.1.1 (1.1.2 audit)
+    opts_reset();
+    o_padvmtx = 1;
+    check(openf() != 0, 1);
+    check(rekha_top_side_bearing(g_f, 5), 55);
+    check(rekha_top_side_bearing(g_f, 6), 0);
+    check(rekha_top_side_bearing(g_f, 7), 0);
     # no vmtx at all
     opts_reset();
     o_novmtx = 1;
@@ -386,6 +400,28 @@ fn t_vvar(): i64 {
     check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
     check(rekha_advance_height(g_f, 1), 1010);
     check(rekha_vert_origin_y(g_f, 1), 900);
+    # ⛔ THE HINTED PHANTOMS ARE FreeType's (white box): with a tsb map the public reader varies the
+    # bearing (51 + row 3), but the hinted loader's pp3 takes the UNVARIED one, as the TrueType
+    # driver leaves tsb_adjust NULL; its advance height is varied and cast (1.1.2 audit)
+    opts_reset();
+    o_novvar = 0;
+    o_nofvar = 0;
+    o_tsbmap = 1;
+    check(openf() != 0, 1);
+    check(rekha_var_set_axis(g_f, 0, 900 * 65536), 1);
+    check(rekha_top_side_bearing(g_f, 1), 91);
+    var vm: i64[2];
+    check(rekha_hint_vmetrics(g_f, 1, 0, &vm), 1);
+    check(load64(&vm), 51);
+    check(load64(&vm + 8), 1030);
+    # ...and with no vmtx, TT_Get_VMetrics' FT_Short tsb: ascender - yMax 40,000 wraps 16 bits
+    opts_reset();
+    o_novmtx = 1;
+    check(openf() != 0, 1);
+    var a0 = rekha_ascender(g_f);
+    check(a0 >= 0 && a0 < 25000, 1);
+    check(rekha_hint_vmetrics(g_f, 1, 40000, &vm), 1);
+    check(load64(&vm), a0 - 40000 + 65536);
     return 0;
 }
 

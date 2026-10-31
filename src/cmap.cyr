@@ -157,11 +157,12 @@ fn rekha_cmap_resolve(f): i64 {
                         store64(f + 144, sub);
                         store64(f + 152, n);
                         store64(f + 160, load64(&c));
-                        if (rank == 0) {
-                            store64(f + 168, fmt + 0x10000);
-                        } else {
-                            store64(f + 168, fmt);
+                        var kind = fmt;
+                        if (rank == 0) { kind = kind + 0x10000; }
+                        if (fmt == 4) {
+                            if (rekha_cmap_f4_unsorted(buf, sub, n) != 0) { kind = kind + 0x20000; }
                         }
+                        store64(f + 168, kind);
                     }
                 }
             }
@@ -207,6 +208,13 @@ fn rekha_cmap_f4(font, sub, segc2, cp): i64 {
         if (lo >= segc) { return 0; }
         seg = lo;
     }
+    return rekha_cmap_f4_seg(font, sub, segc2, seg, cp);
+}
+
+# Segment `seg` of a format 4 table, asked for `cp`: .notdef (0) when cp is before its start.
+fn rekha_cmap_f4_seg(font, sub, segc2, seg, cp): i64 {
+    var buf = load64(font);
+    var end_arr = sub + 14;
     var start_arr = end_arr + segc2 + 2;    # +reservedPad
     var delta_arr = start_arr + segc2;
     var range_arr = delta_arr + segc2;
@@ -225,10 +233,52 @@ fn rekha_cmap_f4(font, sub, segc2, cp): i64 {
     return (gid + delta) & 65535;
 }
 
+# ⛔ THE UNSORTED FALLBACK (1.1.2 audit). The binary search above assumes endCode[] ascends, as the
+# spec requires. FreeType keeps a table whose segments overlap with their starts or ends out of
+# order (TT_CMAP_FLAG_UNSORTED, ttcmap.c:1016-1031) and looks it up LINEARLY — the first segment,
+# in table order, that holds cp, stopping at one that starts past it (tt_cmap4_char_map_linear) —
+# where the search lands past the segment and answers .notdef. rekha_cmap_resolve flags such a
+# table in cmap_kind (+ 0x20000); no host face carries one (4,310 format-4 subtables).
+fn rekha_cmap_f4_linear(font, sub, segc2, cp): i64 {
+    if (cp > 65535) { return 0; }
+    var buf = load64(font);
+    var segc = segc2 / 2;
+    var start_arr = sub + 16 + segc2;
+    var i = 0;
+    while (i < segc) {
+        var startc = rekha_rd_u16(buf, start_arr + i * 2);
+        if (cp < startc) { return 0; }
+        if (cp <= rekha_rd_u16(buf, sub + 14 + i * 2)) { return rekha_cmap_f4_seg(font, sub, segc2, i, cp); }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# 1 when a format 4 table's segments overlap with a start or an end out of order: FreeType's
+# UNSORTED rule, which sends its lookups through rekha_cmap_f4_linear.
+fn rekha_cmap_f4_unsorted(buf, sub, segc2): i64 {
+    var segc = segc2 / 2;
+    var start_arr = sub + 16 + segc2;
+    var i = 1;
+    while (i < segc) {
+        var ls = rekha_rd_u16(buf, start_arr + (i - 1) * 2);
+        var le = rekha_rd_u16(buf, sub + 14 + (i - 1) * 2);
+        var st = rekha_rd_u16(buf, start_arr + i * 2);
+        var en = rekha_rd_u16(buf, sub + 14 + i * 2);
+        if (st <= le) {
+            if (ls > st || le > en) { return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # Format 12 / 13 lookup: binary search for the first group whose endCharCode >= cp (groups are
 # sorted and non-overlapping, as the spec requires), then startCharCode <= cp. Format 12 maps
-# startGlyphID + (cp - startCharCode); format 13 maps the whole group to startGlyphID. An id past
-# 0xFFFF has no glyph (glyph ids are u16) -> 0.
+# startGlyphID + (cp - startCharCode); format 13 maps the whole group to startGlyphID. The id comes
+# back as computed: one past 0xFFFF has no glyph (glyph ids are u16), and rekha_char_to_glyph
+# refuses it BAD_SFNT "cmap glyph id" like any id past numGlyphs. Through 1.1.1 it answered 0 here,
+# which reads as UNMAPPED with REKHA_OK — 65535 refused, 65536 did not (1.1.2 audit).
 fn rekha_cmap_f12(font, sub, ngroups, fmt, cp): i64 {
     var buf = load64(font);
     var groups = sub + 16;
@@ -248,7 +298,6 @@ fn rekha_cmap_f12(font, sub, ngroups, fmt, cp): i64 {
     if (startc > cp) { return 0; }
     var gid = rekha_rd_u32(buf, g + 8);
     if (fmt == 12) { gid = gid + (cp - startc); }
-    if (gid > 65535) { return 0; }
     return gid;
 }
 
@@ -257,7 +306,10 @@ fn rekha_cmap_lookup(font, cp): i64 {
     var sub = load64(font + 144);
     var n = load64(font + 152);
     var fmt = load64(font + 168) & 0xFFFF;
-    if (fmt == 4) { return rekha_cmap_f4(font, sub, n, cp); }
+    if (fmt == 4) {
+        if ((load64(font + 168) & 0x20000) != 0) { return rekha_cmap_f4_linear(font, sub, n, cp); }
+        return rekha_cmap_f4(font, sub, n, cp);
+    }
     if (fmt == 12 || fmt == 13) { return rekha_cmap_f12(font, sub, n, fmt, cp); }
     if (fmt == 6) {
         var first = load64(font + 160);
@@ -298,9 +350,11 @@ public fn rekha_char_to_glyph(font, cp): i64 {
             }
         }
     }
+    # ⛔ A map naming a glyph the font does not have is the font's error, not the caller's — and
+    # no font has one past 0xFFFF, maxp or not.
+    if (g > 65535) { return rekha_fail(font, REKHA_ERR_BAD_SFNT, "cmap glyph id"); }
     var ng = load64(font + 56);
     if (ng > 0) {
-        # ⛔ A map naming a glyph the font does not have is the font's error, not the caller's.
         if (g >= ng) { return rekha_fail(font, REKHA_ERR_BAD_SFNT, "cmap glyph id"); }
     }
     # ⚠ An UNMAPPED character is not an error: .notdef is the right answer and REKHA_OK stays.
@@ -334,7 +388,20 @@ public fn rekha_char_to_sdpath(font, cp, scale, ox, oy): i64 {
 # — so a missing glyph advances by the .notdef box rather than collapsing to zero, which is what
 # makes a run of unmapped text still legible as "something is here".
 public fn rekha_char_advance(font, cp): i64 {
-    return rekha_advance_width(font, rekha_char_to_glyph(font, cp));
+    var g = rekha_char_to_glyph(font, cp);
+    var e = rekha_font_error(font);
+    var d = rekha_font_error_detail(font);
+    return rekha_char_keep(font, e, d, rekha_advance_width(font, g));
+}
+
+# The advance wrappers' save-and-restore, rekha_char_to_sdpath's rule: the advance reader clears on
+# entry, so without it a cmap that could not be read answered .notdef's advance with REKHA_OK, where
+# the docs promise the cmap step's code (1.1.2 audit). Returns `v`, the answer, unchanged.
+fn rekha_char_keep(font, e, d, v): i64 {
+    if (e != REKHA_OK) {
+        if (rekha_font_error(font) == REKHA_OK) { rekha_fail(font, e, d); }
+    }
+    return v;
 }
 
 # @public — advance `cp` in PIXELS at pixel size `px_size`, rounded to nearest. 0 = unknown.
@@ -350,11 +417,17 @@ public fn rekha_char_advance(font, cp): i64 {
 # ⚠ Returns 0 when the metric is unknown OR `upem` is 0, so the caller's fallback path is a single
 # `== 0` test rather than two.
 public fn rekha_char_advance_px(font, cp, px_size): i64 {
-    return rekha_glyph_advance_px(font, rekha_char_to_glyph(font, cp), px_size);
+    var g = rekha_char_to_glyph(font, cp);
+    var e = rekha_font_error(font);
+    var d = rekha_font_error_detail(font);
+    return rekha_char_keep(font, e, d, rekha_glyph_advance_px(font, g, px_size));
 }
 
 # @public — advance `cp` at pixel size `px_size` as 16.16 fixed-point pixels. 0 = unknown.
 # = rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size). Allocates 0 B.
 public fn rekha_char_advance_fx(font, cp, px_size): i64 {
-    return rekha_glyph_advance_fx(font, rekha_char_to_glyph(font, cp), px_size);
+    var g = rekha_char_to_glyph(font, cp);
+    var e = rekha_font_error(font);
+    var d = rekha_font_error_detail(font);
+    return rekha_char_keep(font, e, d, rekha_glyph_advance_fx(font, g, px_size));
 }

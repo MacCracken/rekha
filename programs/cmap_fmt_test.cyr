@@ -236,7 +236,13 @@ fn t_f12(buf): i64 {
     f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65535);  # startGlyphID + 2 = 65537: no u16 glyph id
     f = opn(buf);
     check(rekha_char_to_glyph(f, 0x10FFFF), 0);
+    # ⛔ a map naming a glyph no font can have is the font's error, as 65535 >= numGlyphs is —
+    # through 1.1.1 an id past 0xFFFF read as UNMAPPED, REKHA_OK (1.1.2 audit)
+    check(rekha_font_error(f), REKHA_ERR_BAD_SFNT);
+    check(rekha_char_to_glyph(f, 0x10FFFE), 0);     # 65536
+    check(rekha_font_error(f), REKHA_ERR_BAD_SFNT);
     check(rekha_char_to_glyph(f, 0x10FFFD), 0);     # 65535 >= numGlyphs
+    check(rekha_font_error(f), REKHA_ERR_BAD_SFNT);
     base(buf, 0, 12 + 16 + 4 * 12, 1);              # no maxp count: a raw id up to 0xFFFF comes back
     rec(buf, 0, 3, 10, 12);
     f12_hdr(buf, s, 12, 4);
@@ -246,6 +252,12 @@ fn t_f12(buf): i64 {
     f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65533);
     f = opn(buf);
     check(rekha_char_to_glyph(f, 0x10FFFF), 65535);
+    check(rekha_font_error(f), REKHA_OK);
+    f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65534);  # ...but not one past it, maxp or no maxp
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x10FFFF), 0);     # 65536
+    check(rekha_font_error(f), REKHA_ERR_BAD_SFNT);
+    f12_grp(buf, s, 3, 0x10FFFD, 0x10FFFF, 65533);
     set_clen(buf, 12 + 16 + 4 * 12 - 1);            # the last group cut
     f = opn(buf);
     check(rekha_cmap_subtable(f), 0);

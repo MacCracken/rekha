@@ -590,6 +590,18 @@ fn hb_cost(f, gid): i64 {
     return g_pool_bump - g_pool_base;
 }
 
+# 1 when the font's last refusal detail is the cstring `s`.
+fn hb_detail_is(f, s): i64 {
+    var d = rekha_font_error_detail(f);
+    if (d == 0) { return 0; }
+    var i = 0;
+    while (load8(s + i) != 0) {
+        if (load8(d + i) != load8(s + i)) { return 0; }
+        i = i + 1;
+    }
+    return load8(d + i) == 0;
+}
+
 fn hb_verbs(o): i64 {
     return sd_path_verb_count(rekha_outline_to_sdpath(o, HB_SCALE, HB_OX, HB_OY));
 }
@@ -1088,8 +1100,10 @@ fn t_r03(): i64 {
     return 0;
 }
 
-# R-03 (contours): past REKHA_COMPOSITE_MAXC (128) a composite is rejected. A SIMPLE glyph is not
-# bound by it.
+# R-03 (contours): ONE cap for every loader, REKHA_COMPOSITE_MAXC = 4,096 — the point cap's value,
+# and a contour holds at least one point, so the point cap is the one that trips. Through 1.1.1 the
+# cap was 128 and only this merge applied it: m200 was refused while its 200-contour child loaded,
+# and the hinted loader drew it (1.1.2 audit). Real fonts go past 128: Nerd Fonts' U+E7DC has 132.
 fn t_maxc(): i64 {
     g_sec = "R-03 merge contours";
     fb_reset();
@@ -1099,19 +1113,33 @@ fn t_maxc(): i64 {
     var m200 = fb_comp_rep(c100, 2);
     var m128 = fb_comp_rep(c64, 2);
     var m129 = fb_comp_rep(c129, 1);
+    var c4096 = fb_simple_seq(4096, 4095, 4096);
+    var m4096 = fb_comp_rep(c4096, 1);
+    var m4097 = fb_comp_rep(c4096, 2);
     var len = fb_build(g_fb);
     var f = hb_corpus(g_fb, len);
     hb_cost(f, m200);
-    check(rekha_outline_n_contours(g_o), 0);
-    check(rekha_outline_n_points(g_o), 0);
+    check(rekha_outline_n_contours(g_o), 200);
+    check(rekha_outline_n_points(g_o), 200);
+    check(hb_verbs(g_o), 400);                         # 200 one-point contours: moveto + close
+    check(rekha_font_error(f), REKHA_OK);
     hb_cost(f, m128);
     check(rekha_outline_n_contours(g_o), 128);
     check(rekha_outline_n_points(g_o), 128);
-    check(hb_verbs(g_o), 256);                         # 128 one-point contours: moveto + close
+    check(hb_verbs(g_o), 256);
     hb_cost(f, c129);
     check(rekha_outline_n_contours(g_o), 129);
     hb_cost(f, m129);
+    check(rekha_outline_n_contours(g_o), 129);
+    hb_cost(f, c4096);                                 # the cap exactly, simple and merged
+    check(rekha_outline_n_contours(g_o), 4096);
+    hb_cost(f, m4096);
+    check(rekha_outline_n_contours(g_o), 4096);
+    check(rekha_font_error(f), REKHA_OK);
+    hb_cost(f, m4097);                                 # one past it: the POINT cap refuses first
     check(rekha_outline_n_contours(g_o), 0);
+    check(rekha_font_error(f), REKHA_ERR_OOM);
+    check(hb_detail_is(f, "point cap"), 1);
     return 0;
 }
 
@@ -1167,12 +1195,17 @@ fn t_r02(): i64 {
 # cycle detection never fires; before 0.3.11 glyph 4 decoded 900 leaves. The shared load budget
 # (REKHA_GLYPH_MAXLOADS = 64) trips on the THIRD glyph-2 child: the whole load is empty.
 # MEASURED 11,184 B: root slots 240 + 2 x (240 + 30 x 112 + merged 1,824) + 2 empty records.
-# ⚠ 900 contours would also break REKHA_COMPOSITE_MAXC, so that outline is empty either way and its
-# EXACT pool cost is what pins the budget (163,008 B with the load cap lifted). glyph 8 -> 8 x
-# glyph 7 -> 8 x triangle fits every merge cap (64 contours, 192 points) and still needs 73 loads:
-# only the budget empties it. MEASURED 10,520 B: 64 + 7 x (64 + 8 x 112 + merged 520) + 2 empty
-# records. The heavy variant trips REKHA_GLYPH_MAXPOINTS_TOTAL instead: 4 x 4,096 points fit, the
-# 5th child aborts. MEASURED 279,088 B: 240 + 4 x 69,688 + 2 empty records.
+# ⚠ Through 1.1.1, 900 contours also broke the 128-contour cap, so only the EXACT pool cost pinned
+# the budget here (163,008 B with the load cap lifted). Since 1.1.2 (cap 4,096) its 900 contours /
+# 2,700 points fit every merge cap, and the budget alone empties it. So does glyph 8 -> 8 x glyph 7
+# -> 8 x triangle (64 contours, 192 points), which still needs 73 loads. MEASURED 10,520 B:
+# 64 + 7 x (64 + 8 x 112 + merged 520) + 2 empty records. The heavy variant (30 x a 4,096-point
+# glyph) is refused "point cap" on its SECOND child, the moment the sum passes REKHA_COMPOSITE_MAXP.
+# MEASURED 139,664 B: 240 + 2 x 69,688 + 1 empty record. Through 1.1.1 the cap was checked after
+# every child, so the load ran on until REKHA_GLYPH_MAXPOINTS_TOTAL tripped on the 5th (279,088 B)
+# — and a varied child is varied first. That budget still binds DEPTH: hd1..hd4 are identity chains
+# over the heavy glyph, each level charging its merged 4,096 again. hd3 spends exactly 16,384 and
+# draws; hd4's merge aborts.
 fn t_c02(): i64 {
     g_sec = "C-02 acyclic fan-out";
     fb_reset();
@@ -1183,6 +1216,10 @@ fn t_c02(): i64 {
     var top = fb_comp_rep(mid, 30);
     var heavy = fb_simple_seq(1, 4095, 4096);
     var hmid = fb_comp_rep(heavy, 30);
+    var hd1 = fb_comp_rep(heavy, 1);
+    var hd2 = fb_comp_rep(hd1, 1);
+    var hd3 = fb_comp_rep(hd2, 1);
+    var hd4 = fb_comp_rep(hd3, 1);
     var mid8 = fb_comp_rep(leaf, 8);
     var top8 = fb_comp_rep(mid8, 8);
     var len = fb_build(g_fb);
@@ -1196,8 +1233,16 @@ fn t_c02(): i64 {
     check(rekha_outline_n_contours(g_o), 0);
     check(rekha_outline_n_points(g_o), 0);
     check(hb_verbs(g_o), 0);
-    check(hb_cost(f, hmid), 279088);
+    check(hb_cost(f, hmid), 139664);
     check(rekha_outline_n_points(g_o), 0);
+    check(rekha_font_error(f), REKHA_ERR_OOM);
+    check(hb_detail_is(f, "point cap"), 1);
+    check(hb_cost(f, hd3), 278776);                    # 69,688 + 3 x (8 + merged 69,688)
+    check(rekha_outline_n_points(g_o), 4096);
+    check(hb_cost(f, hd4), 278832);                    # + 8 B slot + the abort's empty record
+    check(rekha_outline_n_points(g_o), 0);
+    check(rekha_font_error(f), REKHA_ERR_OOM);
+    check(hb_detail_is(f, "glyph load cap"), 1);
     check(hb_cost(f, mid8), 1480);                     # 64 + 8 x 112 + merged 520
     check(rekha_outline_n_contours(g_o), 8);
     check(hb_cost(f, top8), 10520);

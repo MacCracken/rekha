@@ -31,16 +31,21 @@
 #   - a format other than 0. Format 2's two-dimensional class array is rare and is not read; a font
 #     carrying both still kerns from its format 0 subtables.
 #   - anything not HORIZONTAL, and anything CROSS_STREAM, which moves text off the baseline.
+#   - an Apple VARIATION subtable (coverage bit 5): its values are a variation instance's tuple,
+#     not an adjustment to the default instance (1.1.2; FreeType reads no Apple kern at all).
 #   - ⛔ MINIMUM subtables. That coverage bit means the value is a FLOOR on the pair's spacing, not
 #     an adjustment to it, and adding it as though it were an adjustment is how a minimum becomes a
 #     visible gap. rekha applies none and says so here.
 # OVERRIDE is honoured: such a subtable REPLACES what earlier ones accumulated, and only when the
 # pair is actually in it — an absent pair overrides nothing.
 #
-# ⛔ WHAT IS REFUSED (the table is absent, and every pair is 0): a version that is neither form, a
-# header or subtable outside the table, a subtable shorter than its own header, or a pair array
-# that does not fit. ⚠ The walk is capped at REKHA_KERN_MAXSUB subtables however many the font
-# declares, because a font chooses that number.
+# ⛔ WHAT IS REFUSED (the table is absent, and every pair is 0): a version that is neither form, or a
+# header outside the table. WHAT ENDS THE WALK (the subtables before it still count, FreeType's rule
+# — ttkern.c breaks out the same way): a later subtable header outside the table, a subtable longer
+# than the table or shorter than its own header. A pair array that does not fit skips only its own
+# subtable. (Through 1.1.1 this header said all of these refused the table — 1.1.2 audit.) ⚠ The
+# walk is capped at REKHA_KERN_MAXSUB subtables however many the font declares, because a font
+# chooses that number.
 
 var REKHA_TAG_KERN = 0x6B65726E;   # 'kern'
 var REKHA_KERN_MAXSUB = 256;
@@ -147,6 +152,9 @@ public fn rekha_kern_table_pair(font, l, r): i64 {
             fmt = load8(buf + at + 5);
             if ((cov & 128) == 0) { horiz = 1; }
             if ((cov & 64) != 0) { cross = 1; }
+            # VARIATION: tuple values for a variation instance, not an adjustment to the default
+            # (1.1.2 audit: they were added as one). Skipped, as CROSS_STREAM is.
+            if ((cov & 32) != 0) { cross = 1; }
         } else {
             slen = rekha_rd_u16(buf, at + 2);
             var cw = rekha_rd_u16(buf, at + 4);

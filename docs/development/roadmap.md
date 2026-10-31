@@ -107,16 +107,16 @@ The P(-1), as sankoch and kashi run it (their `CLAUDE.md` § P(-1)), with 0.3.11
    - **the bounds-checked mode** (cyrius 6.7.8, `--bounds` / `[build] bounds`) counted against
      `src/`: it checks subscripts of typed arrays, `*T` and slices, and rekha's reads are
      overwhelmingly `load8` .. `load64` on computed addresses (1,448 sites) beside a few dozen
-     fixed-size typed-array locals (`var m: i64[6]`, `src/cff.cyr:468`). Decide whether it earns a
+     fixed-size typed-array locals (`var m: i64[6]`, `src/cff.cyr:498`). Decide whether it earns a
      CI leg.
 7. **Post-review benchmarks** — the fixes cost what the dossier says they cost.
 8. **Documentation audit** — README, CONTRIBUTING, SECURITY, `docs/api/`, the ADRs, and the source
    comments that cite this file.
 9. **Scaffold** — the same pass's cleanup:
    - **the nine internals with no call site** (execution coverage, 1.1.1): the seven table-directory
-     accessors `rekha_w2_ent_tag` .. `rekha_w2_ent_ooff` (`src/woff2.cyr:182-188`),
-     `rekha_hint_trig_atan` (`src/hint.cyr:3834`; `rekha_hint_vlen` keeps no angle, `:3849`) and
-     `rekha_cff2_regions` (`src/cff2.cyr:74`) — each removed or given the caller it was written for.
+     accessors `rekha_w2_ent_tag` .. `rekha_w2_ent_ooff` (`src/woff2.cyr:186-192`),
+     `rekha_hint_trig_atan` (`src/hint.cyr:3858`; `rekha_hint_vlen` keeps no angle, `:3873`) and
+     `rekha_cff2_regions` (`src/cff2.cyr:115`) — each removed or given the caller it was written for.
      None is public;
    - **the harness's eight leaves into a `[test] stdlib`** (cyrius 6.7.6): today they resolve partly
      from `lib/` (`syscalls`, `alloc`, `string`) and partly from the toolchain snapshot, recorded only
@@ -125,15 +125,18 @@ The P(-1), as sankoch and kashi run it (their `CLAUDE.md` § P(-1)), with 0.3.11
 **Known going in** — found while writing this ladder, each checked:
 
 - ⛔ **A CFF / CFF2 charstring refusal answers `REKHA_OK`.** `rekha_cff_load` returns
-  `rekha_outline_empty()` on `RC_BAD` without recording a code (`src/cff.cyr:1406`, the sites at
-  `:765`, `:850`-`:985`), so `rekha_load_glyph` hands back a blank and a clean error slot — where
-  `docs/api/outline.md` (`rekha_load_glyph`) and `src/glyf.cyr:613` promise *"REKHA_OK then means the
-  blank was real"*. A documented answer measured wrong: a fix, here.
+  `rekha_outline_empty()` on `RC_BAD` without recording a code (`src/cff.cyr:1577`, the sites at
+  `:827`, `:926`-`:1107`), so `rekha_load_glyph` hands back a blank and a clean error slot — where
+  `docs/api/outline.md` (`rekha_load_glyph`) and `src/glyf.cyr:656` promise *"REKHA_OK then means the
+  blank was real"*. A documented answer measured wrong: a fix, here. **Fixed:** `rekha_cff_refused`
+  names it — OOM `"point cap"` / `"operator budget"`, else BAD_GLYF `"charstring"`
+  (`programs/cff_test.cyr`).
 - **The sadish floor is stated two ways**: `docs/api/README.md:116` says 0.11.2; `README.md:309` and
   `cyrius.cyml:123` say 0.9.0. One is the fact.
 - **Two stale citations of this file**: `src/var.cyr:12` says HVAR and MVAR *"are not read"*
-  (`rekha_mvar_delta` is `src/hvar.cyr:293`, shipped 0.6.0); `scripts/metrics_var_diff.py:198` says
-  rekha does not read `name` (shipped 0.6.2).
+  (`rekha_mvar_delta` is `src/hvar.cyr:392`, shipped 0.6.0); `scripts/metrics_var_diff.py:198` says
+  rekha does not read `name` (shipped 0.6.2). **Fixed**, with three more headers the audit found
+  stale (`src/os2.cyr`'s `post`, `src/hvar.cyr`'s map list, `src/var.cyr`'s DeltaSetIndexMap).
 
 **Exit:** every HIGH and MEDIUM fixed here with a regression test; each LOW and INFO fixed or given a
 slot below; the dossier committed and linked.
@@ -148,7 +151,7 @@ slot below; the dossier committed and linked.
 
 - **`rekha_char_variant_to_glyph`** — `cmap` format 14, default and non-default UVS, as the supplement
   beside the primary map. Excluding format 14 as a PRIMARY map is correct and stays
-  (`src/cmap.cyr:39`, `:95` — `enc == 5` ranks −1). Without the supplement, U+FE0E / U+FE0F
+  (`src/cmap.cyr:39`, `:117` — `enc == 5` ranks −1). Without the supplement, U+FE0E / U+FE0F
   presentation selectors and CJK ideographic variation sequences resolve as base + `.notdef`.
 
 #### 1.2.1 — the reference differentials in CI (patch)
@@ -178,8 +181,8 @@ one-off.
 #### 1.2.3 — the last CFF refusals about missing data (patch)
 
 - **The Expert and ExpertSubset charsets**: a `seac` on a font that uses one is refused because rekha
-  does not carry the two tables (`src/cff.cyr:629`), not because the font is malformed.
-- **CFF2 FDSelect format 4**, the 32-bit-gid form, refused today (`src/cff2.cyr:32`, *"an FDSelect in
+  does not carry the two tables (`src/cff.cyr:666`), not because the font is malformed.
+- **CFF2 FDSelect format 4**, the 32-bit-gid form, refused today (`src/cff2.cyr:34`, *"an FDSelect in
   a format other than 0 or 3"*). No observed font needs it.
 
 #### 1.2.4 — `kern` format 2 (patch)
@@ -197,20 +200,20 @@ font's tables (fontTools) and against FreeType, in patches.
 
 - **An advance resolver** that decodes the glyph when it must: `USE_MY_METRICS` (0x0200) on a
   composite, and `gvar`'s phantom-point advances on a face with no HVAR / VVAR (FreeType's rule).
-  `rekha_advance_width` (`src/sfnt.cyr:661`) stays the frozen `hmtx` index measured at 47 ns (0.3.11);
-  the hinted path already answers both (`src/hint.cyr:4125`; `rekha_gvar_apply_n`,
-  `src/gvar.cyr:275`, notes `:25-35`).
+  `rekha_advance_width` (`src/sfnt.cyr:671`) stays the frozen `hmtx` index measured at 47 ns (0.3.11);
+  the hinted path already answers both (`src/hint.cyr:4160`; `rekha_gvar_apply_n`,
+  `src/gvar.cyr:299`, notes `:25-35`).
 - **A right-side-bearing accessor** that applies HVAR's rsb map, which rekha reads past today
-  (`src/hvar.cyr:37`).
+  (`src/hvar.cyr:38`).
 - **GPOS kerning that follows the axes**, as a NEW call: Device and VariationIndex deltas through
-  GDEF's ItemVariationStore (`rekha_ivs_delta`, `src/hvar.cyr:90`, exists since 0.6.0; GDEF is the
+  GDEF's ItemVariationStore (`rekha_ivs_delta`, `src/hvar.cyr:91`, exists since 0.6.0; GDEF is the
   missing reader, `src/gpos.cyr:37-40`). The frozen `rekha_gpos_kern` documents them unapplied
   (`docs/api/kern.md`).
 
 #### 1.3.1 — `avar` 2.0's variation store (patch)
 
 - The DeltaSetIndexMap reader 0.6.0 built for HVAR, wired into `avar` 2.0's mapping
-  (`src/var.cyr:21-27`; the segment maps already apply). An `avar` 2.0 font's normalised coordinates
+  (`src/var.cyr:23-29`; the segment maps already apply). An `avar` 2.0 font's normalised coordinates
   are wrong against its own tables until then — a fix, measured with fontTools as
   `scripts/metrics_var_diff.py` measures the rest.
 
@@ -218,15 +221,15 @@ font's tables (fontTools) and against FreeType, in patches.
 
 #### 1.4.0 — the opens say why; metadata; one inflate per collection (minor)
 
-- **`_why` twins for the container opens** — `rekha_font_open_woff` (`src/woff.cyr:183`),
-  `rekha_font_open_woff2` / `_index` / `rekha_font_open_any` (`src/woff2.cyr:1571-1597`) — as 0.7.0
-  gave `rekha_font_open` and `_index` theirs (`src/sfnt.cyr:294`, `:343`). They are the deepest
+- **`_why` twins for the container opens** — `rekha_font_open_woff` (`src/woff.cyr:184`),
+  `rekha_font_open_woff2` / `_index` / `rekha_font_open_any` (`src/woff2.cyr:1575-1601`) — as 0.7.0
+  gave `rekha_font_open` and `_index` theirs (`src/sfnt.cyr:295`, `:344`). They are the deepest
   pipeline in the library and answer a bare 0 (ADR 0004, ADR 0006).
 - **Accessors for the metadata and private blocks**, which both readers validate for position only
   (`src/woff.cyr:35`, *"validated for position only and not copied"*; `src/woff2.cyr:46`) and the
   rebuilt SFNT never carries.
 - **A cached decoded-collection handle**: `rekha_font_open_woff2_index` rebuilds the whole file per
-  call (`src/woff2.cyr:1565`), so opening every face of an *n*-face collection inflates it *n* times,
+  call (`src/woff2.cyr:1569`), so opening every face of an *n*-face collection inflates it *n* times,
   and `sd_alloc` has no free. The documented two-step (decode once, then `rekha_font_open_index`)
   stays.
 
@@ -242,27 +245,33 @@ Each line below waits for its entry condition and keeps its number while it wait
 
 #### 1.5.0 — hinting the way a consumer asks (minor) — *opens when a consumer needs a glyph rekha draws unhinted fitted the way FreeType fits it*
 
-- **FreeType's default-mode fallbacks in the glyph range only** (`HC_RANGE` 4, `src/hint.cyr:220`):
+- **FreeType's default-mode fallbacks in the glyph range only** (`HC_RANGE` 4, `src/hint.cyr:223`):
   `RCVT` past the table reads 0 (ref2143/ttinterp.c:2861-2868), a short stack reads zeros, a bad point
   is skipped, and a refusing component keeps its partial hinting instead of unhinting the whole glyph.
   A NEW opt-in call on the hinting context; `rekha_hint_glyph`'s answer stays (ADR 0002). The measured
   case: 17,158 of 2,812,516 loads (0.61%) over 50 host faces, none ASCII; AdwaitaMono-Regular refuses
   2,624 of 8,818 glyphs at 9 of 25 ppems (its arrows at 9 ppem).
 - **`GETINFO` answers a consumer can set** — rotated, stretched, ClearType, the version — fixed today
-  (`rekha_hint_op_getinfo`, `src/hint.cyr:2074`), so a consumer applying its own transform cannot tell
+  (`rekha_hint_op_getinfo`, `src/hint.cyr:2080`), so a consumer applying its own transform cannot tell
   the font.
-- **An `hdmx`-aware hinted advance**, as a new call beside `rekha_hint_advance_px` (`src/hint.cyr:4571`,
-  `:4577`; ref2143/ttgload.c:2302-2313): on a synthetic face 4 of 4 advances differ at the listed
+- **An `hdmx`-aware hinted advance**, as a new call beside `rekha_hint_advance_px` (`src/hint.cyr:4607`,
+  `:4596`; ref2143/ttgload.c:2302-2313): on a synthetic face 4 of 4 advances differ at the listed
   ppem; 0 of 1,751 host `glyf` fonts carry the table.
-- **Raisable load ceilings** — the five composite caps are internal constants (`src/glyf.cyr:125-129`).
-  A trip already reports `REKHA_ERR_OOM` named `"point cap"` / `"contour cap"` / `"glyph load cap"`
-  (`docs/api/errors.md:19`, `docs/api/outline.md`); a consumer cannot raise them, and no host face
-  trips them (1,129 hinted faces: deepest nesting 5, at most 17 loads per glyph).
+- **Raisable load ceilings** — the five composite caps and the `gvar` work budget are internal
+  constants (`src/glyf.cyr:133-137`, `REKHA_GVAR_MAXWORK` in `src/gvar.cyr`). A trip already
+  reports `REKHA_ERR_OOM` named `"point cap"` / `"contour cap"` / `"glyph load cap"` / `"gvar budget"`
+  (`docs/api/errors.md:19`, `docs/api/outline.md`); a consumer cannot raise them. **One host glyph
+  trips one**: U+E783 in CodeNewRoman Nerd Font (a devicon, 4,220 points / 35 contours) is refused
+  `"point cap"` in all 9 of its faces, where FreeType draws it — the only refusal of any code in
+  every glyph of the host's 2,155 faces (1.1.2 sweep; through 1.1.1 it came back blank with
+  `REKHA_OK`). Nothing else comes near: 1,129 hinted faces nest at most 5 deep and load at most 17
+  glyphs; the `gvar` budget refuses 0 of 11,676 loads on the two `gvar` faces at their axis
+  extremes; the most contours is 185.
 
 #### 1.5.1 — variable instances hinted on reference (patch) — *opens with a hinted `gvar` face to measure (none on the host)*
 
 - `cvar`; `gvar` deltas rounded once on 16.16 instead of per tuple from whole units (`src/gvar.cyr`);
-  `prep` re-run only when the face has `cvar` (`rekha_hint_axes_changed`, `src/hint.cyr:895`;
+  `prep` re-run only when the face has `cvar` (`rekha_hint_axes_changed`, `src/hint.cyr:901`;
   ref2143/ttgxvar.c:3993-3997); `GETINFO`'s variation bit and `GETVARIATION`'s gate as FreeType keeps
   them (`:2074`, `:2151`); the HVAR lsb delta on the hinted pp1 (`rekha_hint_hmetrics`, `:3627`;
   FreeType leaves `lsb_adjust` NULL, ref2143/ttdriver.c:559). `docs/api/hint.md` states the instance
@@ -296,7 +305,7 @@ Each line below waits for its entry condition and keeps its number while it wait
   rekha draws needs one.
 - **A vertical origin derived when a font states none**: with no `VORG` the convention derives one
   from the bounding box and the top side bearing; rekha answers 0 and says so
-  (`rekha_vorg_present`, `src/vert.cyr:191`), because a derived origin is a plausible wrong height for
+  (`rekha_vorg_present`, `src/vert.cyr:212`), because a derived origin is a plausible wrong height for
   every glyph in a run. Wants a bbox accessor beside it.
 
 #### 1.9.0 — the two questions that need a decision first — *opens with the decision*
@@ -319,25 +328,31 @@ docs/development/roadmap.md"* point here. `src/hint.cyr` unless another file is 
 
 | divergence | where | stands as |
 |---|---|---|
-| **Refuses** what FreeType's default mode reads as 0 or skips: a control value past the table, a point outside its zone, a storage index, a short stack — the glyph reloads scaled and unhinted, named through `rekha_hint_error` | `"RCVT index"` `:2007`; `"MIAP cvt"` / `"MIRP cvt"` `:2664`, `:2933`; `rekha_hint_pt_ok` `:1197`; `rekha_hint_op_mem` `:1981`; `"stack underflow"` `:613` | kept (ADR 0002, confirmed for 1.x at 1.0.0); opt-in alternative → **1.5.0** |
-| A program refusal unhints the **whole** glyph, where FreeType keeps a partially hinted component | `:3587-3589`; the file header, `:26-27` | kept; → **1.5.0**'s opt-in mode |
-| `SHZ` in a NESTED composite's program: FreeType walks `first_point` slots past its contours and writes past its points array; rekha **clamps** at the sub-zone's end | `rekha_hint_op_shz` `:2479`; `rekha_hint_first_point` `:1069`; unit rows `comp_nested_first_point`, `comp_nested_shz_low` | kept — FreeType's is an out-of-bounds write |
-| FreeType's composite recursion cap of 100 is not modelled; the outline loader's caps apply and the zone is sized from `maxp` | `src/glyf.cyr:125-129`; `REKHA_HINT_MAXZONE` `:305`; `"glyph zone cap"` / `"contour cap"` `:937-938` | kept; on 1,129 hinted host faces they refuse nothing |
-| The **scan-type bits** FreeType ORs into an instructed glyph's first tag byte are not kept | `rekha_hint_outline`'s header, `:4532` | kept; the oracle masks with 0x19 |
-| **`hdmx` is not read** | `:4571`, `rekha_hint_advance_px` `:4577` | → **1.5.0** (a new call) |
-| **Variable instances are hinted off-reference** (no `cvar`, per-tuple rounding, `prep` re-run on every axis change, the variation bit, the lsb delta on pp1) | `rekha_hint_glyph`'s header `:4402`; `rekha_hint_axes_changed` `:895`; `:2074`, `:2151`, `:3627` | → **1.5.1** |
-| A `REPEAT` count past the last point is **clamped** — a leniency: FreeType refuses the glyph (ref2143/ttgload.c:451-452) | `src/glyf.cyr:242-246` | kept |
-| Three `loca` rules FreeType sanitizes are **refused**: offsets running backwards, the last glyph's end past `glyf`, any other end or start past it | `rekha_glyf_span`, `src/sfnt.cyr:768`; refusals `:755-760` | kept; empty on every face measured |
-| An `OS/2` shorter than 78 bytes is absent to rekha, so `hhea` decides the vertical phantoms | `rekha_hint_vmetrics` `:3666` | kept — the saner rule |
-| **Glyph-only bytecode is not run**: no non-empty `fpgm` / `prep` / `cvt ` answers `NO_TABLE "hint tables"`, where FreeType's default load autohints (ref2143/ftobjs.c:1006-1016) | `rekha_hint_present` `:380` | kept — rekha has no autohinter |
-| A composite's `n_ins` or bytes past its `loca` span refuse `TRUNCATED "composite instructions"`; the twilight bound has no +4 band and is the running minimum in one load; org is filled and the phantom tags are 0 when no program runs | `:4227`; `rekha_hint_twilight_bound` `:3465`; `HC_TWCAP` `:251` | kept; the last is observed by nothing |
-| A point, contour or reference index ≥ 65536 is **refused**, where FreeType's `FT_UShort` cast wraps it | `rekha_hint_pt_ok`'s comment, `:1192` | kept; only stack arithmetic reaches it |
-| A backward jump before a function's own start is **refused** | `"jump out of range"` `:3243` | kept |
-| The twilight zone is zeroed with its tags and font-unit positions per `prep`; a face whose `prep` is absent gets the default graphics state where 2.14.3 saves a stale one | `rekha_hint_run_prep` `:3530` (comment `:3524`) | kept — the second is a FreeType defect |
-| FreeType's `LOOPCALL` / backward-jump caps and call depth 32 are not modelled: one budget of 1,000,000 instructions and a depth of 64 | `:110-111`; `rekha_hint_exec` `:3155`; `rekha_hint_call` `:3392` | kept |
-| `INSTCTRL`'s operand order is unobserved in the corpus (the one real site pushes `1 1`); bits 1 and 2 follow `tt_loader_init`'s order on the glyph path | `:87`, `:1899-1908`; `rekha_hint_load_instctrl` `:4309` | kept |
-| `GETINFO`'s answers are fixed: version 35, no ClearType, not rotated, not stretched, grayscale — 0 inside `fpgm`, as FreeType has it | `rekha_hint_op_getinfo` `:2074` | → **1.5.0** |
+| **Refuses** what FreeType's default mode reads as 0 or skips: a control value past the table, a point outside its zone, a storage index, a short stack — the glyph reloads scaled and unhinted, named through `rekha_hint_error` | `"RCVT index"` `:2013`; `"MIAP cvt"` / `"MIRP cvt"` `:2670`, `:2939`; `rekha_hint_pt_ok` `:1203`; `rekha_hint_op_mem` `:1987`; `"stack underflow"` `:616` | kept (ADR 0002, confirmed for 1.x at 1.0.0); opt-in alternative → **1.5.0** |
+| A program refusal unhints the **whole** glyph, where FreeType keeps a partially hinted component | `:3596-3598`; the file header, `:26-27` | kept; → **1.5.0**'s opt-in mode |
+| `SHZ` in a NESTED composite's program: FreeType walks `first_point` slots past its contours and writes past its points array; rekha **clamps** at the sub-zone's end | `rekha_hint_op_shz` `:2485`; `rekha_hint_first_point` `:1075`; unit rows `comp_nested_first_point`, `comp_nested_shz_low` | kept — FreeType's is an out-of-bounds write |
+| FreeType's composite recursion cap of 100 is not modelled; the outline loader's caps apply and the zone is sized from `maxp` | `src/glyf.cyr:133-137`; `REKHA_HINT_MAXZONE` `:308`; `"glyph zone cap"` / `"contour cap"` `:943-944` | kept; on 1,129 hinted host faces they refuse nothing |
+| The **scan-type bits** FreeType ORs into an instructed glyph's first tag byte are not kept | `rekha_hint_outline`'s header, `:4557` | kept; the oracle masks with 0x19 |
+| **`hdmx` is not read** | `:4607`, `rekha_hint_advance_px` `:4613` | → **1.5.0** (a new call) |
+| **Variable instances are hinted off-reference** (no `cvar`, per-tuple rounding, `prep` re-run on every axis change, the variation bit, the lsb delta on pp1) | `rekha_hint_glyph`'s header `:4407`; `rekha_hint_axes_changed` `:901`; `:2080`, `:2157`, `:3639` | → **1.5.1** |
+| A `REPEAT` count past the last point is **clamped** — a leniency: FreeType refuses the glyph (ref2143/ttgload.c:451-452) | `src/glyf.cyr:250-254` | kept |
+| Three `loca` rules FreeType sanitizes are **refused**: offsets running backwards, the last glyph's end past `glyf`, any other end or start past it | `rekha_glyf_span`, `src/sfnt.cyr:784`; refusals `:771-776` | kept; empty on every face measured |
+| An `OS/2` shorter than 78 bytes is absent to rekha, so `hhea` decides the vertical phantoms | `rekha_hint_vmetrics` `:3683` | kept — the saner rule |
+| **Glyph-only bytecode is not run**: no non-empty `fpgm` / `prep` / `cvt ` answers `NO_TABLE "hint tables"`, where FreeType's default load autohints (ref2143/ftobjs.c:1006-1016) | `rekha_hint_present` `:383` | kept — rekha has no autohinter |
+| A composite's `n_ins` or bytes past its `loca` span refuse `TRUNCATED "composite instructions"`; the twilight bound has no +4 band and is the running minimum in one load; org is filled and the phantom tags are 0 when no program runs | `:4262`; `rekha_hint_twilight_bound` `:3471`; `HC_TWCAP` `:254` | kept; the last is observed by nothing |
+| A point, contour or reference index ≥ 65536 is **refused**, where FreeType's `FT_UShort` cast wraps it | `rekha_hint_pt_ok`'s comment, `:1198` | kept; only stack arithmetic reaches it |
+| A backward jump before a function's own start is **refused** | `"jump out of range"` `:3249` | kept |
+| The twilight zone is zeroed with its tags and font-unit positions per `prep`; a face whose `prep` is absent gets the default graphics state where 2.14.3 saves a stale one | `rekha_hint_run_prep` `:3539` (comment `:3533`) | kept — the second is a FreeType defect |
+| FreeType's `LOOPCALL` / backward-jump caps and call depth 32 are not modelled: one budget of 1,000,000 instructions and a depth of 64 | `:110-111`; `rekha_hint_exec` `:3161`; `rekha_hint_call` `:3398` | kept |
+| `INSTCTRL`'s operand order is unobserved in the corpus (the one real site pushes `1 1`); bits 1 and 2 follow `tt_loader_init`'s order on the glyph path | `:87`, `:1905-1914`; `rekha_hint_load_instctrl` `:4344` | kept |
+| `GETINFO`'s answers are fixed: version 35, no ClearType, not rotated, not stretched, grayscale — 0 inside `fpgm`, as FreeType has it | `rekha_hint_op_getinfo` `:2080` | → **1.5.0** |
 | CI's FreeType is 2.13.2, the vectors' 2.14.3 | the headers of `programs/hint_unit_vectors.cyr` and `programs/hint_glyph_vectors.cyr` | → **1.2.1** |
+| A `gvar` glyph offset array that runs **backwards** is refused — the table is not read — where FreeType raises the entry to the running maximum (ttgxvar.c:1901-1923) | `rekha_gvar_resolve`, `src/gvar.cyr:534` | kept — the `loca` rule above; no host face has one |
+| An `avar` map is applied without the spec's −1 / 0 / +1 anchors, as FreeType applies it; a fromCoordinate that does not increase leaves the coordinate **unmapped**, where FreeType divides by the difference | `rekha_var_avar`, `src/var.cyr:170` | kept (1.1.2 audit) |
+| A CFF `hintmask` that brings stems of its own after the mask is in force is **refused**: FreeType reads no mask bytes there and runs them as operators | `src/cff.cyr:1013` | kept (1.1.2 audit) |
+| A CFF `endchar` with six or more operands after the width is **refused**, where FreeType takes a `seac` of the top four | `src/cff.cyr:1064` | kept (1.1.2 audit) |
+| An outline past **4,096 points** is refused (OOM `"point cap"`); FreeType has no such cap. One host glyph trips it: CodeNewRoman Nerd Font's U+E783, 4,220 points, in 9 faces | `src/glyf.cyr:133` | → the raisable load ceilings item (1.x) |
+| Every interpreter arithmetic result is **clamped** to TrueType's 32-bit range, where FreeType on LP64 keeps FT_Long values whole — a value past 2^31 that a later `DIV` brings back draws differently | `REKHA_HINT_CLAMP` `:118`; `rekha_hint_push` | kept — reached only by bytecode that leaves the 32-bit range (1.1.2 audit) |
 
 ---
 

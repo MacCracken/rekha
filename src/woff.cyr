@@ -34,10 +34,11 @@
 # ⚠ Table checksums are carried into the rebuilt directory, not verified (the spec leaves that to the
 # user agent). The metadata and private blocks are validated for position only and not copied.
 # ⚠ ALLOCATION: rekha_woff_sfnt_size allocates 0 B. rekha_font_open_woff's SFNT buffer is ONE
-# sd_alloc(totalSfntSize) and its RekhaFont another (MEASURED under an arena hook: exactly those two,
-# for the embedded face 410,824 + 176 B). sankoch's inflate does not use the sd_alloc seam: MEASURED
-# 448 B on the global heap per rekha_woff_decode (sankoch 2.7.15, 19 tables), flat, not scaling with
-# the font. Like any font, open a WOFF once, outside a per-frame hook.
+# sd_alloc(totalSfntSize) and its RekhaFont another (MEASURED under an arena hook: exactly those
+# two, for the embedded face 410,820 + 832 B — REKHA_FONT_SIZE; this said 410,824 + 176 through
+# 1.1.1). sankoch's inflate does not use the sd_alloc seam: MEASURED 448 B on the global heap per
+# rekha_woff_decode (sankoch 2.7.15, 19 tables), flat, not scaling with the font. Like any font,
+# open a WOFF once, outside a per-frame hook.
 
 var REKHA_WOFF_SIG       = 0x774F4646;   # 'wOFF'
 var REKHA_WOFF_HDR_LEN   = 44;
@@ -177,7 +178,8 @@ public fn rekha_woff_decode(buf, len, dst, cap): i64 {
 
 # @public — open a WOFF 1.0 font: validate, rebuild its SFNT into ONE sd_alloc(totalSfntSize) that the
 # returned RekhaFont borrows, and rekha_font_open it. Returns 0 for an invalid container, a failed
-# inflate, an allocation failure, or an SFNT rekha_font_open refuses (e.g. an 'OTTO' flavor).
+# inflate, an allocation failure, or an SFNT rekha_font_open refuses (e.g. a flavor none of 0x00010000 /
+# 'true' / 'OTTO').
 # ⚠ The rebuilt buffer lives as long as the allocator it came from — open fonts outside a scoped
 # per-frame hook, as with rekha_font_open.
 public fn rekha_font_open_woff(buf, len): i64 {

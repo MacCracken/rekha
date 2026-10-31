@@ -61,6 +61,15 @@ fn cs_reset(): i64 { g_csn = 0; return 0; }
 fn cs_b(v): i64 { store8(g_cs + g_csn, v & 255); g_csn = g_csn + 1; return 0; }
 fn cs_op(op): i64 { return cs_b(op); }
 
+# A 16.16 number (operator 255), which an operator that takes an INTEGER refuses.
+fn cs_fixed(v): i64 {
+    cs_b(255);
+    cs_b((v >> 24) & 255);
+    cs_b((v >> 16) & 255);
+    cs_b((v >> 8) & 255);
+    return cs_b(v & 255);
+}
+
 # Type 2 number encoding, the three integer forms a CFF2 charstring uses.
 fn cs_n(v): i64 {
     if (v >= 0 - 107 && v <= 107) { return cs_b(v + 139); }
@@ -153,14 +162,18 @@ var o_fvar = 0;         # 1 = emit an fvar with one 'wght' axis, 100 / 400 / 900
 var o_avar = 0;         # 1 = emit an avar mapping the positive half through 0.3 -> 0.8
 var o_avar2 = 0;        # 1 = stamp that avar majorVersion 2 instead of 1
 var o_avarshort = 0;    # 1 = declare the avar 8 bytes long (its map still follows) — 1.1.2 audit
+var o_avarcnt = 1;      # avar.axisCount (fvar has one axis)
 var o_avarbig = 0;      # 1 = the map's 0.3 goes to 1.5, past the coordinate's documented range
 var o_badaxis = 0;      # 1 = fvar min 500 above its default 400
 var o_ivd0bad = 0;      # 1 = itemVariationDataCount 0: subtable 0 does not resolve (1.1.2 audit)
+var o_ivd0null = 0;     # 1 = subtable 0's itemVariationDataOffset is NULL
 var o_badregion = 0;    # 1 = subtable 0 names region 7 of 2
 var o_axes2 = 0;        # 1 = the region list declares 2 axes (fvar has 1)
 var o_nopriv = 0;       # 1 = the Font DICT has no Private operator
 var o_privvsreal = 0;   # 1 = write o_privvs's vsindex as the REAL 1.0 (1.1.2 audit)
 var o_wide = 0;         # > 0 = ONE IVD over that many identical regions, instead of the pair
+var o_twofd = 0;        # 1 = the FDArray holds the Font DICT twice (and, with o_fdsel 0, no FDSelect)
+var o_gsubr = 0;        # 1 = one global subroutine: 5 0 rlineto (callgsubr -107)
 
 fn opts_reset(): i64 {
     o_major = 2;
@@ -174,14 +187,18 @@ fn opts_reset(): i64 {
     o_avar = 0;
     o_avar2 = 0;
     o_avarshort = 0;
+    o_avarcnt = 1;
     o_avarbig = 0;
     o_badaxis = 0;
     o_ivd0bad = 0;
+    o_ivd0null = 0;
     o_badregion = 0;
     o_axes2 = 0;
     o_nopriv = 0;
     o_privvsreal = 0;
     o_wide = 0;
+    o_twofd = 0;
+    o_gsubr = 0;
     return 0;
 }
 
@@ -246,7 +263,7 @@ fn build(): i64 {
         de = de + 16;
         put_u16(FB, avar_at, 1);
         if (o_avar2 != 0) { put_u16(FB, avar_at, 2); }
-        put_u16(FB, avar_at + 6, 1);                    # one SegmentMap
+        put_u16(FB, avar_at + 6, o_avarcnt);            # one SegmentMap
         put_u16(FB, avar_at + 8, 4);                    # four positions
         put_u16(FB, avar_at + 10, 49152); put_u16(FB, avar_at + 12, 49152);   # -1 -> -1
         put_u16(FB, avar_at + 14, 0);     put_u16(FB, avar_at + 16, 0);       #  0 ->  0
@@ -279,6 +296,16 @@ fn build(): i64 {
 
     put_u32(FB, p, 0);                                  # Global Subr INDEX, count 0 (four bytes)
     p = p + 4;
+    if (o_gsubr != 0) {
+        put_u32(FB, p - 4, 1);                          # ...or one entry, offsets 1 and 4
+        store8(FB + p, 1);
+        store8(FB + p + 1, 1);
+        store8(FB + p + 2, 4);
+        store8(FB + p + 3, 144);                        # 5 0 rlineto
+        store8(FB + p + 4, 139);
+        store8(FB + p + 5, 5);
+        p = p + 6;
+    }
     var cs_at = p;
     p = p + idx32(p, 0, ng);
 
@@ -325,12 +352,23 @@ fn build(): i64 {
     }
     p = p + fdlen;
     var fdarray_at = p;
-    put_u32(FB, p, 1);
-    store8(FB + p + 4, 1);
-    store8(FB + p + 5, 1);
-    store8(FB + p + 6, 1 + fdlen);
-    memcpy(FB + p + 7, FB + fd_at, fdlen);
-    p = p + 7 + fdlen;
+    if (o_twofd != 0) {
+        put_u32(FB, p, 2);
+        store8(FB + p + 4, 1);
+        store8(FB + p + 5, 1);
+        store8(FB + p + 6, 1 + fdlen);
+        store8(FB + p + 7, 1 + fdlen * 2);
+        memcpy(FB + p + 8, FB + fd_at, fdlen);
+        memcpy(FB + p + 8 + fdlen, FB + fd_at, fdlen);
+        p = p + 8 + fdlen * 2;
+    } else {
+        put_u32(FB, p, 1);
+        store8(FB + p + 4, 1);
+        store8(FB + p + 5, 1);
+        store8(FB + p + 6, 1 + fdlen);
+        memcpy(FB + p + 7, FB + fd_at, fdlen);
+        p = p + 7 + fdlen;
+    }
 
     # the ItemVariationStore: two subtables over two regions, 2 and 1 regions wide — or,
     # when o_wide is set, ONE subtable over that many regions (group W).
@@ -380,6 +418,7 @@ fn build(): i64 {
         put_u16(FB, ivs + 6, 2);                        # itemVariationDataCount
         if (o_ivd0bad != 0) { put_u16(FB, ivs + 6, 0); }
         put_u32(FB, ivs + 8, ivd0);
+        if (o_ivd0null != 0) { put_u32(FB, ivs + 8, 0); }
         put_u32(FB, ivs + 12, ivd1);
         put_u16(FB, ivs + ivd0, 0);
         put_u16(FB, ivs + ivd0 + 2, 0);
@@ -598,6 +637,7 @@ fn t_refuse(): i64 {
     cs_reset(); cs_op(16); tab_add();
     cs_reset(); cs_n(1); cs_n(9); cs_op(16); cs_n(0); cs_n(0); cs_op(21); tab_add();
     cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5); tab_add();
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5); cs_op(11); tab_add();
     opts_reset();
     check(open_it() > 0, 1);
     empty(0);                                            # endchar, which CFF2 does not have
@@ -608,6 +648,10 @@ fn t_refuse(): i64 {
     empty(5);                                            # blend asking for more than the stack holds
     check(load(6), 2);                                   # and the control, in the same font
     pt(0, 0, 0, 1);
+    # the control's bytes and a top-level `return`: refused, as FreeType refuses it ("cannot
+    # return from top charstring"), and named — the source comment said it was accepted
+    empty(7);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
 
     # a vsindex with NO variation store names something that is not there
     tab_reset();
@@ -822,6 +866,17 @@ fn t_audit(): i64 {
     check(open_it() > 0, 1);
     check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
     check(rekha_var_coord(g_f, 0), 19661);
+    # ⛔ an avar whose axisCount is not fvar's is not read, as FreeType drops it: the coordinate is
+    # unmapped. Through 1.1.1 the maps it carried were applied to the axes they lined up with
+    # (1.1.2 audit). 0.3 normalizes to 19661 and stays there.
+    opts_reset();
+    o_fvar = 1;
+    o_avar = 1;
+    o_avarcnt = 2;
+    check(open_it() > 0, 1);
+    check(load64(g_f + 296), 0);
+    check(rekha_var_set_axis(g_f, 0, 550 * 65536), 1);
+    check(rekha_var_coord(g_f, 0), 19661);
     # ⛔ a map that sends 0.3 to 1.5: the coordinate is clamped to its documented +1.0
     opts_reset();
     o_fvar = 1;
@@ -866,12 +921,14 @@ fn t_blend_refuse(): i64 {
     cs_op(21); cs_n(300); cs_n(0); cs_op(5); tab_add();
     cs_reset(); cs_n(7); cs_n(8); cs_op(21); cs_n(70); cs_n(0); cs_op(5); tab_add();   # 1: no blend
     var mode = 0;
-    while (mode < 3) {
+    while (mode < 4) {
         opts_reset();
         o_fvar = 1;
         if (mode == 0) { o_ivd0bad = 1; }
         if (mode == 1) { o_badregion = 1; }
         if (mode == 2) { o_axes2 = 1; }
+        # a NULL subtable offset names nothing to blend over (1.1.2: it was read as the store's header)
+        if (mode == 3) { o_ivd0null = 1; }
         check(open_it() > 0, 1);
         # at the default and at an instance: the blend refuses, the glyph is empty and NAMED
         empty(0);
@@ -1058,6 +1115,54 @@ fn t_widestack(): i64 {
     return 0;
 }
 
+# ── R) 1.1.2 audit: integer operands, and FDSelect with more than one Font DICT ──
+fn t_ints(): i64 {
+    g_group = "R integers";
+    # ⛔ an operator that takes an INTEGER refuses a Fixed one — a 255-form number or a blend
+    # result — as FreeType's cf2_stack_popInt does; through 1.1.1 rekha floored it and went on
+    tab_reset();
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(29); tab_add();          # 0 control
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_fixed((0 - 107) * 65536); cs_op(29); tab_add();
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21);                                               # 2 blended
+    cs_n(0 - 107); cs_n(0); cs_n(0); cs_n(1); cs_op(16); cs_op(29); tab_add();
+    cs_reset(); cs_fixed(0); cs_op(15); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5);
+    tab_add();                                                                             # 3 vsindex
+    cs_reset(); cs_n(0); cs_op(15); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5);
+    tab_add();                                                                             # 4 control
+    cs_reset(); cs_n(3); cs_n(4); cs_n(0); cs_n(0); cs_n(0); cs_n(0); cs_fixed(2 * 65536); cs_op(16);
+    cs_op(21); cs_n(5); cs_n(0); cs_op(5); tab_add();                                      # 5 blend n
+    cs_reset(); cs_n(3); cs_n(4); cs_n(0); cs_n(0); cs_n(0); cs_n(0); cs_n(2); cs_op(16);
+    cs_op(21); cs_n(5); cs_n(0); cs_op(5); tab_add();                                      # 6 control
+    opts_reset();
+    o_gsubr = 1;
+    check(open_it() > 0, 1);
+    check(load(0), 2);
+    pt(1, 5, 0, 1);
+    empty(1);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    empty(2);                                            # a blend result is a Fixed, default or not
+    empty(3);
+    check(load(4), 2);
+    empty(5);
+    check(load(6), 2);
+    pt(0, 3, 4, 1);
+    # ⛔ two Font DICTs and no FDSelect: which one a glyph takes is undefined. Through 1.1.1 every
+    # glyph took FD 0; FreeType refuses the face, and the table now does not resolve
+    tab_reset();
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(5); cs_n(0); cs_op(5); tab_add();
+    opts_reset();
+    o_twofd = 1;
+    check(open_it() > 0, 1);
+    check(load64(g_f + 176), 0);
+    check(rekha_outline_n_contours(rekha_load_glyph(g_f, 0)), 0);
+    opts_reset();
+    o_twofd = 1;
+    o_fdsel = 3;                                         # control: with an FDSelect it resolves
+    check(open_it() > 0, 1);
+    check(load(0), 2);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     FB = alloc(FB_CAP);
@@ -1074,8 +1179,9 @@ fn main(): i64 {
     t_audit();
     t_blend_refuse();
     t_widestack();
+    t_ints();
     if (g_fails == 0) {
-        var ok = "cff2_test: PASS (container, shapes, blend, instancing, avar, wide stack, refusals, guard; ";
+        var ok = "cff2_test: PASS (container, shapes, blend, instancing, avar, wide stack, integers, refusals, guard; ";
         syscall(1, 1, ok, strlen(ok));
         fmt_int(g_n);
         syscall(1, 1, " checks)\n", 9);

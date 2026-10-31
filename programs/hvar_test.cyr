@@ -65,6 +65,10 @@ var o_badreg = 0;       # a region index past the region list
 var o_badwdc = 0;       # wordDeltaCount > regionIndexCount
 var o_badouter = 0;     # an MVAR record naming an outer index that is not there
 var o_mrecsz = 8;       # the MVAR valueRecordSize to write
+var o_axes2 = 0;        # HVAR's region list over TWO axes (fvar has one), its regions sized for it
+var o_maxes2 = 0;       # MVAR's, the same
+var o_nullivd = 0;      # HVAR's one itemVariationDataOffset is NULL
+var o_bigneg = 0;       # region 0's delta for gid 0 is -2000: at wght 900 the advance goes below 0
 
 var g_hvar = 0;
 var g_hvarlen = 0;
@@ -74,6 +78,7 @@ var g_flen = 0;
 
 # The four (region 0, region 1) delta pairs, one per glyph.
 fn dlt(i, r): i64 {
+    if (r == 0 && i == 0 && o_bigneg != 0) { return 0 - 2000; }
     if (r == 0) { return 100 + i * 100; }
     return 0 - 50 - i * 10;
 }
@@ -135,6 +140,7 @@ fn put_hvar(at): i64 {
     pu32(ivs + 2, rl);
     pu16(ivs + 6, 1);
     pu32(ivs + 8, ivd);
+    if (o_nullivd != 0) { pu32(ivs + 8, 0); }          # NULL: "no variation", the spec says
     pu16(ivs + ivd, NG);
     pu16(ivs + ivd + 2, wdc);
     pu16(ivs + ivd + 4, 2);
@@ -162,6 +168,16 @@ fn put_hvar(at): i64 {
     pu16(ivs + rl + 2, 2);
     pu16(ivs + rl + 4, 0);     pu16(ivs + rl + 6, 16384);  pu16(ivs + rl + 8, 16384);
     pu16(ivs + rl + 10, 49152); pu16(ivs + rl + 12, 49152); pu16(ivs + rl + 14, 0);
+    if (o_axes2 != 0) {
+        # ⛔ two axes per region where fvar has one: each region (0,+1,+1) on axis 0 and a
+        # neutral (0,0,0) on an axis the font does not have — 24 bytes, all inside the table
+        pu16(ivs + rl, 2);
+        pu16(ivs + rl + 4, 0);     pu16(ivs + rl + 6, 16384);  pu16(ivs + rl + 8, 16384);
+        pu16(ivs + rl + 10, 0);    pu16(ivs + rl + 12, 0);     pu16(ivs + rl + 14, 0);
+        pu16(ivs + rl + 16, 0);    pu16(ivs + rl + 18, 16384); pu16(ivs + rl + 20, 16384);
+        pu16(ivs + rl + 22, 0);    pu16(ivs + rl + 24, 0);     pu16(ivs + rl + 26, 0);
+        return p + rl + 4 + 24;
+    }
     return p + rl + 4 + 12;
 }
 
@@ -206,6 +222,11 @@ fn put_mvar(at): i64 {
     pu16(ivs + rl, 1);
     pu16(ivs + rl + 2, 1);
     pu16(ivs + rl + 4, 0); pu16(ivs + rl + 6, 16384); pu16(ivs + rl + 8, 16384);
+    if (o_maxes2 != 0) {
+        pu16(ivs + rl, 2);                              # two axes: (0,+1,+1) and a neutral one
+        pu16(ivs + rl + 10, 0); pu16(ivs + rl + 12, 0); pu16(ivs + rl + 14, 0);
+        return ivso + rl + 4 + 12;
+    }
     return ivso + rl + 4 + 6;
 }
 
@@ -297,6 +318,10 @@ fn opts_reset(): i64 {
     o_badwdc = 0;
     o_badouter = 0;
     o_mrecsz = 8;
+    o_axes2 = 0;
+    o_maxes2 = 0;
+    o_nullivd = 0;
+    o_bigneg = 0;
     return 0;
 }
 
@@ -518,6 +543,53 @@ fn t_refuse(): i64 {
     check(wght(900), 1);
     check(rekha_mvar_delta(g_f, 0x68617363), 0);         # that record refuses
     check(rekha_mvar_delta(g_f, 0x68647363), 0 - 20);    # the others still resolve
+
+    # ⛔ a store over a different number of axes than fvar's is not read, as FreeType drops the
+    # table (tt_var_load_item_variation_store): no HVAR, no MVAR. Through 1.1.1 its regions were
+    # scored over axes the font does not have (1.1.2 audit).
+    opts_reset();
+    o_axes2 = 1;
+    check(openf() != 0, 1);
+    check(load64(g_f + 416), 0);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+    check(rekha_mvar_delta(g_f, 0x68617363), 30);        # ...and MVAR, its own store, is unaffected
+    opts_reset();
+    o_maxes2 = 1;
+    check(openf() != 0, 1);
+    check(load64(g_f + 432), 0);
+    check(wght(900), 1);
+    check(rekha_mvar_delta(g_f, 0x68617363), 0);
+    adv4(600, 800, 1000, 1200);
+    # ⛔ a NULL itemVariationDataOffset is "no variation": the table stands, every delta is 0. Through
+    # 1.1.1 the store's own header was read as the subtable (1.1.2 audit)
+    opts_reset();
+    o_nullivd = 1;
+    check(openf() != 0, 1);
+    check(load64(g_f + 416) != 0, 1);
+    check(wght(900), 1);
+    adv4(500, 600, 700, 800);
+    check(rekha_hvar_advance_delta(g_f, 0), 0);
+    # ⛔ A DELTA THAT TAKES AN ADVANCE BELOW 0: the public reader clamps it at 0; the hinted loader's
+    # phantom takes FreeType's FT_UShort cast (ttmtx.c:331), as its reference does (white box).
+    # Through 1.1.1 the hinted advance stayed negative, which FreeType never answers (1.1.2 audit).
+    opts_reset();
+    o_bigneg = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    check(rekha_advance_width(g_f, 0), 0);
+    var hm: i64[2];
+    check(rekha_hint_hmetrics(g_f, 0, &hm), 1);
+    check(load64(&hm), 500 - 2000 + 65536);
+    opts_reset();
+    o_nullivd = 1;
+    check(openf() != 0, 1);
+    check(wght(900), 1);
+    # ...as a SUCCESS with 0, not a refusal (white box: the store reader's own answer)
+    var hv = load64(g_f + 416);
+    var d: i64[1];
+    check(rekha_ivs_delta(g_f, hv + rekha_rd_u32(FB, hv + 4), load64(g_f + 424), 0, 0, &d), 1);
+    check(load64(&d), 0);
     return 0;
 }
 

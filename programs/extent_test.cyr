@@ -372,6 +372,25 @@ fn t_minlen(buf): i64 {
     check(rekha_units_per_em(f), 1000);
     check(rekha_loca_format(f), 1);
     check(span_len(f, 0), 26);                          # control: head back, the span reads
+    # ⛔ a unitsPerEm outside 16..16384 makes head unusable, as FreeType refuses the face: no upem,
+    # no loca width (1.1.2 audit; 1.1.1 scaled by it). The bounds themselves are taken.
+    put_u16(buf, 140 + 18, 15);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(f), 0);
+    check(rekha_loca_format(f), 0 - 1);
+    check(rekha_glyph_advance_px(f, 0, 16), 0);
+    put_u16(buf, 140 + 18, 16385);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(f), 0);
+    put_u16(buf, 140 + 18, 16);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(f), 16);
+    check(rekha_loca_format(f), 1);
+    put_u16(buf, 140 + 18, 16384);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_units_per_em(f), 16384);
+    put_u16(buf, 140 + 18, 1000);
+    f = rekha_font_open(buf, FONT_LEN);
     check(rekha_glyph_advance_px(f, 0, 16), 8);
 
     build(buf, 0);
@@ -419,6 +438,18 @@ fn t_hmtx(buf): i64 {
     check(rekha_advance_width(f, 3), 750);              # lsb tail: the LAST long advance, never 900
     check(rekha_advance_width(f, 99), 750);             # past numGlyphs clamps the same way
     check(rekha_advance_width(f, 0 - 1), 0);
+    check(rekha_left_side_bearing(f, 3), 900);          # the tail's one bearing
+    check(rekha_font_error(f), REKHA_OK);
+    # ⛔ ...but a BEARING has no clamp: past numGlyphs there is none, only whatever follows the tail.
+    # hmtx declared 2 B long here reaches loca's first entry, which read as gid 4's bearing with
+    # REKHA_OK through 1.1.1 (1.1.2 audit); rekha_glyf_span's refusal now.
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 16);
+    f = rekha_font_open(buf, FONT_LEN);
+    check(rekha_left_side_bearing(f, 3), 900);
+    check(rekha_left_side_bearing(f, 4), 0);
+    check(rekha_font_error(f), REKHA_ERR_OTHER);
+    slot(buf, 3, REKHA_TAG_HMTX, 266, 14);
+    f = rekha_font_open(buf, FONT_LEN);
 
     slot(buf, 3, REKHA_TAG_HMTX, 266, 12);              # exactly the three long metrics
     f = rekha_font_open(buf, FONT_LEN);

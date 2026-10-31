@@ -129,7 +129,8 @@ fn rekha_rd_i8(buf, off): i64 {
 #   +152 cmap_n      (i64 — its entry count: format 4 segCountX2 (>= 2), format 6 entryCount,
 #                     format 12/13 numGroups, format 0 256; 0 when cmap_sub is 0)
 #   +160 cmap_first  (i64 — format 6 firstCode; 0 otherwise)
-#   +168 cmap_kind   (i64 — the subtable format (0 / 4 / 6 / 12 / 13), + 0x10000 when it came from a
+#   +168 cmap_kind   (i64 — the subtable format (0 / 4 / 6 / 12 / 13), + 0x20000 for a format 4 whose
+#                     segments are UNSORTED (FreeType's linear lookup, 1.1.2), + 0x10000 when it came from a
 #                     (3,0) SYMBOL record, whose lookups also try U+F000 + cp; 0 when cmap_sub is 0)
 #   ---- CFF (cff.cyr) — all 0 unless sfntVersion is 'OTTO' and the 'CFF ' table resolves ----
 #   +176 cff_cs      (i64 — absolute offset of the CharStrings INDEX; 0 = no usable CFF outlines)
@@ -356,8 +357,15 @@ fn rekha_font_resolve(f): i64 {
     var head = rekha_find_table_len(f, REKHA_TAG_HEAD, &c);
     if (head != 0) {
         if (load64(&c) >= 54) {
-            upem = rekha_rd_u16(buf, head + 18);
-            lfmt = rekha_rd_u16(buf, head + 50);
+            # ⛔ A unitsPerEm outside the spec's 16..16384 makes the head UNUSABLE, as an absent or
+            # short one is: FreeType refuses the face (sfobjs.c:913-919), and through 1.1.1 rekha
+            # scaled by it — upem 1 put a 16 px advance at 8,160 px (1.1.2 audit). No host face
+            # (2,155) is outside the range.
+            var u = rekha_rd_u16(buf, head + 18);
+            if (u >= 16 && u <= 16384) {
+                upem = u;
+                lfmt = rekha_rd_u16(buf, head + 50);
+            }
         }
     }
     store64(f + 40, upem);
@@ -531,7 +539,8 @@ fn rekha_fail_outline(font, code, detail): i64 {
 
 # @public — head.unitsPerEm (u16 at head+18) — the em-square size; glyph coords are in these
 # design units and the consumer scales by pixel_size / unitsPerEm.
-# Returns 0 if the handle is 0 or head is absent / shorter than 54 B.
+# Returns 0 if the handle is 0 or head is absent / shorter than 54 B, or (since 1.1.2) its
+# unitsPerEm is outside 16..16384 — such a head is unusable, as FreeType refuses the face.
 public fn rekha_units_per_em(font): i64 {
     if (font == 0) { return 0; }
     return load64(font + 40);
@@ -710,6 +719,9 @@ public fn rekha_left_side_bearing(font, gid): i64 {
     # no glyph id exceeds a u16; past 2^62 the offset wrapped negative and passed the length check —
     # a read before the table, or a fault (1.1.2 audit). The read would pass hmtx, so: TRUNCATED.
     if (gid > 65535) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "hmtx"); }
+    # past numGlyphs there is no bearing, only hmtx's padding: rekha_glyf_span's refusal (1.1.2 audit)
+    var ng = load64(font + 56);
+    if (ng > 0 && gid >= ng) { return rekha_fail(font, REKHA_ERR_OTHER, "glyph id"); }
     var at = gid * 4 + 2;
     if (gid >= nhm) { at = nhm * 4 + (gid - nhm) * 2; }
     if (at + 2 > load64(font + 120)) { return rekha_fail(font, REKHA_ERR_TRUNCATED, "hmtx"); }

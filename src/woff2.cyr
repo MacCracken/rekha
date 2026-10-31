@@ -58,7 +58,11 @@
 # ⚠ ALLOCATION: two, where WOFF 1.0 needed one, and the second is unavoidable — the inflated table
 # data must exist somewhere before it can be reconstructed. rekha_font_open_woff2 takes
 # sd_alloc(inflated block) + sd_alloc(SFNT) + the RekhaFont, and the block is scratch that is never
-# freed (rekha's seam has no free). Open a WOFF2 once, outside a per-frame hook.
+# freed (rekha's seam has no free). So is the decoder's own scratch: each of the four steps builds
+# its parse context (rekha_w2_ctx: 80 B + 72 B per table + a 32 B face record + an index of 8 B per
+# table; a collection's is 32 B per face and a 65,536 B index), and two 160 B GST blocks. MEASURED
+# for the embedded face, null transform: 21 blocks, 828,994 B (1.1.2 audit; this header named only
+# the first three through 1.1.1). Open a WOFF2 once, outside a per-frame hook.
 
 var REKHA_WOFF2_SIG       = 0x774F4632;   # 'wOF2'
 var REKHA_WOFF2_HDR_LEN   = 48;

@@ -224,6 +224,42 @@ fn t_odd_segc(buf): i64 {
     return 0;
 }
 
+# ── B1) UNSORTED SEGMENTS: FreeType's linear lookup ──────────────────
+fn t_unsorted(buf): i64 {
+    g_group = "B1 unsorted format 4";
+    base(buf, 100, 12 + 16 + 4 * 8);
+    hdr(buf, 1);
+    rec(buf, 0, 3, 1, 12);
+    var s = CM + 12;
+    f4_hdr(buf, s, 4);
+    # 'A'..'B', then 'C'..'Z' — and a NESTED 'D'..'E' after it, whose end runs backwards
+    f4_seg(buf, s, 4, 0, 0x41, 0x42, 0 - 64, 0);      # -> 1, 2
+    f4_seg(buf, s, 4, 1, 0x43, 0x5A, 0 - 60, 0);      # 'C' -> 7 ... 'P' -> 20
+    f4_seg(buf, s, 4, 2, 0x44, 0x45, 0 - 40, 0);      # never reached: 'D' is the wide one's
+    f4_seg(buf, s, 4, 3, 0xFFFF, 0xFFFF, 1, 0);
+    var f = opn(buf);
+    # ⛔ the binary search over endCode lands past 'C'..'Z' for 'P' and answered .notdef with
+    # REKHA_OK through 1.1.1; FreeType flags the table UNSORTED and scans it in order (1.1.2 audit)
+    check(rekha_char_to_glyph(f, 0x50), 20);
+    check(rekha_char_to_glyph(f, 0x44), 8);           # the first segment holding it, in order
+    check(rekha_char_to_glyph(f, 0x41), 1);
+    check(rekha_char_to_glyph(f, 0x5B), 0);
+    check(rekha_font_error(f), REKHA_OK);
+    # control: the nested segment removed, the table is sorted and the fast path answers the same
+    f4_seg(buf, s, 4, 2, 0x5B, 0x5C, 0 - 40, 0);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x50), 20);
+    check(rekha_char_to_glyph(f, 0x5B), 51);
+    # ...and FreeType's scan STOPS at the first segment starting past cp: 'G' sits in the third
+    # segment, but the second starts at 'P', so 'G' is .notdef there — rekha answers the same
+    f4_seg(buf, s, 4, 1, 0x50, 0x5A, 0 - 60, 0);
+    f4_seg(buf, s, 4, 2, 0x44, 0x48, 0 - 40, 0);
+    f = opn(buf);
+    check(rekha_char_to_glyph(f, 0x47), 0);
+    check(rekha_char_to_glyph(f, 0x52), 22);
+    return 0;
+}
+
 # ── B) THE glyphIdArray INDEX IS BOUNDED BY THE cmap EXTENT ─────────────
 fn t_gia_extent(buf): i64 {
     g_group = "B glyphIdArray extent";
@@ -717,6 +753,7 @@ fn main(): i64 {
     var buf = alloc(BUF_LEN);
     t_range(buf);
     t_odd_segc(buf);
+    t_unsorted(buf);
     t_gia_extent(buf);
     t_select(buf);
     t_symbol(buf);

@@ -73,13 +73,15 @@ public var REKHA_OUTLINE_SIZE = 48;
 # @public — the six readers of a RekhaOutline. `end_pts` is i64[n_contours], each the LAST point
 # index of its contour, strictly increasing and below n_points (rekha_load_glyph refuses otherwise);
 # `xs` / `ys` are i64[n_points] in design units — F26Dot6 for a hinted view; `on_curve` is one byte
-# a point: bit 0 on-curve, bit 1 a CUBIC control (CFF), and for a hinted view REKHA_TAG_*.
-public fn rekha_outline_n_contours(o): i64 { return load64(o); }
-public fn rekha_outline_n_points(o): i64   { return load64(o + 8); }
-public fn rekha_outline_end_pts(o): i64    { return load64(o + 16); }
-public fn rekha_outline_xs(o): i64         { return load64(o + 24); }
-public fn rekha_outline_ys(o): i64         { return load64(o + 32); }
-public fn rekha_outline_on_curve(o): i64   { return load64(o + 40); }
+# a point: bit 0 on-curve, bit 1 a CUBIC control (CFF); a hinted view carries bit 0 alone (its
+# touch bits are rekha_hint_point's). Each answers 0 for the 0 outline — rekha_load_glyph's OOM
+# answer and rekha_hint_outline's "no glyph" — which faulted through 1.1.1 (1.1.2 audit).
+public fn rekha_outline_n_contours(o): i64 { if (o == 0) { return 0; } return load64(o); }
+public fn rekha_outline_n_points(o): i64   { if (o == 0) { return 0; } return load64(o + 8); }
+public fn rekha_outline_end_pts(o): i64    { if (o == 0) { return 0; } return load64(o + 16); }
+public fn rekha_outline_xs(o): i64         { if (o == 0) { return 0; } return load64(o + 24); }
+public fn rekha_outline_ys(o): i64         { if (o == 0) { return 0; } return load64(o + 32); }
+public fn rekha_outline_on_curve(o): i64   { if (o == 0) { return 0; } return load64(o + 40); }
 
 # Zero an outline record in place, making it a valid empty outline. Returns `o`. A loader that
 # finds malformed data AFTER carving its block returns the block this way rather than allocating
@@ -111,7 +113,13 @@ fn rekha_outline_empty(): i64 {
 #                               composite whose children sum to more, is REJECTED (empty) — never
 #                               clamped, since a clamped point array under unclamped end_pts is an
 #                               out-of-bounds read at emit.
-#   REKHA_COMPOSITE_MAXC        contours in one composite outline (rejected past it, as above).
+#   REKHA_COMPOSITE_MAXC        contours in one outline, every loader: the point cap's value, since
+#                               a contour holds at least one point (glyf endPts strictly increase,
+#                               CFF drops a moveto-only contour), so the point cap trips first.
+#                               Through 1.1.1 it was 128 and only the unhinted composite merge
+#                               applied it — simple, CFF and hinted outlines went past it, and real
+#                               fonts do: 132 contours in Nerd Fonts' U+E7DC, 185 in 3270's U+1FB90
+#                               (1.1.2 audit; 2,116 of the host's 2,155 faces).
 #   REKHA_COMPOSITE_MAXDEPTH    component nesting; depth 0 is the glyph asked for.
 #   REKHA_GLYPH_MAXLOADS        glyph loads per rekha_load_glyph, the root included.
 #   REKHA_GLYPH_MAXPOINTS_TOTAL points decoded across the whole load: every simple glyph's np plus
@@ -123,7 +131,7 @@ fn rekha_outline_empty(): i64 {
 # that already sits on its own component stack.
 # ================================================================
 var REKHA_COMPOSITE_MAXP        = 4096;
-var REKHA_COMPOSITE_MAXC        = 128;
+var REKHA_COMPOSITE_MAXC        = 4096;
 var REKHA_COMPOSITE_MAXDEPTH    = 5;
 var REKHA_GLYPH_MAXLOADS        = 64;
 var REKHA_GLYPH_MAXPOINTS_TOTAL = 16384;
@@ -349,7 +357,10 @@ fn rekha_load_simple(font, gid, start, end, nc, ctx): i64 {
     # gvar, this is one load and a return (0.4.12).
     # -1: the gvar scratch was refused. That is OOM — rekha_load_glyph's 0 — never the default
     # instance drawn in the varied one's place (1.1.2 audit).
-    if (rekha_gvar_apply(font, gid, xs, ys, np, nc, end_pts) < 0) { return 0; }
+    # -2: the load's gvar work budget ran out (rekha_gvar_apply_n set OOM "gvar budget"): empty.
+    var gv = rekha_gvar_apply(font, gid, xs, ys, np, nc, end_pts);
+    if (gv == 0 - 1) { return 0; }
+    if (gv < 0) { return rekha_outline_clear(o); }
 
     store64(o, nc);
     store64(o + 8, np);
@@ -473,10 +484,15 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
         store64(comps + k * 8, co);
         tot_pts = tot_pts + rekha_outline_n_points(co);
         tot_ctr = tot_ctr + rekha_outline_n_contours(co);
+        # Refused as soon as the sum passes the cap, not after every later child has been decoded
+        # and varied only to be thrown away (1.1.2 audit: four 4,096-point children cost 4x).
+        if (tot_pts > REKHA_COMPOSITE_MAXP) { return rekha_fail_outline(font, REKHA_ERR_OOM, "point cap"); }
         k = k + 1;
     }
     if (tot_ctr == 0) { return rekha_outline_empty(); }   # ⚠ every component was blank: not an error
     if (tot_pts > REKHA_COMPOSITE_MAXP) { return rekha_fail_outline(font, REKHA_ERR_OOM, "point cap"); }
+    # implied by the point cap above (a child's contours never outnumber its points); kept so the
+    # merge does not lean on that
     if (tot_ctr > REKHA_COMPOSITE_MAXC) { return rekha_fail_outline(font, REKHA_ERR_OOM, "contour cap"); }
     var pts_left = load64(ctx + 8) - tot_pts;
     if (pts_left < 0) { return rekha_load_abort(ctx); }
@@ -498,7 +514,9 @@ fn rekha_load_composite(font, gid, start, end, depth, ctx): i64 {
                 store64(cdx + zc * 8, 0);
                 zc = zc + 1;
             }
-            if (rekha_gvar_apply(font, gid, cdx, cdy, n, 0, 0) < 0) { return 0; }   # OOM, as above
+            var cgv = rekha_gvar_apply(font, gid, cdx, cdy, n, 0, 0);
+            if (cgv == 0 - 1) { return 0; }                                     # OOM, as above
+            if (cgv < 0) { return rekha_outline_empty(); }                      # "gvar budget"
         }
     }
 
@@ -637,6 +655,7 @@ public fn rekha_load_glyph(font, gid): i64 {
     # empty outline either way — changing that would break every caller — but now
     # `rekha_font_error` says which, and REKHA_OK means the blank was real.
     rekha_font_error_clear(font);
+    rekha_gvar_budget_reset(font);
     var ctx: i64[9];
     store64(&ctx, REKHA_GLYPH_MAXLOADS);
     store64(&ctx + 8, REKHA_GLYPH_MAXPOINTS_TOTAL);
@@ -872,14 +891,16 @@ public fn rekha_outline_to_sdpath(outline, scale, ox, oy): i64 {
 }
 
 # @public — load glyph `gid` and convert it to a positioned sadish SdPath
-# (an empty path when the glyph loads empty or its load hits OOM).
+# (an empty path when the glyph loads empty; 0 when its load hits OOM).
 # ⛔ THIS USED TO SWALLOW THE ONE UNAMBIGUOUS SIGNAL IN THE GLYPH PATH. rekha_load_glyph returns 0
 # — never an outline — when the allocator refuses, and handing that 0 to rekha_outline_to_sdpath
 # turned it into the same empty path a blank glyph gives. It does not any more: the 0 is checked,
 # the reason its callee recorded stands, and only a path allocation that fails after a good outline
-# sets one of its own.
+# sets one of its own. (Through 1.1.1 this header said so and the code did not check: the 0 went
+# through, and an outline OOM came back as an empty path — 1.1.2 audit.)
 public fn rekha_glyph_to_sdpath(font, gid, scale, ox, oy): i64 {
     var o = rekha_load_glyph(font, gid);
+    if (o == 0) { return 0; }                     # OOM: rekha_load_glyph's code stands
     var p = rekha_outline_to_sdpath(o, scale, ox, oy);
     # ⚠ Only when the callee did not already say something better: a refused GLYPH is a more useful
     # answer than "the path allocation that followed it also gave nothing".

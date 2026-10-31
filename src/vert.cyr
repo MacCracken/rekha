@@ -83,8 +83,17 @@ fn rekha_vert_resolve(f): i64 {
     if (vv != 0) {
         if (load64(&c) >= 24) {
             if (rekha_rd_u16(buf, vv) == 1) {
-                store64(f + 656, vv);
-                store64(f + 664, vv + load64(&c));
+                # HVAR's rule (src/hvar.cyr rekha_hvar_resolve, 1.1.2): only a store FreeType would
+                # load, and an advance-height map that resolves against it, make VVAR the source
+                var vend = vv + load64(&c);
+                var vivs = vv + rekha_rd_u32(buf, vv + 4);
+                var amap = rekha_rd_u32(buf, vv + 8);
+                var ok = rekha_ivs_ok(f, vivs, vend);
+                if (ok != 0 && amap != 0) { ok = rekha_dsim_ok(f, vv + amap, vend, vivs); }
+                if (ok != 0) {
+                    store64(f + 656, vv);
+                    store64(f + 664, vend);
+                }
             }
         }
     }
@@ -186,6 +195,9 @@ public fn rekha_top_side_bearing(font, gid): i64 {
     # no glyph id exceeds a u16 — and past 2^62 the offset below wraps negative and the length check
     # passes, a read before the table or a fault (1.1.2 audit)
     if (gid > 65535) { return 0; }
+    # past numGlyphs there is no bearing, only vmtx's padding (rekha_left_side_bearing's rule)
+    var ng = load64(font + 56);
+    if (ng > 0 && gid >= ng) { return 0; }
     var at = 0;
     if (gid < nvm) {
         at = gid * 4 + 2;

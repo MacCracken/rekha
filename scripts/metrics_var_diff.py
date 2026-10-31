@@ -195,7 +195,7 @@ def build_fvar():
 
 def build_name():
     """A minimal name table — fontTools' instancer prunes unused names and wants one to prune.
-    ⚠ rekha does not read `name` either (roadmap, 0.6.x); this is scaffolding for the reference."""
+    rekha reads `name` (0.6.2) but nothing here depends on it: this is scaffolding for the reference."""
     recs = [(3, 1, 0x409, i, "R") for i in (1, 2, 256, 257)]
     hdr = struct.pack(">HHH", 0, len(recs), 6 + 12 * len(recs))
     data, body = b"", b""

@@ -24,8 +24,9 @@ CI, not an aspiration:
   their own table; every outline's `end_pts` strictly increase and stay below `n_points`
   (`src/sfnt.cyr`, "Font files are untrusted input"; CHANGELOG 0.3.11). A lying `loca`, a
   short `hmtx`, an offset past `len` answer nothing, with the reason on the handle.
-- **Caps are refusals, and a composite's cap is a budget.** 4,096 points / 128 contours per
-  outline, 64 glyph loads / 16,384 decoded points per `rekha_load_glyph`, nesting depth 5, no
+- **Caps are refusals, and a composite's cap is a budget.** 4,096 points / 4,096 contours per
+  outline in every loader, 64 glyph loads / 16,384 decoded points / 2,099,200 `gvar`
+  point-passes (512 tuples x 4,100 points) per `rekha_load_glyph`, nesting depth 5, no
   cycles; the hint machine takes at most 8,192 stack / storage slots, 4,096 functions, 256
   instruction defs, 16,384 control values, 4,096 zone points, and runs at most 1,000,000
   instructions per program at a `CALL` depth of 64; a WOFF may inflate at most 1,032:1, a

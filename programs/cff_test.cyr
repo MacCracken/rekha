@@ -1182,17 +1182,24 @@ fn t_kills(): i64 {
     i = 0;
     while (i < 48) { cs_n(1); i = i + 1; }
     cs_op(1); draw(); cs_op(14); tab_add(cs);
-    # 6 70,002 operators of hstem before a contour; 7: 63,000 of them
+    # 6 70,002 operators of hstem after a contour; 7: 63,000 of them. AFTER, because the stem list
+    # closes at the first moveto (1.1.2): there they are ignored stems that still cost operators,
+    # where before it 21,000 stems would be refused past Type 2's 96, budget or no budget.
     cs_reset();
+    draw();
     i = 0;
     while (i < 23334) { cs_n(1); cs_n(1); cs_op(1); i = i + 1; }
-    draw(); cs_op(14); tab_add(cs);
+    cs_op(14); tab_add(cs);
     cs_reset();
+    draw();
     i = 0;
     while (i < 21000) { cs_n(1); cs_n(1); cs_op(1); i = i + 1; }
-    draw(); cs_op(14); tab_add(cs);
-    # 8 a subroutine whose hint mask runs past its end, then the caller draws (local 0)
-    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
+    cs_op(14); tab_add(cs);
+    # 8 a subroutine whose hint mask runs past its end, then the caller draws (local 0). The stem
+    # is the caller's, BEFORE its moveto: one declared after would be ignored, and a mask over no
+    # stems reads no bytes (FreeType's rule, and rekha's since 1.1.2).
+    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10);
+    cs_n(5); cs_n(0); cs_op(5); cs_op(14);
     tab_add(cs);
     # 9 vvcurveto with dx1 over TWO curves
     cs_reset(); cs_n(0); cs_n(0); cs_op(21);
@@ -1212,7 +1219,7 @@ fn t_kills(): i64 {
     cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(12 - 107); cs_op(10); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
     tab_add(cs);
     # locals: 0 = hint mask past its end; 1..10 call the next; 11 = leaf draw; 12 = "return", 13 = leaf
-    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_op(19); tab_add(ls);
+    cs_reset(); cs_op(19); tab_add(ls);
     i = 1;
     while (i <= 10) { cs_reset(); cs_n(i + 1 - 107); cs_op(10); cs_op(11); tab_add(ls); i = i + 1; }
     cs_reset(); cs_n(5); cs_n(0); cs_op(5); cs_op(11); tab_add(ls);
@@ -1347,6 +1354,9 @@ fn ends2(e0, e1): i64 {
 
 # mode: the o_charset value. bch / ach: the seac's codes. width: prepend a width argument.
 # nested: make glyph 1 a seac too. Returns the loaded glyph 3's point count.
+# 1 = seac's ady as a 255-form 16.16 (a coordinate: allowed), 2 = its accent code so (refused)
+var g_seac_fx = 0;
+
 fn seac_load(mode, bch, ach, width, nested): i64 {
     var cs = tab_new();
     var gs = tab_new();
@@ -1362,7 +1372,11 @@ fn seac_load(mode, bch, ach, width, nested): i64 {
     cs_reset(); cs_n(1); cs_n(2); cs_op(21); cs_n(3); cs_n(0); cs_op(5); cs_op(14); tab_add(cs);
     cs_reset();                                                      # 3 the seac
     if (width != 0) { cs_n(500); }
-    cs_n(100); cs_n(200); cs_n(bch); cs_n(ach); cs_op(14); tab_add(cs);
+    cs_n(100);
+    if ((g_seac_fx & 1) != 0) { cs_fixed(200 * 65536); } else { cs_n(200); }
+    cs_n(bch);
+    if ((g_seac_fx & 2) != 0) { cs_fixed(ach * 65536); } else { cs_n(ach); }
+    cs_op(14); tab_add(cs);
     store64(g_sidb + 8, 34);
     store64(g_sidb + 16, 35);
     store64(g_sidb + 24, 36);
@@ -1408,6 +1422,18 @@ fn t_seac(): i64 {
     pt(2, 100, 200, 1);
     pt(3, 105, 200, 1);
     ends2(1, 3);
+
+    # ⛔ the codes are INTEGERS (FreeType's cf2_stack_popInt), the displacement is not: a 255-form
+    # ady composes as before — behind a width too, which shifts the operands AND their types — and
+    # a 255-form accent code refuses (1.1.2 audit; through 1.1.1 it was floored and used)
+    g_seac_fx = 1;
+    check(seac_load(10, 65, 66, 1, 0), 4);
+    seac_expect();
+    g_seac_fx = 2;
+    check(seac_load(10, 65, 66, 0, 0), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    check(seac_load(10, 65, 66, 1, 0), 0);
+    g_seac_fx = 0;
 
     # ── the refusals, each an EMPTY glyph ──
     check(seac_load(10, 128, 66, 0, 0), 0);          # bchar unassigned in Standard Encoding
@@ -1745,6 +1771,168 @@ fn t_fontmatrix(): i64 {
     return 0;
 }
 
+# ================================================================
+# L) 1.1.2 audit: the operand rules FreeType's interpreter keeps
+# ================================================================
+# pt, but reporting rather than reading past an outline a mutant left short
+fn ptl(k, x, y): i64 {
+    if (k >= rekha_outline_n_points(g_o)) {
+        check(0 - 1, k);
+        return 0;
+    }
+    check(load64(rekha_outline_xs(g_o) + k * 8), x);
+    check(load64(rekha_outline_ys(g_o) + k * 8), y);
+    return 0;
+}
+
+# an sd_alloc hook that rewrites FB at g_ev_at (3 bytes) on its first call — between the count pass
+# and the fill pass — and hands out a block from a sentinel-filled pool
+var g_ev_at = 0;
+var g_ev_armed = 0;
+var g_ev_pool = 0;
+var g_ev_n = 0;
+fn ev_hook(n): i64 {
+    if (g_ev_armed != 0) {
+        g_ev_armed = 0;
+        store8(FB + g_ev_at, 144);                      # `1 2 hstem` -> `5 0 rlineto`
+        store8(FB + g_ev_at + 1, 139);
+        store8(FB + g_ev_at + 2, 5);
+        g_ev_n = n;                                     # the outline block: the one that is bounded
+        return g_ev_pool;
+    }
+    return alloc(n);                                    # anything after it lives elsewhere
+}
+
+fn find6(b0, b1, b2, b3, b4, b5, len): i64 {
+    var i = 0;
+    while (i + 6 <= len) {
+        if (load8(FB + i) == b0 && load8(FB + i + 1) == b1 && load8(FB + i + 2) == b2) {
+            if (load8(FB + i + 3) == b3 && load8(FB + i + 4) == b4 && load8(FB + i + 5) == b5) {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn t_audit112(): i64 {
+    g_group = "L 1.1.2 operands";
+    var cs = tab_new();
+    var gs = tab_new();
+    var ls = tab_new();
+    var i = 0;
+    # 0 a moveto's surplus is read from the TOP, as FreeType pops it: the width is already gone
+    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_n(9); cs_n(9); cs_n(30); cs_n(40); cs_op(21);
+    cs_n(5); cs_n(0); cs_op(5); cs_op(14); tab_add(cs);
+    # 1 hmoveto, 2 vmoveto, the same
+    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_n(9); cs_n(30); cs_op(22); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
+    tab_add(cs);
+    cs_reset(); cs_n(1); cs_n(2); cs_op(1); cs_n(9); cs_n(30); cs_op(4); cs_n(5); cs_n(0); cs_op(5); cs_op(14);
+    tab_add(cs);
+    # 3 eight stems, a moveto, a LATE stem, then a hintmask: one mask byte (the late stem is not
+    # in the list), then a line
+    cs_reset();
+    i = 0;
+    while (i < 16) { cs_n(1); i = i + 1; }
+    cs_op(1); cs_n(0); cs_n(0); cs_op(21); cs_n(1); cs_n(2); cs_op(1); cs_op(19); cs_b(255);
+    cs_n(5); cs_n(0); cs_op(5); cs_op(14); tab_add(cs);
+    # 4 97 stems before the first moveto, 5 exactly 96
+    cs_reset();
+    i = 0;
+    while (i < 4) {
+        var j = 0;
+        while (j < 48) { cs_n(1); j = j + 1; }
+        cs_op(1);
+        i = i + 1;
+    }
+    cs_n(1); cs_n(1); cs_op(1); draw(); cs_op(14); tab_add(cs);
+    cs_reset();
+    i = 0;
+    while (i < 4) {
+        var j2 = 0;
+        while (j2 < 48) { cs_n(1); j2 = j2 + 1; }
+        cs_op(1);
+        i = i + 1;
+    }
+    draw(); cs_op(14); tab_add(cs);
+    # 6 a hintmask with stems of its own after the mask is in force
+    cs_reset(); draw(); cs_n(1); cs_n(2); cs_op(19); cs_b(255); cs_op(14); tab_add(cs);
+    # 7 / 8 / 9 endchar with 2, 3 and 6 operands after the width
+    cs_reset(); draw(); cs_n(1); cs_n(2); cs_op(14); tab_add(cs);
+    cs_reset(); draw(); cs_n(1); cs_n(2); cs_n(3); cs_op(14); tab_add(cs);
+    cs_reset(); draw(); cs_n(1); cs_n(2); cs_n(3); cs_n(4); cs_n(5); cs_n(6); cs_op(14); tab_add(cs);
+    # 10 a lone width and endchar: a blank, not a refusal
+    cs_reset(); cs_n(300); cs_op(14); tab_add(cs);
+    # 11 callsubr whose number is a 255-form 16.16; 12 the same number as an integer
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_fixed((0 - 107) * 65536); cs_op(10); cs_op(14); tab_add(cs);
+    cs_reset(); cs_n(0); cs_n(0); cs_op(21); cs_n(0 - 107); cs_op(10); cs_op(14); tab_add(cs);
+    # 13 seac whose accent code is a 255-form 16.16
+    cs_reset(); cs_n(0); cs_n(0); cs_n(65); cs_fixed(66 * 65536); cs_op(14); tab_add(cs);
+    # 14 a line, then a late stem the fill-pass hook turns into a SECOND line
+    cs_reset(); draw(); cs_n(1); cs_n(2); cs_op(1); cs_op(14); tab_add(cs);
+    # local 0: a line
+    cs_reset(); cs_n(5); cs_n(0); cs_op(5); cs_op(11); tab_add(ls);
+    var len = open_h(cs, gs, ls);
+
+    # ⛔ through 1.1.1 the BOTTOM two were drawn — (9, 9) — where FreeType pops the top
+    check(load(0), 2);
+    ptl(0, 30, 40);
+    ptl(1, 35, 40);
+    check(load(1), 2);
+    ptl(0, 30, 0);
+    check(load(2), 2);
+    ptl(0, 0, 30);
+    # ⛔ the stem list closes at the first moveto: a late stem is IGNORED (FreeType's rule), so the
+    # mask is one byte, not two — through 1.1.1 rekha counted nine and read the line as mask bytes
+    check(load(3), 2);
+    ptl(1, 5, 0);
+    check(rekha_font_error(g_f), REKHA_OK);
+    empty(4);                                           # past Type 2's 96, as FreeType refuses
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    check(load(5), 2);
+    empty(6);                                           # FreeType would read no mask bytes here
+    empty(7);                                           # endchar: nothing, or seac's four
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    empty(8);
+    empty(9);
+    check(load(10), 0);
+    check(rekha_font_error(g_f), REKHA_OK);             # a real blank
+    empty(11);                                          # an INTEGER operand, encoded as a Fixed
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    check(load(12), 2);
+    empty(13);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    check(load(14), 2);                                 # the late stem is ignored
+
+    # ⛔ THE FILL PASS IS BOUNDED BY THE BLOCK. A hook rewrites glyph 14's late stem into a second
+    # line between the passes; pass 2 then has a third point for a block sized for two, and is
+    # refused at the cap — no byte past the block is written (1.1.2 audit; glyf's 0.3.11 twin).
+    g_ev_at = find6(144, 139, 5, 140, 141, 1, len) + 3;
+    check(g_ev_at > 3, 1);
+    g_ev_pool = alloc(4096);
+    memset(g_ev_pool, 0xEE, 4096);
+    g_ev_armed = 1;
+    sd_alloc_set(&ev_hook);
+    g_o = rekha_load_glyph(g_f, 14);
+    sd_alloc_set(0);
+    check(g_o, g_ev_pool + 0);                          # the block came back cleared, not drawn
+    check(rekha_outline_n_points(g_o), 0);
+    check(rekha_font_error(g_f), REKHA_ERR_BAD_GLYF);
+    var bad = 0;
+    i = g_ev_n;
+    while (i < 4096) {
+        if (load8(g_ev_pool + i) != 0xEE) { bad = bad + 1; }
+        i = i + 1;
+    }
+    check(bad, 0);
+    store8(FB + g_ev_at, 140);                          # put the stem back
+    store8(FB + g_ev_at + 1, 141);
+    store8(FB + g_ev_at + 2, 1);
+    check(load(14), 2);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     FB = alloc(FB_CAP + GUARD);
@@ -1774,6 +1962,7 @@ fn main(): i64 {
     t_seac();
     t_scaled();
     t_fontmatrix();
+    t_audit112();
     if (g_fails == 0) {
         var ok = "cff_test: PASS (Type 2 ops, refusals, CID, resolve, cubic, seac, guard, upem, FontMatrix; ";
         syscall(1, 1, ok, strlen(ok));
